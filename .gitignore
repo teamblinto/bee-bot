@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+*.log
+*.tsbuildinfo
+apps/*/dist
+dist-electron/
+release/
+.tanstack
+.vitest-*
+.idea/
+.env*
+!.env.example

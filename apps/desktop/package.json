@@ -1,0 +1,21 @@
+{
+  "name": "@beebot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bee Bot desktop app",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "start": "node scripts/start-electron.mjs",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:linux": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "electron": "45.2.2",
+    "electron-builder": "26.18.0",
+    "vite-plus": "catalog:"
+  },
+  "productName": "Bee Bot"
+}

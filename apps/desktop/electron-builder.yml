@@ -1,0 +1,14 @@
+appId: com.teamblinto.beebot
+productName: Bee Bot
+extraMetadata:
+  name: bee-bot
+artifactName: Bee-Bot-${version}-${arch}.${ext}
+npmRebuild: false
+directories:
+  output: release
+files:
+  - dist-electron/**
+  - from: ../web/dist
+    to: web
+win:
+  target: nsis
