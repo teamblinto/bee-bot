@@ -7,7 +7,9 @@ Fight scope creep. Do not introduce machinery because it looks impressive; under
 ## Where code lives
 
 - `apps/web` - React/Vite UI, TanStack Router, Tailwind.
-- `apps/desktop` - Electron shell that loads the web app.
+- `apps/desktop` - Electron shell that loads the web app and supervises the server.
+- `apps/server` - headless `beebotd`: SQLite, HTTP, WebSocket. Never imports `electron`.
+- `packages/contracts` - Zod schemas and `protocolVersion`, shared by all three apps.
 - `scripts/dev-runner.ts` - sets up the environment for `pnpm dev:desktop`.
 
 ## Commands

@@ -14,7 +14,7 @@ const host = "127.0.0.1";
 const port = process.env.PORT ?? "5833";
 
 const child = NodeChildProcess.spawn(
-  "vp run --filter=@beebot/desktop --filter=@beebot/web --parallel dev",
+  "vp run --filter=@beebot/desktop --filter=@beebot/server --filter=@beebot/web --parallel dev",
   {
     cwd: repoRoot,
     stdio: "inherit",

@@ -12,6 +12,7 @@
     "dist:linux": "electron-builder --linux AppImage"
   },
   "devDependencies": {
+    "@beebot/contracts": "workspace:*",
     "@types/node": "catalog:",
     "electron": "45.2.2",
     "electron-builder": "26.18.0",

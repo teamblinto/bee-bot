@@ -8,6 +8,8 @@ directories:
   output: release
 files:
   - dist-electron/**
+  - from: ../server/dist
+    to: server
   - from: ../web/dist
     to: web
 win:

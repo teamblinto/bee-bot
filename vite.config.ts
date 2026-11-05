@@ -70,5 +70,25 @@ export default defineConfig({
       "eslint/no-await-in-loop": "off",
       "eslint/no-underscore-dangle": "off",
     },
+    overrides: [
+      {
+        files: ["apps/server/**"],
+        rules: {
+          // ES modules have no require, and it would slip past the import rule below.
+          "eslint/no-restricted-globals": ["error", "require"],
+          "eslint/no-restricted-imports": [
+            "error",
+            {
+              patterns: [
+                {
+                  group: ["electron", "electron/*"],
+                  message: "apps/server must run headless, without Electron.",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
   },
 });
