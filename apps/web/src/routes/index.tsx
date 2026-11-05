@@ -25,7 +25,7 @@ const reasonLabels: Record<RunReason, string> = {
   daily_cap: "Refused: this bot reached its daily run cap.",
   engine_failed: "Failed: the engine could not finish this turn. Send again to retry.",
   limited: "Limited: the account hit a limit. This retries when it clears, unless stopped.",
-  auth_failed: "Failed: the engine login was refused, so this bot was paused.",
+  auth_failed: "Failed: the engine could not be verified, so this bot was paused.",
   timeout: "Failed: the turn ran past its time limit. Send again to retry.",
   stopped: "Stopped.",
   server_restarted: "Interrupted: the server restarted during this turn. Nothing was repeated.",
@@ -33,7 +33,11 @@ const reasonLabels: Record<RunReason, string> = {
 
 const pauseLabels: Record<NonNullable<Bot["pauseReason"]>, string> = {
   owner: "Paused",
-  auth_failed: "Paused: login failed",
+  auth_failed: "Paused: Claude login could not be verified. Log in with the CLI, then Resume.",
+  cli_missing: "Paused: the Claude CLI was not found. Install it, then Resume.",
+  cli_version: "Paused: this Claude CLI version is untested. Install 2.1.318, then Resume.",
+  config_dir:
+    "Paused: CLAUDE_CONFIG_DIR is set, and Bee Bot ignores it, so Claude looks logged out. Log in to the default config, then Resume.",
 };
 
 const buttonClass = "rounded border border-neutral-300 px-2 py-1 text-sm disabled:opacity-50";
@@ -84,10 +88,11 @@ function BotFields({
 function CreateBotForm({ onCreated }: { onCreated: (bot: Bot) => void }) {
   const [name, setName] = useState("");
   const [personality, setPersonality] = useState("");
+  const [engine, setEngine] = useState<"claude" | "fake">("claude");
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const bot = await createBot(name, personality);
+    const bot = await createBot(name, personality, engine);
     if (bot) {
       setName("");
       setPersonality("");
@@ -103,6 +108,19 @@ function CreateBotForm({ onCreated }: { onCreated: (bot: Bot) => void }) {
         onName={setName}
         onPersonality={setPersonality}
       />
+      {import.meta.env.DEV && (
+        <label className="flex flex-col gap-1 text-sm">
+          Engine
+          <select
+            className={fieldClass}
+            value={engine}
+            onChange={(event) => setEngine(event.target.value === "fake" ? "fake" : "claude")}
+          >
+            <option value="claude">Claude</option>
+            <option value="fake">Test engine</option>
+          </select>
+        </label>
+      )}
       <button type="submit" className={buttonClass} disabled={!name.trim()}>
         Create bot
       </button>
@@ -282,7 +300,7 @@ function ChatView({ bot, connection }: { bot: Bot; connection: ConnectionState }
             Stop
           </button>
         )}
-        {run?.status === "Interrupted" && (
+        {(run?.status === "Interrupted" || run?.status === "Cancelled") && (
           <button
             type="button"
             className={buttonClass}

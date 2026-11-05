@@ -27,7 +27,11 @@ function finishedRun(outcome: TurnOutcome, abortReason: unknown): FinishedRun {
     };
   }
   if (outcome.kind === "auth_failed") {
-    return { status: "Failed", reason: "auth_failed", pauseBot: true };
+    return {
+      status: "Failed",
+      reason: "auth_failed",
+      pauseBot: outcome.pauseReason ?? "auth_failed",
+    };
   }
   if (abortReason === "stop") {
     return { status: "Cancelled", reason: "stopped" };
@@ -75,13 +79,30 @@ export function createSupervisor({
   function startTurn(run: ClaimedRun) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort("timeout"), turnTimeoutMs);
-    const turn = (async () =>
+    const attempt = (prompt: string, sessionId: string, resume: boolean) =>
       runTurn({
-        prompt: run.prompt,
-        sessionId: run.sessionId,
+        prompt,
+        sessionId,
+        resume,
+        launch: run.launch,
         signal: controller.signal,
         onDelta: (text) => onDelta(run.id, text),
-      }))();
+        onDelivered: () => {
+          try {
+            store.markDelivered(run.id);
+          } catch (error) {
+            console.error(`beebotd: delivery of run ${run.id} was not recorded`, error);
+          }
+        },
+      });
+    const turn = (async () => {
+      const outcome = await attempt(run.prompt, run.sessionId, run.resume);
+      if (outcome.kind !== "session_lost" || controller.signal.aborted) {
+        return outcome;
+      }
+      const { prompt, sessionId } = store.restartSession(run.id);
+      return attempt(prompt, sessionId, false);
+    })();
     const ended = turn
       .catch((error: unknown): TurnOutcome => {
         // Engine errors can quote the prompt, so only the kind of error is logged.

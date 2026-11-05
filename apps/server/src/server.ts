@@ -19,7 +19,7 @@ import { createSupervisor } from "./supervisor.ts";
 
 const maxBodyBytes = 256 * 1024;
 
-type Options = Pick<Bootstrap, "port" | "token" | "allowedOrigins"> & {
+type Options = Pick<Bootstrap, "port" | "token" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
   runTurn?: RunTurn;
   turnTimeoutMs?: number | undefined;
@@ -78,6 +78,7 @@ export async function startServer({
   port,
   token,
   allowedOrigins,
+  fakeEngine = false,
   store,
   runTurn = fakeRunTurn,
   turnTimeoutMs,
@@ -152,8 +153,11 @@ export async function startServer({
     const attended = subscribers.size > 0;
     switch (command.type) {
       case "create-bot": {
-        const { name, personality } = command;
-        return { status: 200, body: store.createBot({ name, personality }) };
+        const { name, personality, engineAccountId = "claude" } = command;
+        if (engineAccountId === "fake" && !fakeEngine) {
+          return { status: 403, body: { code: "engine_not_allowed" } };
+        }
+        return { status: 200, body: store.createBot({ name, personality, engineAccountId }) };
       }
       case "update-bot": {
         const { botId, name, personality } = command;

@@ -66,6 +66,7 @@ async function start() {
       ),
       dataDir: NodePath.join(app.getPath("userData"), "server"),
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
+      fakeEngine: !app.isPackaged,
     });
   } catch {
     app.quit();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 2;
+export const protocolVersion = 3;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -13,15 +13,28 @@ export const Bootstrap = z.object({
   token: z.string().min(32),
   dataDir: z.string().min(1),
   allowedOrigins: z.array(z.string()),
+  // Dev and tests only: lets bots be created on the fake engine.
+  fakeEngine: z.boolean().optional(),
+  // Tests only: replaces the `claude` binary, so they never touch the real CLI.
+  claudeCommand: z.array(z.string().min(1)).min(1).optional(),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
+
+export const PauseReason = z.enum([
+  "owner",
+  "auth_failed",
+  "cli_missing",
+  "cli_version",
+  "config_dir",
+]);
+export type PauseReason = z.infer<typeof PauseReason>;
 
 export const Bot = z.object({
   id: z.string(),
   name: z.string(),
   personality: z.string(),
   status: z.enum(["ready", "paused"]),
-  pauseReason: z.enum(["owner", "auth_failed"]).nullable(),
+  pauseReason: PauseReason.nullable(),
   roomId: z.string(),
   engineAccountId: z.string(),
 });
@@ -125,7 +138,11 @@ const botFields = {
 };
 
 export const Command = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("create-bot"), ...botFields }),
+  z.object({
+    type: z.literal("create-bot"),
+    ...botFields,
+    engineAccountId: z.enum(["claude", "fake"]).optional(),
+  }),
   z.object({ type: z.literal("update-bot"), botId: z.uuid(), ...botFields }),
   z.object({ type: z.literal("set-bot-paused"), botId: z.uuid(), paused: z.boolean() }),
   z.object({

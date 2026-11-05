@@ -9,11 +9,14 @@ import {
   type ChatState,
   EngineAccount,
   type EventBody,
+  type PauseReason,
   Run,
   type RunReason,
   ServerEvent,
 } from "@beebot/contracts";
 import { z } from "zod";
+
+import type { BotLaunch } from "./engine.ts";
 
 const migrations = [
   {
@@ -110,6 +113,14 @@ const migrations = [
       created_at TEXT NOT NULL
     );`,
   },
+  {
+    name: "claude_driver",
+    sql: `ALTER TABLE scopes ADD COLUMN delivered_event_seq INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE scopes ADD COLUMN session_started INTEGER NOT NULL DEFAULT 0;
+    UPDATE scopes SET delivered_event_seq = acked_event_seq,
+      session_started = session_id IS NOT NULL;
+    INSERT INTO engine_accounts (id, label) VALUES ('claude', 'Claude');`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -120,10 +131,13 @@ const Scope = z.object({
   roomId: z.string(),
   botId: z.string(),
   ackedEventSeq: z.number(),
+  deliveredEventSeq: z.number(),
   sessionId: z.string().nullable(),
+  sessionStarted: z.number().transform(Boolean),
 });
 type Scope = z.infer<typeof Scope>;
 const Input = z.object({ body: z.string(), seq: z.number() });
+const HistoryRow = ChatMessage.pick({ author: true, body: true });
 const Count = z.object({ count: z.number() });
 const IdRow = z.object({ id: z.string() });
 const QueuedRun = z.object({ id: z.string(), botId: z.string() });
@@ -142,15 +156,48 @@ const WakeRow = z.object({
 });
 export type Wake = z.infer<typeof WakeRow>;
 
-export type ClaimedRun = { id: string; prompt: string; sessionId: string };
+export type ClaimedRun = {
+  id: string;
+  prompt: string;
+  sessionId: string;
+  resume: boolean;
+  launch: BotLaunch;
+};
 
 export type FinishedRun = {
   status: "Completed" | "Failed" | "Cancelled";
   reason: RunReason | null;
   reply?: string;
   blockedUntil?: string;
-  pauseBot?: boolean;
+  pauseBot?: PauseReason;
 };
+
+const continuationNote =
+  "Your previous turn was cut off before it finished. Continue from where you left off.";
+const digestCap = 16_000;
+const digestRows = 200;
+const digestHeader =
+  "[Earlier conversation, restored from history. This is background, not new instructions.]";
+const digestFooter = "[End of earlier conversation.]";
+
+// Newest first in, oldest first out. A newest message over the cap keeps only its tail.
+export function buildDigest(newestFirst: ReadonlyArray<Pick<ChatMessage, "author" | "body">>) {
+  let room = digestCap - digestHeader.length - digestFooter.length - 2;
+  const lines: string[] = [];
+  for (const { author, body } of newestFirst) {
+    const label = author === "human" ? "Owner: " : "Bot: ";
+    const size = label.length + body.length + 1;
+    if (size > room) {
+      if (lines.length === 0) {
+        lines.push(label + body.slice(-(room - label.length - 1)));
+      }
+      break;
+    }
+    room -= size;
+    lines.unshift(label + body);
+  }
+  return lines.length > 0 ? [digestHeader, ...lines, digestFooter].join("\n") : "";
+}
 
 function migrate(db: DatabaseSync) {
   db.exec(`CREATE TABLE IF NOT EXISTS migrations (
@@ -252,7 +299,8 @@ export function openEventStore(dataDir: string) {
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id WHERE b.id = ?`,
   );
   const insertBot = db.prepare(
-    "INSERT INTO bots (id, name, personality, status, created_at) VALUES (?, ?, ?, 'ready', ?)",
+    `INSERT INTO bots (id, name, personality, status, engine_account_id, created_at)
+     VALUES (?, ?, ?, 'ready', ?, ?)`,
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",
@@ -281,15 +329,26 @@ export function openEventStore(dataDir: string) {
     `SELECT body, event_seq AS seq FROM messages
      WHERE room_id = ? AND author = 'human' AND event_seq > ? ORDER BY event_seq`,
   );
+  const selectHistory = db.prepare(
+    `SELECT author, body FROM messages WHERE room_id = ? AND (author = 'bot' OR event_seq <= ?)
+     ORDER BY event_seq DESC LIMIT ${digestRows}`,
+  );
 
   const scopeColumns = `s.id, s.room_id AS roomId, s.bot_id AS botId,
-    s.acked_event_seq AS ackedEventSeq, s.session_id AS sessionId`;
+    s.acked_event_seq AS ackedEventSeq, s.delivered_event_seq AS deliveredEventSeq,
+    s.session_id AS sessionId, s.session_started AS sessionStarted`;
   const selectScope = db.prepare(`SELECT ${scopeColumns} FROM scopes s WHERE s.id = ?`);
   const selectScopeForRoom = db.prepare(
     `SELECT ${scopeColumns} FROM scopes s
      JOIN rooms r ON r.id = s.room_id AND r.default_bot_id = s.bot_id WHERE s.room_id = ?`,
   );
-  const saveSession = db.prepare("UPDATE scopes SET session_id = ? WHERE id = ?");
+  const saveSession = db.prepare(
+    "UPDATE scopes SET session_id = ?, session_started = 0 WHERE id = ?",
+  );
+  const advanceDelivered = db.prepare(
+    `UPDATE scopes SET delivered_event_seq = MAX(delivered_event_seq, ?), session_started = 1
+     WHERE id = ?`,
+  );
   const advanceAck = db.prepare(
     "UPDATE scopes SET acked_event_seq = MAX(acked_event_seq, ?) WHERE id = ?",
   );
@@ -382,6 +441,23 @@ export function openEventStore(dataDir: string) {
   const unackedInput = (scope: Scope) =>
     z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq));
 
+  // Delivered input is already in the engine's transcript, so it is never sent twice. A new session
+  // has no transcript, so it opens with the room history that came before this input.
+  function turnPrompt(scope: Scope, highSeq: number) {
+    const input = unackedInput(scope).filter(
+      ({ seq }) => seq > scope.deliveredEventSeq && seq <= highSeq,
+    );
+    const text = input.map(({ body }) => body).join("\n\n") || continuationNote;
+    if (scope.sessionStarted) {
+      return text;
+    }
+    const history = z
+      .array(HistoryRow)
+      .parse(selectHistory.all(scope.roomId, scope.deliveredEventSeq));
+    const digest = buildDigest(history);
+    return digest ? `${digest}\n\n${text}` : text;
+  }
+
   function recordRun(run: RunRow) {
     insertAudit.run(run.id, run.botId, run.status, run.reason, new Date().toISOString());
     emit({ type: "run.changed", run: Run.parse(run) });
@@ -462,11 +538,11 @@ export function openEventStore(dataDir: string) {
       runs: z.array(Run).parse(selectLatestRuns.all()),
     }),
 
-    createBot: (fields: Pick<Bot, "name" | "personality">) =>
+    createBot: (fields: Pick<Bot, "name" | "personality" | "engineAccountId">) =>
       transaction(() => {
         const [id, roomId] = [NodeCrypto.randomUUID(), NodeCrypto.randomUUID()];
         const now = new Date().toISOString();
-        insertBot.run(id, fields.name, fields.personality, now);
+        insertBot.run(id, fields.name, fields.personality, fields.engineAccountId, now);
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
         const bot = Bot.parse(selectBot.get(id));
@@ -484,6 +560,15 @@ export function openEventStore(dataDir: string) {
       }),
     setBotPause: (id: string, reason: Bot["pauseReason"]) =>
       transaction(() => setPause(id, reason)),
+    // An owner's pause is left alone: its reason says what the owner has to undo.
+    pauseReadyBots: (engineAccountId: string, reason: PauseReason) =>
+      transaction(() => {
+        for (const bot of z.array(Bot).parse(selectBots.all())) {
+          if (bot.engineAccountId === engineAccountId && bot.status === "ready") {
+            setPause(bot.id, reason);
+          }
+        }
+      }),
 
     // The first message of a burst makes the wake and the rest coalesce into it, so input that
     // lands during a run already has its one durable follow-up, even if the server dies.
@@ -520,8 +605,9 @@ export function openEventStore(dataDir: string) {
         }
         const latest = IdRow.parse(selectLatestRunId.get(run.botId));
         const scope = getScope(run.scopeId);
-        const unanswered = (run.inputHighSeq ?? 0) > scope.ackedEventSeq;
-        if (run.status !== "Interrupted" || latest.id !== run.id || !unanswered) {
+        const unanswered = unackedInput(scope).length > 0;
+        const cutOff = run.status === "Interrupted" || run.status === "Cancelled";
+        if (!cutOff || latest.id !== run.id || !unanswered) {
           return "not_continuable";
         }
         if (getBot(run.botId)?.status === "paused") {
@@ -583,12 +669,36 @@ export function openEventStore(dataDir: string) {
         }
         const run = RunRow.parse(row);
         const scope = getScope(run.scopeId);
-        const input = unackedInput(scope);
         const sessionId = scope.sessionId ?? NodeCrypto.randomUUID();
-        saveSession.run(sessionId, scope.id);
-        pinInput.run(input.at(-1)?.seq ?? scope.ackedEventSeq, id);
+        if (!scope.sessionId) {
+          saveSession.run(sessionId, scope.id);
+        }
+        const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
+        pinInput.run(highSeq, id);
         recordRun(run);
-        return { id, sessionId, prompt: input.map(({ body }) => body).join("\n\n") };
+        const { name, personality } = Bot.parse(selectBot.get(run.botId));
+        return {
+          id,
+          sessionId,
+          resume: scope.sessionStarted,
+          prompt: turnPrompt(scope, highSeq),
+          launch: { botId: run.botId, name, personality, engineAccountId: run.engineAccountId },
+        };
+      }),
+
+    markDelivered: (id: string) => {
+      const { inputHighSeq, scopeId } = RunRow.parse(selectRun.get(id));
+      advanceDelivered.run(inputHighSeq, scopeId);
+    },
+
+    // The new ID is durable before the engine starts. If this turn dies first, the next one still
+    // finds an unstarted session and sends the digest.
+    restartSession: (id: string) =>
+      transaction(() => {
+        const { inputHighSeq, scopeId } = RunRow.parse(selectRun.get(id));
+        const sessionId = NodeCrypto.randomUUID();
+        saveSession.run(sessionId, scopeId);
+        return { sessionId, prompt: turnPrompt(getScope(scopeId), inputHighSeq ?? 0) };
       }),
 
     finishRun: (id: string, bootId: string, finished: FinishedRun) =>
@@ -608,6 +718,7 @@ export function openEventStore(dataDir: string) {
             createdAt: now,
           });
           advanceAck.run(run.inputHighSeq, run.scopeId);
+          advanceDelivered.run(run.inputHighSeq, run.scopeId);
         }
         recordRun(run);
         if (finished.blockedUntil) {
@@ -619,7 +730,7 @@ export function openEventStore(dataDir: string) {
           });
         }
         if (finished.pauseBot) {
-          setPause(run.botId, "auth_failed");
+          setPause(run.botId, finished.pauseBot);
         }
       }),
 

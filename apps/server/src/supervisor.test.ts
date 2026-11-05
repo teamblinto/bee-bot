@@ -20,7 +20,7 @@ import { WebSocket } from "ws";
 
 import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
 import { startServer } from "./server.ts";
-import { type EventStore, openEventStore } from "./store.ts";
+import { buildDigest, type EventStore, openEventStore } from "./store.ts";
 
 const token = "t".repeat(43);
 const auth = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -41,10 +41,16 @@ afterEach(async () => {
 
 // Each turn waits until the test finishes it. An aborted turn settles with `onAbort`.
 function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
-  const turns: Array<{ prompt: string; sessionId: string; finish: (o: TurnOutcome) => void }> = [];
-  const runTurn: RunTurn = ({ prompt, sessionId, signal }) =>
+  const turns: Array<{
+    prompt: string;
+    sessionId: string;
+    resume: boolean;
+    deliver: () => void;
+    finish: (o: TurnOutcome) => void;
+  }> = [];
+  const runTurn: RunTurn = ({ prompt, sessionId, resume, signal, onDelivered }) =>
     new Promise((resolve) => {
-      turns.push({ prompt, sessionId, finish: resolve });
+      turns.push({ prompt, sessionId, resume, deliver: onDelivered, finish: resolve });
       signal.addEventListener("abort", () => resolve(onAbort));
     });
   return { turns, runTurn };
@@ -195,7 +201,7 @@ describe("sending", () => {
 
 describe("claiming", () => {
   function queueOne(store: EventStore) {
-    const bot = store.createBot({ name: "Ada", personality: "" });
+    const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
     store.sendMessage({
       id: NodeCrypto.randomUUID(),
       roomId: bot.roomId,
@@ -592,7 +598,15 @@ describe("restart", () => {
       stdio: ["pipe", "ignore", "pipe"],
     });
     cleanups.push(() => void child.kill());
-    child.stdin.write(`${JSON.stringify({ port, token, dataDir, allowedOrigins: [] })}\n`);
+    const bootstrap = {
+      port,
+      token,
+      dataDir,
+      allowedOrigins: [],
+      fakeEngine: true,
+      claudeCommand: ["beebot-no-such-cli"],
+    };
+    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
     for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
       if (line.includes("listening")) {
         break;
@@ -600,7 +614,12 @@ describe("restart", () => {
     }
 
     await connect(port).ready;
-    const created = await postCommand(port, { type: "create-bot", name: "Ada", personality: "" });
+    const created = await postCommand(port, {
+      type: "create-bot",
+      name: "Ada",
+      personality: "",
+      engineAccountId: "fake",
+    });
     const bot = (await created.json()) as Bot;
     await postCommand(port, {
       type: "send-message",
@@ -621,6 +640,262 @@ describe("restart", () => {
     await new Promise((resolve) => setTimeout(resolve, 1100));
     expect(after.turns).toEqual([]);
   }, 20_000);
+});
+
+describe("delivery", () => {
+  const note = /cut off before it finished/;
+
+  it("uses a session ID first and --resume once something was delivered", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "first");
+    await expectTurns(engine, 1);
+    expect(engine.turns[0]?.resume).toBe(false);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+
+    await send(bot, "second");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]).toMatchObject({
+      prompt: "second",
+      resume: true,
+      sessionId: engine.turns[0]?.sessionId,
+    });
+  });
+
+  it("never resends after a kill: Continue sends only the note", async () => {
+    const before = scriptedEngine();
+    const first = await boot(before.runTurn);
+    const bot = await first.createBot();
+    await first.send(bot, "hello");
+    await expectTurns(before, 1);
+    before.turns[0]?.deliver();
+    await first.stop();
+
+    const after = scriptedEngine();
+    const { store, command } = await boot(after.runTurn);
+    await expectStatus(store, bot, "Interrupted");
+    await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    await expectTurns(after, 1);
+    expect(after.turns[0]?.prompt).toMatch(note);
+    expect(after.turns[0]?.prompt).not.toContain("hello");
+    expect(after.turns[0]?.resume).toBe(true);
+    after.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    expect(ackedSeq()).toBeGreaterThan(0);
+  });
+
+  it("sends only new input after a delivered turn failed", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "first");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.deliver();
+    engine.turns[0]?.finish({ kind: "failed" });
+    await expectStatus(store, bot, "Failed");
+    await send(bot, "second");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.prompt).toBe("second");
+  });
+
+  it("still sends input that never reached the engine after a kill", async () => {
+    const before = scriptedEngine();
+    const first = await boot(before.runTurn);
+    const bot = await first.createBot();
+    await first.send(bot, "hello");
+    await expectTurns(before, 1);
+    await first.stop();
+
+    const after = scriptedEngine();
+    const { store, command } = await boot(after.runTurn);
+    await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    await expectTurns(after, 1);
+    expect(after.turns[0]).toMatchObject({ prompt: "hello", resume: false });
+  });
+
+  it("keeps a message sent mid-turn for its own turn", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "first");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.deliver();
+    await send(bot, "second");
+    engine.turns[0]?.finish(reply);
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.prompt).toBe("second");
+    engine.turns[1]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+  });
+
+  it("offers Continue after a Stop, without resending", async () => {
+    const engine = scriptedEngine();
+    const { store, command, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.deliver();
+    await command({ type: "stop-bot", botId: bot.id });
+    await expectStatus(store, bot, "Cancelled");
+
+    const response = await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    expect(response.status).toBe(200);
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.prompt).toMatch(note);
+    expect(store.state().messages.filter(({ body }) => body === "hello")).toHaveLength(1);
+  });
+});
+
+describe("a stopped queued run", () => {
+  it("can be continued, and sends its input", async () => {
+    const engine = scriptedEngine();
+    const { store, command, createBot, send } = await boot(engine.runTurn);
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    await send(ada, "busy");
+    await expectTurns(engine, 1);
+    await send(ben, "waiting");
+    await expectStatus(store, ben, "Queued");
+    await command({ type: "stop-bot", botId: ben.id });
+    await expectStatus(store, ben, "Cancelled");
+
+    const response = await command({ type: "continue-run", runId: run(store, ben)?.id ?? "" });
+    expect(response.status).toBe(200);
+    engine.turns[0]?.finish(reply);
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.prompt).toBe("waiting");
+  });
+});
+
+describe("a lost session", () => {
+  it("restarts in a new session from a labelled digest plus the undelivered input", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "my name is Ada");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+
+    await send(bot, "what is my name?");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.resume).toBe(true);
+    engine.turns[1]?.finish({ kind: "session_lost" });
+    await expectTurns(engine, 3);
+
+    const restart = engine.turns[2];
+    expect(restart?.resume).toBe(false);
+    expect(restart?.sessionId).not.toBe(engine.turns[1]?.sessionId);
+    expect(restart?.prompt).toContain("not new instructions");
+    expect(restart?.prompt).toContain("Owner: my name is Ada");
+    expect(restart?.prompt).toContain("Bot: done");
+    expect(restart?.prompt.endsWith("what is my name?")).toBe(true);
+    expect(restart?.prompt.match(/what is my name/g)).toHaveLength(1);
+    restart?.finish(reply);
+    await vi.waitFor(() => expect(store.state().messages).toHaveLength(4));
+    expect(run(store, bot)?.status).toBe("Completed");
+  });
+
+  it("sends the digest again if the restarted turn dies before delivery", async () => {
+    const before = scriptedEngine();
+    const first = await boot(before.runTurn);
+    const bot = await first.createBot();
+    await first.send(bot, "remember me");
+    await expectTurns(before, 1);
+    before.turns[0]?.finish(reply);
+    await expectStatus(first.store, bot, "Completed");
+    await first.send(bot, "hello");
+    await expectTurns(before, 2);
+    before.turns[1]?.finish({ kind: "session_lost" });
+    await expectTurns(before, 3);
+    await first.stop();
+
+    const after = scriptedEngine();
+    const { store, command } = await boot(after.runTurn);
+    await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    await expectTurns(after, 1);
+    expect(after.turns[0]).toMatchObject({ resume: false, sessionId: before.turns[2]?.sessionId });
+    expect(after.turns[0]?.prompt).toContain("Owner: remember me");
+    expect(after.turns[0]?.prompt.endsWith("hello")).toBe(true);
+  });
+
+  it("fails rather than loops if the restart loses its session too", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish({ kind: "session_lost" });
+    await expectTurns(engine, 2);
+    engine.turns[1]?.finish({ kind: "session_lost" });
+    await expectStatus(store, bot, "Failed");
+    expect(run(store, bot)?.reason).toBe("engine_failed");
+    expect(engine.turns).toHaveLength(2);
+  });
+
+  it("keeps the digest within its cap and the newest messages", () => {
+    const old = { author: "human", body: "x".repeat(9000) } as const;
+    const digest = buildDigest([{ author: "bot", body: "newest" }, old, old, old]);
+    expect(digest.length).toBeLessThanOrEqual(16_000);
+    expect(digest).toContain("Bot: newest");
+    expect(digest.match(/Owner: /g)).toHaveLength(1);
+
+    const huge = buildDigest([{ author: "human", body: `${"x".repeat(40_000)}end` }]);
+    expect(huge.length).toBeLessThanOrEqual(16_000);
+    expect(huge).toContain("end\n");
+    expect(buildDigest([])).toBe("");
+  });
+});
+
+describe("engine accounts", () => {
+  it("puts new bots on the claude account and refuses the fake one by default", async () => {
+    const { command, createBot } = await boot();
+    expect((await createBot()).engineAccountId).toBe("claude");
+    const refused = await command({
+      type: "create-bot",
+      name: "Test",
+      personality: "",
+      engineAccountId: "fake",
+    });
+    expect(refused.status).toBe(403);
+  });
+
+  it("does not move a bot that is already on the fake account", () => {
+    const store = openEventStore(dataDir);
+    const bot = store.createBot({ name: "Old", personality: "", engineAccountId: "fake" });
+    store.close();
+    const reopened = openEventStore(dataDir);
+    cleanups.push(() => reopened.close());
+    expect(reopened.state().bots.find(({ id }) => id === bot.id)?.engineAccountId).toBe("fake");
+  });
+
+  it("pauses ready bots of one account and leaves an owner's pause alone", () => {
+    const store = openEventStore(dataDir);
+    cleanups.push(() => store.close());
+    const fields = { personality: "", engineAccountId: "claude" };
+    const ready = store.createBot({ name: "Ready", ...fields });
+    const owned = store.createBot({ name: "Owned", ...fields });
+    const fake = store.createBot({ name: "Fake", personality: "", engineAccountId: "fake" });
+    store.setBotPause(owned.id, "owner");
+
+    store.pauseReadyBots("claude", "cli_version");
+    const reason = (id: string) => store.state().bots.find((b) => b.id === id)?.pauseReason;
+    expect(reason(ready.id)).toBe("cli_version");
+    expect(reason(owned.id)).toBe("owner");
+    expect(reason(fake.id)).toBeNull();
+  });
+
+  it("carries a specific pause reason from a turn to the bot", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish({ kind: "auth_failed", pauseReason: "cli_missing" });
+    await expectStatus(store, bot, "Failed");
+    expect(store.state().bots[0]?.pauseReason).toBe("cli_missing");
+  });
 });
 
 describe("reconnecting", () => {
@@ -661,7 +936,15 @@ describe("reconnecting", () => {
 
 describe("fake engine", () => {
   const turn = (prompt: string, signal = new AbortController().signal) =>
-    fakeRunTurn({ prompt, sessionId: "s", signal, onDelta: () => {} });
+    fakeRunTurn({
+      prompt,
+      sessionId: "s",
+      resume: false,
+      launch: { botId: "b", name: "Ada", personality: "", engineAccountId: "fake" },
+      signal,
+      onDelta: () => {},
+      onDelivered: () => {},
+    });
 
   it("is scripted by the last line of the prompt", async () => {
     expect(await turn("old\n\n/fail")).toEqual({ kind: "failed" });

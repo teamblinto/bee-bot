@@ -17,7 +17,7 @@ const stopTimeoutMs = 5000;
 const maxRestarts = 3;
 const stableUptimeMs = 60_000;
 
-type Options = Pick<Bootstrap, "dataDir" | "allowedOrigins"> & { entry: string };
+type Options = Pick<Bootstrap, "dataDir" | "allowedOrigins" | "fakeEngine"> & { entry: string };
 
 let child: ReturnType<typeof spawnServer> | undefined;
 let stopping = false;
@@ -101,11 +101,11 @@ async function waitForReady(url: string, token: string) {
   throw new Error("Server not ready");
 }
 
-export async function startServer({ entry, dataDir, allowedOrigins }: Options) {
+export async function startServer({ entry, dataDir, allowedOrigins, fakeEngine }: Options) {
   const port = await findFreePort();
   const token = NodeCrypto.randomBytes(32).toString("base64url");
   const url = `http://127.0.0.1:${port}`;
-  child = spawnServer(entry, { port, token, dataDir, allowedOrigins });
+  child = spawnServer(entry, { port, token, dataDir, allowedOrigins, fakeEngine });
   await waitForReady(url, token);
   return { url, token };
 }

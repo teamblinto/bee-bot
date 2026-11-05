@@ -1,18 +1,33 @@
 import { once } from "node:events";
 import * as NodeTimers from "node:timers/promises";
 
+import type { PauseReason } from "@beebot/contracts";
+
 export type TurnOutcome =
   | { kind: "completed"; text: string }
   | { kind: "failed" }
   | { kind: "limited"; retryAfterMs: number }
-  | { kind: "auth_failed" };
+  | { kind: "auth_failed"; pauseReason?: PauseReason }
+  // The engine no longer has this session: the supervisor restarts from the room digest.
+  | { kind: "session_lost" };
+
+export type BotLaunch = {
+  botId: string;
+  name: string;
+  personality: string;
+  engineAccountId: string;
+};
 
 // Must settle once `signal` aborts: the supervisor finalizes a run only after its turn has ended.
 export type RunTurn = (turn: {
   prompt: string;
   sessionId: string;
+  resume: boolean;
+  launch: BotLaunch;
   signal: AbortSignal;
   onDelta: (text: string) => void;
+  // Call once the prompt reached the engine: from then on it must never be sent again.
+  onDelivered: () => void;
 }) => Promise<TurnOutcome>;
 
 const wordDelayMs = 40;

@@ -176,6 +176,11 @@ export async function sendCommand(command: Command) {
   }
 }
 
-export async function createBot(name: string, personality: string) {
-  return Bot.safeParse(await sendCommand({ type: "create-bot", name, personality })).data;
+export async function createBot(
+  name: string,
+  personality: string,
+  engineAccountId: "claude" | "fake",
+) {
+  const command = { type: "create-bot", name, personality, engineAccountId } as const;
+  return Bot.safeParse(await sendCommand(command)).data;
 }

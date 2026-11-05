@@ -6,8 +6,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import { protocolVersion, ServerMessage } from "@beebot/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { type ChatState, protocolVersion, ServerMessage } from "@beebot/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
 import { startServer } from "./server.ts";
@@ -319,7 +319,14 @@ describe("headless process", () => {
   it("boots on plain Node from a stdin bootstrap and stops on stdin EOF", async () => {
     const port = await freePort();
     const child = spawnServer();
-    child.stdin.write(`${JSON.stringify({ port, token, dataDir, allowedOrigins: [] })}\n`);
+    const bootstrap = {
+      port,
+      token,
+      dataDir,
+      allowedOrigins: [],
+      claudeCommand: ["beebot-no-such-cli"],
+    };
+    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
 
     const stderr: string[] = [];
     for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
@@ -336,6 +343,35 @@ describe("headless process", () => {
     child.stdin.end();
     const [code] = await once(child, "exit");
     expect(code).toBe(0);
+  }, 20_000);
+
+  it("pauses Claude bots at startup when the probe fails, with the reason", async () => {
+    const seeded = openEventStore(dataDir);
+    seeded.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+    seeded.close();
+
+    const port = await freePort();
+    const child = spawnServer();
+    const bootstrap = {
+      port,
+      token,
+      dataDir,
+      allowedOrigins: [],
+      claudeCommand: ["beebot-no-such-cli"],
+    };
+    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
+    for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
+      if (line.includes("paused")) {
+        break;
+      }
+    }
+    await vi.waitFor(async () => {
+      const response = await http(`http://127.0.0.1:${port}`, "/state", { headers: auth });
+      const { state } = (await response.json()) as { state: ChatState };
+      expect(state.bots[0]).toMatchObject({ status: "paused", pauseReason: "cli_missing" });
+    });
+    child.stdin.end();
+    await once(child, "exit");
   }, 20_000);
 
   it("exits with a no-restart code on a bad bootstrap and keeps it out of stderr", async () => {
