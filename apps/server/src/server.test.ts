@@ -49,8 +49,11 @@ async function start(port = 0) {
 const http = (base: string, path: string, init?: RequestInit) =>
   fetch(`${base}${path}?protocolVersion=${protocolVersion}`, init);
 
-const runDiagnostic = async (base: string) =>
-  http(base, "/commands/diagnostic", { method: "POST", headers: auth });
+const command = (base: string, body: unknown, headers: Record<string, string> = auth) =>
+  http(base, "/commands", { method: "POST", headers, body: JSON.stringify(body) });
+
+const createBot = (base: string) =>
+  command(base, { type: "create-bot", name: "Ada", personality: "" });
 
 function wsUrl(port: number, query: Record<string, string> = {}) {
   const params = new URLSearchParams({
@@ -124,22 +127,39 @@ describe("access", () => {
 
   it("does not let a refused command write an event", async () => {
     const { base, store } = await start();
-    await http(base, "/commands/diagnostic", { method: "POST" });
-    await http(base, "/commands/diagnostic", {
-      method: "POST",
-      headers: { ...auth, Origin: "https://evil.example" },
-    });
+    const body = { type: "create-bot", name: "Ada", personality: "" };
+    expect((await command(base, body, {})).status).toBe(401);
+    const foreign = { ...auth, Origin: "https://evil.example" };
+    expect((await command(base, body, foreign)).status).toBe(403);
     expect(store.eventsAfter(0)).toEqual([]);
   });
 
   it("refuses preflights from a foreign Origin", async () => {
     const { base } = await start();
     const preflight = (origin: string) =>
-      http(base, "/commands/diagnostic", { method: "OPTIONS", headers: { Origin: origin } });
+      http(base, "/commands", { method: "OPTIONS", headers: { Origin: origin } });
     expect((await preflight("https://evil.example")).status).toBe(403);
     const allowed = await preflight(appOrigin);
     expect(allowed.status).toBe(204);
     expect(allowed.headers.get("access-control-allow-origin")).toBe(appOrigin);
+    expect(allowed.headers.get("access-control-allow-headers")).toContain("Content-Type");
+  });
+
+  it("refuses /state without the token", async () => {
+    const { base } = await start();
+    expect((await http(base, "/state")).status).toBe(401);
+    expect((await http(base, "/state", { headers: auth })).status).toBe(200);
+  });
+
+  it("answers 400 to a body the contract refuses, or one that is too large", async () => {
+    const { base, store } = await start();
+    const send = (body: string) => http(base, "/commands", { method: "POST", headers: auth, body });
+    expect((await send("not json")).status).toBe(400);
+    expect((await send(JSON.stringify({ type: "create-bot", name: " " }))).status).toBe(400);
+    expect((await send(JSON.stringify({ type: "nope" }))).status).toBe(400);
+    const huge = { type: "create-bot", name: "Ada", personality: "x".repeat(300_000) };
+    expect((await send(JSON.stringify(huge))).status).toBe(400);
+    expect(store.eventsAfter(0)).toEqual([]);
   });
 
   it("refuses WebSocket upgrades without the token or from a foreign Origin", async () => {
@@ -163,38 +183,36 @@ describe("access", () => {
 describe("event stream", () => {
   it("replays missed events on reconnect, then continues live without duplicates", async () => {
     const { base, port } = await start();
-    await runDiagnostic(base);
+    await createBot(base);
 
     const first = await subscribe(port, 0);
-    expect(await first.next()).toMatchObject({ type: "replay", events: [{ seq: 1 }] });
-    await runDiagnostic(base);
+    expect(await first.next()).toMatchObject({ type: "snapshot", seq: 1 });
+    await createBot(base);
     expect(await first.next()).toMatchObject({ type: "event", event: { seq: 2 } });
     first.socket.terminate();
 
-    await runDiagnostic(base);
-    await runDiagnostic(base);
+    await createBot(base);
+    await createBot(base);
 
     const second = await subscribe(port, 2);
     const replay = await second.next();
     expect(replay).toMatchObject({ type: "replay" });
     expect(replay.type === "replay" && replay.events.map((event) => event.seq)).toEqual([3, 4]);
-    await runDiagnostic(base);
+    await createBot(base);
     expect(await second.next()).toMatchObject({ type: "event", event: { seq: 5 } });
   });
 
   it("falls back to a snapshot when the cursor was pruned", async () => {
     const { base, port, store } = await start();
     for (let index = 0; index < 5; index += 1) {
-      await runDiagnostic(base);
+      await createBot(base);
     }
     store.prune(2);
 
     const pruned = await subscribe(port, 1);
     const snapshot = await pruned.next();
     expect(snapshot).toMatchObject({ type: "snapshot", seq: 5 });
-    expect(snapshot.type === "snapshot" && snapshot.events.map((event) => event.seq)).toEqual([
-      4, 5,
-    ]);
+    expect(snapshot.type === "snapshot" && snapshot.state.bots).toHaveLength(5);
 
     const atEdge = await subscribe(port, 3);
     expect(await atEdge.next()).toMatchObject({ type: "replay" });
@@ -203,7 +221,7 @@ describe("event stream", () => {
   it("falls back to a snapshot when the cursor is ahead of the server", async () => {
     const { port } = await start();
     const client = await subscribe(port, 9);
-    expect(await client.next()).toEqual({ type: "snapshot", seq: 0, events: [] });
+    expect(await client.next()).toMatchObject({ type: "snapshot", seq: 0, state: { bots: [] } });
   });
 
   it("closes a socket that sends a malformed message", async () => {
@@ -225,7 +243,7 @@ describe("storage failure", () => {
       allowedOrigins: [],
       store: {
         ...store,
-        append: () => {
+        createBot: () => {
           throw new Error("disk full");
         },
       },
@@ -235,21 +253,37 @@ describe("storage failure", () => {
       store.close();
     });
     const base = `http://127.0.0.1:${server.port}`;
-    expect((await runDiagnostic(base)).status).toBe(500);
+    expect((await createBot(base)).status).toBe(500);
     expect((await http(base, "/health", { headers: auth })).status).toBe(200);
   });
 });
 
 describe("restart", () => {
+  it("clears events from before the event contract changed", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    NodeFS.mkdirSync(dataDir, { recursive: true });
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec(`CREATE TABLE migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);
+      INSERT INTO migrations VALUES (1, 'create_events', 'then');
+      CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT INTO events (type, created_at) VALUES ('diagnostic', 'then');`);
+    db.close();
+
+    const { store, base } = await start();
+    expect(store.eventsAfter(0)).toEqual([]);
+    await createBot(base);
+    expect(store.eventsAfter(0).map((event) => event.seq)).toEqual([2]);
+  });
+
   it("keeps events and does not reapply migrations", async () => {
     const before = await start();
-    await runDiagnostic(before.base);
+    await createBot(before.base);
     await before.stop();
 
     const after = await start();
     expect(after.store.eventsAfter(0).map((event) => event.seq)).toEqual([1]);
-    const response = await runDiagnostic(after.base);
-    expect(await response.json()).toMatchObject({ event: { seq: 2 } });
+    await createBot(after.base);
+    expect(after.store.eventsAfter(0).map((event) => event.seq)).toEqual([1, 2]);
   });
 
   it("refuses a database migrated by a different version", async () => {

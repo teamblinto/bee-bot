@@ -6,16 +6,24 @@ import type { Duplex } from "node:stream";
 import {
   type Bootstrap,
   ClientMessage,
-  type DiagnosticResult,
+  Command,
   type ProtocolNotice,
   protocolVersion,
   type ServerMessage,
 } from "@beebot/contracts";
 import { type WebSocket, WebSocketServer } from "ws";
 
+import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import type { EventStore } from "./store.ts";
+import { createSupervisor } from "./supervisor.ts";
 
-type Options = Pick<Bootstrap, "port" | "token" | "allowedOrigins"> & { store: EventStore };
+const maxBodyBytes = 256 * 1024;
+
+type Options = Pick<Bootstrap, "port" | "token" | "allowedOrigins"> & {
+  store: EventStore;
+  runTurn?: RunTurn;
+  turnTimeoutMs?: number | undefined;
+};
 
 function sendJson(response: NodeHttp.ServerResponse, status: number, body: unknown) {
   response.writeHead(status, { "Content-Type": "application/json" });
@@ -45,10 +53,52 @@ function parseClientMessage(text: string) {
   }
 }
 
-export async function startServer({ port, token, allowedOrigins, store }: Options) {
+// Past the cap the stream is still drained: abandoning it would destroy the socket and the answer.
+async function readBody(request: NodeHttp.IncomingMessage) {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size <= maxBodyBytes) {
+      chunks.push(chunk);
+    }
+  }
+  return size <= maxBodyBytes ? Buffer.concat(chunks).toString() : undefined;
+}
+
+function parseCommand(text: string | undefined) {
+  try {
+    return Command.safeParse(JSON.parse(text ?? "")).data;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function startServer({
+  port,
+  token,
+  allowedOrigins,
+  store,
+  runTurn = fakeRunTurn,
+  turnTimeoutMs,
+}: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+
+  function broadcast(message: ServerMessage) {
+    for (const subscriber of subscribers) {
+      send(subscriber, message);
+    }
+  }
+
+  store.onEvent((event) => broadcast({ type: "event", event }));
+  const supervisor = createSupervisor({
+    store,
+    runTurn,
+    turnTimeoutMs,
+    onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
+  });
 
   // Non-browser clients send no Origin; they still need the token.
   const originAllowed = (origin: string | undefined) =>
@@ -87,10 +137,74 @@ export async function startServer({ port, token, allowedOrigins, store }: Option
 
   function catchUp(afterSeq: number): ServerMessage {
     const { oldest, latest } = store.bounds();
-    if (afterSeq < oldest - 1 || afterSeq > latest) {
-      return { type: "snapshot", seq: latest, events: store.eventsAfter(0) };
+    // A cursor of 0 means an empty client, and rows like the seeded account have no event.
+    if (afterSeq === 0 || afterSeq < oldest - 1 || afterSeq > latest) {
+      return { type: "snapshot", seq: latest, state: store.state() };
     }
     return { type: "replay", events: store.eventsAfter(afterSeq) };
+  }
+
+  function runCommand(command: Command) {
+    const notFound = { status: 404, body: { code: "not_found" } };
+    const ok = { status: 200, body: { ok: true } };
+    // shortcut: any open client counts, not the sender's own. Tie it to the sender once a token can
+    // be held by something other than the owner's own clients.
+    const attended = subscribers.size > 0;
+    switch (command.type) {
+      case "create-bot": {
+        const { name, personality } = command;
+        return { status: 200, body: store.createBot({ name, personality }) };
+      }
+      case "update-bot": {
+        const { botId, name, personality } = command;
+        const bot = store.updateBot(botId, { name, personality });
+        return bot ? { status: 200, body: bot } : notFound;
+      }
+      case "set-bot-paused": {
+        const bot = store.setBotPause(command.botId, command.paused ? "owner" : null);
+        return bot ? { status: 200, body: bot } : notFound;
+      }
+      case "send-message": {
+        const { messageId: id, roomId, body } = command;
+        const result = store.sendMessage({ id, roomId, body, attended });
+        if (result === "not_found") {
+          return notFound;
+        }
+        return result === "conflict" ? { status: 409, body: { code: "message_id_reused" } } : ok;
+      }
+      case "stop-bot":
+        supervisor.stopBot(command.botId);
+        return ok;
+      case "stop-all":
+        supervisor.stopAll();
+        return ok;
+      case "continue-run": {
+        const result = store.continueRun(command.runId, attended);
+        if (result === "not_found") {
+          return notFound;
+        }
+        return result === "continued" ? ok : { status: 409, body: { code: result } };
+      }
+    }
+  }
+
+  async function handleCommand(
+    request: NodeHttp.IncomingMessage,
+    response: NodeHttp.ServerResponse,
+  ) {
+    const command = parseCommand(await readBody(request));
+    if (!command) {
+      sendJson(response, 400, { code: "bad_request" });
+      return;
+    }
+    try {
+      const { status, body } = runCommand(command);
+      sendJson(response, status, body);
+      supervisor.pump();
+    } catch (error) {
+      console.error(error);
+      sendJson(response, 500, { code: "storage_failed" });
+    }
   }
 
   const server = NodeHttp.createServer((request, response) => {
@@ -108,7 +222,7 @@ export async function startServer({ port, token, allowedOrigins, store }: Option
     if (request.method === "OPTIONS" && originAllowed(origin)) {
       // Preflights carry no credentials, so the token check can't apply here.
       response.setHeader("Access-Control-Allow-Methods", "GET, POST");
-      response.setHeader("Access-Control-Allow-Headers", "Authorization");
+      response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
       response.writeHead(204).end();
       return;
     }
@@ -121,18 +235,15 @@ export async function startServer({ port, token, allowedOrigins, store }: Option
 
     if (request.method === "GET" && url.pathname === "/health") {
       sendJson(response, 200, { ok: true });
-    } else if (request.method === "POST" && url.pathname === "/commands/diagnostic") {
+    } else if (request.method === "GET" && url.pathname === "/state") {
       try {
-        const event = store.append("diagnostic");
-        for (const subscriber of subscribers) {
-          send(subscriber, { type: "event", event });
-        }
-        const result: DiagnosticResult = { event };
-        sendJson(response, 200, result);
+        sendJson(response, 200, { seq: store.bounds().latest, state: store.state() });
       } catch (error) {
         console.error(error);
         sendJson(response, 500, { code: "storage_failed" });
       }
+    } else if (request.method === "POST" && url.pathname === "/commands") {
+      handleCommand(request, response).catch(() => response.destroy());
     } else {
       sendJson(response, 404, { code: "not_found" });
     }
@@ -180,10 +291,12 @@ export async function startServer({ port, token, allowedOrigins, store }: Option
       resolve();
     });
   });
+  supervisor.pump();
 
   return {
     port: (server.address() as AddressInfo).port,
     close: async () => {
+      await supervisor.close();
       for (const client of sockets.clients) {
         client.terminate();
       }
