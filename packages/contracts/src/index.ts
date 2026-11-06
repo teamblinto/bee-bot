@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 10;
+export const protocolVersion = 11;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -151,10 +151,20 @@ export const Approval = z.object({
 });
 export type Approval = z.infer<typeof Approval>;
 
+export const ApprovalChange = z.object({
+  action: z.enum(["create", "replace", "write", "edit"]),
+  removed: z.string().nullable(),
+  added: z.string(),
+  hiddenChars: z.number(),
+  replaceAll: z.boolean(),
+});
+export type ApprovalChange = z.infer<typeof ApprovalChange>;
+
 // The card's content. Lives only in server memory, for as long as the tool call is held.
 export const PendingApproval = z.object({
   id: z.string(),
   detail: z.string(),
+  change: ApprovalChange.nullable(),
   canAlwaysAllow: z.boolean(),
   expiresAt: z.string(),
 });

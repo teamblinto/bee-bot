@@ -1,5 +1,6 @@
 import {
   type Approval,
+  type ApprovalChange,
   type ApprovalTool,
   type Bot,
   type EngineAccount,
@@ -24,6 +25,29 @@ export const visibleDetail = (detail: string) =>
     /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g,
     (char) => `[U+${char.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}]`,
   );
+
+// Empty text has no lines: an edit that only removes must not show a blank added line.
+export const changeLines = (prefix: "- " | "+ ", text: string) =>
+  text &&
+  text
+    .split(/\r?\n/)
+    .map((line) => prefix + visibleDetail(line))
+    .join("\n");
+
+export function changeNote({ action, replaceAll }: ApprovalChange) {
+  if (action === "edit") {
+    return replaceAll ? "Replaces every match" : undefined;
+  }
+  const notes = {
+    create: "New file",
+    replace: "Replaces an existing file",
+    write: "Creates or replaces this file",
+  };
+  return notes[action];
+}
+
+export const hiddenCharsLine = (count: number) =>
+  `${formatCount(count)} more ${count === 1 ? "character" : "characters"} not shown. Allowing applies the whole change.`;
 
 export function shortTime(iso: string) {
   const date = new Date(iso);

@@ -16,7 +16,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
-import { createApprovals, inputDigest } from "./approvals.ts";
+import { createApprovals, inputDigest, writeAction } from "./approvals.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
@@ -336,6 +336,16 @@ describe("a tool call", () => {
       toolCall("Bash", "not an object"),
       toolCall("Bash", { command: 7 }),
       toolCall("Read", {}),
+      toolCall("Write", { file_path: "a.txt" }),
+      toolCall("Write", { file_path: "a.txt", content: 7 }),
+      toolCall("Edit", { file_path: "a.txt", old_string: "x" }),
+      toolCall("Edit", { file_path: "a.txt", new_string: "y" }),
+      toolCall("Edit", {
+        file_path: "a.txt",
+        old_string: "x",
+        new_string: "y",
+        replace_all: "yes",
+      }),
       rpc("tools/call", { name: "other", arguments: {} }),
     ]) {
       expect(await decisionOf(await mcp(permissions, body))).toMatchObject({ behavior: "deny" });
@@ -408,6 +418,148 @@ describe("a tool call", () => {
     expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
   });
 
+  it.each([
+    ["Bash", { command }],
+    ["Read", { file_path: "a.txt" }],
+    ["Glob", { pattern: "*" }],
+    ["Grep", { pattern: "x" }],
+  ])("has no change to show for %s", async (tool, input) => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall(tool, input));
+    const card = await nextCard();
+    expect(card.change).toBeNull();
+    await decide(card, "deny");
+    await call;
+  });
+
+  describe("that changes a file", () => {
+    async function cardFor(tool: string, input: Record<string, unknown>) {
+      const { startTurn, nextCard, decide } = await boot();
+      const { permissions } = (await startTurn()).turn;
+      const call = mcp(permissions, toolCall(tool, input));
+      const card = await nextCard();
+      await decide(card, "allow");
+      const decision = await decisionOf(await call);
+      return { change: card.change, decision };
+    }
+
+    it("shows what a Write would put in the file", async () => {
+      const { change } = await cardFor("Write", { file_path: "a.txt", content: "one\ntwo\n" });
+      expect(change).toEqual({
+        action: "create",
+        removed: null,
+        added: "one\ntwo\n",
+        hiddenChars: 0,
+        replaceAll: false,
+      });
+    });
+
+    it("shows both sides of an Edit", async () => {
+      const input = { file_path: "a.txt", old_string: "old", new_string: "new" };
+      expect((await cardFor("Edit", input)).change).toEqual({
+        action: "edit",
+        removed: "old",
+        added: "new",
+        hiddenChars: 0,
+        replaceAll: false,
+      });
+    });
+
+    it("says when an Edit replaces every match", async () => {
+      const input = { file_path: "a.txt", old_string: "a", new_string: "b", replace_all: true };
+      expect((await cardFor("Edit", input)).change?.replaceAll).toBe(true);
+    });
+
+    it("cuts at the last newline, leaving no stray carriage return", async () => {
+      const line = `${"x".repeat(999)}\r\n`;
+      const content = line.repeat(30);
+      const { change } = await cardFor("Write", { file_path: "a.txt", content });
+      expect(change?.added).toBe(line.repeat(18) + "x".repeat(999));
+      expect(change?.hiddenChars).toBe(content.length - (change?.added.length ?? 0));
+    });
+
+    it("cuts text with no newlines at the cap, without splitting a surrogate pair", async () => {
+      const content = `${"x".repeat(19_999)}😀${"y".repeat(100)}`;
+      const { change } = await cardFor("Write", { file_path: "a.txt", content });
+      expect(change?.added).toBe("x".repeat(19_999));
+      expect(change?.hiddenChars).toBe(102);
+    });
+
+    it("never turns long text into an empty-looking card", async () => {
+      const content = `\r\n\n${"x".repeat(30_000)}`;
+      const { change } = await cardFor("Write", { file_path: "a.txt", content });
+      expect(change?.added).toBe(content.slice(0, 20_000));
+      expect(change?.hiddenChars).toBe(10_003);
+    });
+
+    it("counts what is hidden from both sides of an Edit", async () => {
+      const input = {
+        file_path: "a.txt",
+        old_string: "o".repeat(20_500),
+        new_string: "n".repeat(20_001),
+      };
+      const { change } = await cardFor("Edit", input);
+      expect(change?.removed).toHaveLength(20_000);
+      expect(change?.added).toHaveLength(20_000);
+      expect(change?.hiddenChars).toBe(501);
+    });
+
+    it("still releases the whole input on allow when the preview was cut", async () => {
+      const input = { file_path: "a.txt", content: "x".repeat(50_000), extra: { kept: true } };
+      const { change, decision } = await cardFor("Write", input);
+      expect(change?.hiddenChars).toBe(30_000);
+      expect(decision).toEqual({ behavior: "allow", updatedInput: input });
+    });
+
+    it("tells create from replace, and calls anything else a write", async () => {
+      const { startTurn, nextCard, decide } = await boot();
+      const { turn, bot } = await startTurn();
+      const workspace = workspacePath(dataDir, bot.id);
+      NodeFS.mkdirSync(NodePath.join(workspace, "folder"), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(workspace, "there.txt"), "before");
+      const actionFor = async (file_path: string) => {
+        const call = mcp(turn.permissions, toolCall("Write", { file_path, content: "x" }));
+        const card = await nextCard();
+        await decide(card, "deny");
+        await call;
+        return card.change?.action;
+      };
+      expect(await actionFor("new.txt")).toBe("create");
+      expect(await actionFor("there.txt")).toBe("replace");
+      expect(await actionFor("folder")).toBe("write");
+    });
+
+    it("calls it a write, and never throws, when the stat fails", () => {
+      expect(writeAction("bad path")).toBe("write");
+    });
+  });
+
+  it("shows content on the card only: never the database, events, audit log or /state", async () => {
+    const mark = "distinctive-content-mark";
+    const { startTurn, nextCard, decide, port, store, client, stop } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const input = { file_path: "a.txt", old_string: `${mark}-old`, new_string: `${mark}-new` };
+    const call = mcp(permissions, toolCall("Edit", input));
+    const card = await nextCard();
+    expect(card.change?.removed).toContain(mark);
+
+    const state = await fetch(`http://127.0.0.1:${port}/state?protocolVersion=${protocolVersion}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(await state.text()).not.toContain(mark);
+    await decide(card, "allow");
+    await call;
+
+    expect(JSON.stringify(store.eventsAfter(0))).not.toContain(mark);
+    expect(JSON.stringify(rows("SELECT * FROM audit_log"))).not.toContain(mark);
+    expect(JSON.stringify(client.messages.filter((m) => m.type === "event"))).not.toContain(mark);
+    await stop();
+    for (const file of NodeFS.readdirSync(dataDir).filter((name) => name.startsWith("beebot"))) {
+      expect(NodeFS.readFileSync(NodePath.join(dataDir, file), "latin1")).not.toContain(mark);
+    }
+  });
+
   it("keeps the input out of the database, the events and the logs", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
       vi.spyOn(console, method),
@@ -461,7 +613,7 @@ describe("always allow", () => {
   it.each([
     ["Bash", { command }],
     ["Write", { file_path: "a.txt", content: "x" }],
-    ["Edit", { file_path: "a.txt" }],
+    ["Edit", { file_path: "a.txt", old_string: "x", new_string: "y" }],
   ])("is refused for %s", async (tool, input) => {
     const { startTurn, nextCard, decide } = await boot();
     const { permissions } = (await startTurn()).turn;
@@ -669,9 +821,18 @@ describe("the fake engine's /approve", () => {
     expect(store.state().messages[3]?.body).toBe("Test engine: denied");
     expect(client.messages.some((m) => m.type === "tool-start" && m.name === "Read")).toBe(true);
 
+    for (const tool of ["Write", "Edit"]) {
+      const count = store.state().messages.length;
+      await send(bot.roomId, `/approve ${tool} notes.txt`);
+      const change = await nextCard();
+      expect(change.change?.added).toBeTruthy();
+      await decide(change, "deny");
+      await vi.waitFor(() => expect(store.state().messages).toHaveLength(count + 2));
+    }
+
     const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
     vi.restoreAllMocks();
-    expect(tokens).toHaveLength(2);
+    expect(tokens).toHaveLength(4);
     for (const token of tokens) {
       expect(printed).not.toContain(token);
       expect(JSON.stringify(client.messages)).not.toContain(token);
@@ -867,12 +1028,13 @@ describe("memory tools", () => {
 
 describe("access levels", () => {
   const offLimits = () => NodePath.join(dataDir, "..", "elsewhere", ".ssh", "id_rsa");
+  const changeFields = { content: "x", old_string: "x", new_string: "y" };
   const toolInput = (tool: string, where: string): Record<string, unknown> =>
     tool === "Bash"
       ? { command: "ls" }
       : tool === "Glob" || tool === "Grep"
         ? { pattern: "x", path: where }
-        : { file_path: NodePath.join(where, "a.txt") };
+        : { file_path: NodePath.join(where, "a.txt"), ...changeFields };
 
   async function atLevel(access: "supervised" | "auto-edits" | "full") {
     const server = await boot();
@@ -915,7 +1077,7 @@ describe("access levels", () => {
     async (access) => {
       const { turn, client } = await atLevel(access);
       for (const tool of ["Read", "Write", "Edit"]) {
-        const input = { file_path: offLimits() };
+        const input = { file_path: offLimits(), ...changeFields };
         const refused = await decisionOf(await mcp(turn.permissions, toolCall(tool, input)));
         expect(refused).toMatchObject({ behavior: "deny" });
       }
@@ -1028,6 +1190,22 @@ describe("a bot with a project folder", () => {
     const call = mcp(turn.permissions, write(NodePath.join(dataDir, "..", "out", "a.ts")));
     await decide(await nextCard(), "deny");
     expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("resolves a relative Write against the folder to tell create from replace", async () => {
+    NodeFS.mkdirSync(NodePath.join(project, "src"));
+    NodeFS.writeFileSync(NodePath.join(project, "src", "there.txt"), "before");
+    const { turn, decide, nextCard } = await atLevel("supervised");
+    const actionFor = async (file_path: string) => {
+      const call = mcp(turn.permissions, write(file_path));
+      const card = await nextCard();
+      await decide(card, "deny");
+      await call;
+      return card.change?.action;
+    };
+    expect(await actionFor("src/there.txt")).toBe("replace");
+    expect(await actionFor("src/new.txt")).toBe("create");
+    expect(await actionFor(NodePath.join(project, "src", "there.txt"))).toBe("replace");
   });
 
   it("refuses the bot's old private workspace: it is Bee's data now", async () => {

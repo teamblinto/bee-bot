@@ -212,12 +212,14 @@ function check(
       text.split(/[\\/{},]+/).some((name) => credentialSegments.has(name.toLowerCase())),
   );
   let inside = true;
+  let writeTarget: string | undefined;
   for (const target of targets) {
     const resolved = resolve(target);
     if (!resolved) {
       return refused;
     }
     const { real, lexical } = resolved;
+    writeTarget = tool === "Write" ? real : undefined;
     if (within(real, realWorkspace)) {
       // A project holds the owner's real secrets. A private workspace, always under the data dir,
       // holds only what the bot made there.
@@ -246,7 +248,7 @@ function check(
       return refused;
     }
   }
-  return { allowed: true, inside } as const;
+  return { allowed: true, inside, writeTarget } as const;
 }
 
 // `inside` means every target is in the workspace. Bash can't be checked, so its card shows it all.
@@ -257,7 +259,7 @@ export function pathPolicy(
   context: Context,
 ) {
   if (tool === "Bash") {
-    return { allowed: true, inside: false } as const;
+    return { allowed: true, inside: false, writeTarget: undefined } as const;
   }
   try {
     return check(tool, input, workspace, context);

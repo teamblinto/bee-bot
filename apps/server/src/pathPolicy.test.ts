@@ -48,7 +48,7 @@ describe("targets in the workspace", () => {
     expect(read("notes.txt")).toEqual(inside);
     expect(read(NodePath.join(workspace, "new", "deep.txt"))).toEqual(inside);
     expect(read(".ssh/config")).toEqual(inside);
-    expect(check("Write", { file_path: ".aws/credentials" })).toEqual(inside);
+    expect(check("Write", { file_path: ".aws/credentials" })).toMatchObject(inside);
     expect(check("Edit", { file_path: "a/../b.txt" })).toEqual(inside);
   });
 
@@ -287,7 +287,7 @@ describe("targets in a project folder", () => {
     "always ask for %s, and don't refuse it",
     (file_path) => {
       expect(inProject("Read", { file_path })).toEqual(outside);
-      expect(inProject("Write", { file_path })).toEqual(outside);
+      expect(inProject("Write", { file_path })).toMatchObject(outside);
       expect(inProject("Read", { file_path: NodePath.join(project, file_path) })).toEqual(outside);
     },
   );

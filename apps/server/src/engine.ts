@@ -115,6 +115,11 @@ const callTool = ({ url, token }: Permissions, params: unknown, signal: AbortSig
     signal,
   });
 
+const fakeChanges = new Map<string, Record<string, string>>([
+  ["Write", { content: "Written by the test engine.\n" }],
+  ["Edit", { old_string: "Text before.", new_string: "Text after." }],
+]);
+
 async function askPermission(
   permissions: Permissions,
   tool: string,
@@ -125,7 +130,7 @@ async function askPermission(
     name: "approve",
     arguments: {
       tool_name: tool,
-      input: { [inputKeys.get(tool) ?? "command"]: detail },
+      input: { [inputKeys.get(tool) ?? "command"]: detail, ...fakeChanges.get(tool) },
       tool_use_id: "fake",
     },
   };

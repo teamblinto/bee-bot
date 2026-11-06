@@ -69,6 +69,7 @@ const approval = (status: Approval["status"]): Approval => ({
 const pending = (id: string): PendingApproval => ({
   id,
   detail: "ls",
+  change: null,
   canAlwaysAllow: false,
   expiresAt: "later",
 });

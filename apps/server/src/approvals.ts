@@ -1,8 +1,10 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
 import {
   type Approval,
+  type ApprovalChange,
   ApprovalTool,
   type BotAccess,
   type Command,
@@ -15,6 +17,7 @@ import { pathPolicy } from "./pathPolicy.ts";
 import type { EventStore } from "./store.ts";
 
 const defaultTimeoutMs = 5 * 60_000;
+const maxPreviewChars = 20_000;
 const alwaysAllowable: ReadonlySet<ApprovalTool> = new Set(["Read", "Glob", "Grep"]);
 
 export type Decision =
@@ -58,6 +61,64 @@ function detailText(
     return `${pattern}${where}${typeof glob === "string" ? ` matching ${glob}` : ""}`;
   }
   return typeof file_path === "string" ? file_path : undefined;
+}
+
+// A cut at a line end must leave something to read, or the card would look like an empty write.
+function capped(text: string) {
+  if (text.length <= maxPreviewChars) {
+    return text;
+  }
+  const lineEnd = Math.max(text.lastIndexOf("\n", maxPreviewChars), 0);
+  const lines = text.slice(0, lineEnd).replace(/\r$/, "");
+  return lines.trim() ? lines : text.slice(0, maxPreviewChars).replace(/[\ud800-\udbff]$/, "");
+}
+
+function preview(
+  action: ApprovalChange["action"],
+  removed: string | null,
+  added: string,
+  replaceAll: boolean,
+): ApprovalChange {
+  const shownRemoved = removed === null ? null : capped(removed);
+  const shownAdded = capped(added);
+  const shown = (shownRemoved?.length ?? 0) + shownAdded.length;
+  return {
+    action,
+    removed: shownRemoved,
+    added: shownAdded,
+    hiddenChars: (removed?.length ?? 0) + added.length - shown,
+    replaceAll,
+  };
+}
+
+// Undefined when the call can't be shown, so it can't be approved. Null for a tool with no change.
+function proposedChange(
+  tool: ApprovalTool,
+  { content, old_string, new_string, replace_all = false }: Record<string, unknown>,
+) {
+  if (tool === "Write") {
+    return typeof content === "string" ? preview("write", null, content, false) : undefined;
+  }
+  if (tool === "Edit") {
+    return typeof old_string === "string" &&
+      typeof new_string === "string" &&
+      typeof replace_all === "boolean"
+      ? preview("edit", old_string, new_string, replace_all)
+      : undefined;
+  }
+  return null;
+}
+
+export function writeAction(target: string): ApprovalChange["action"] {
+  try {
+    const stats = NodeFS.statSync(target, { throwIfNoEntry: false });
+    if (!stats) {
+      return "create";
+    }
+    return stats.isFile() ? "replace" : "write";
+  } catch {
+    return "write";
+  }
 }
 
 type RunMode = { attended: boolean; plan: boolean };
@@ -122,7 +183,7 @@ export function createApprovals({
   function hold(
     run: Run,
     tool: ApprovalTool,
-    fields: { detail: string; canAlwaysAllow: boolean },
+    fields: Pick<PendingApproval, "detail" | "change" | "canAlwaysAllow">,
     input: Record<string, unknown>,
     closed: AbortSignal,
   ) {
@@ -188,7 +249,8 @@ export function createApprovals({
       }
       const { tool_name: tool, input } = parsed.data;
       const detail = detailText(tool, input);
-      if (detail === undefined) {
+      const proposal = proposedChange(tool, input);
+      if (detail === undefined || proposal === undefined) {
         return malformed;
       }
       const projectPath = store.getBot(run.botId)?.projectPath ?? null;
@@ -214,7 +276,10 @@ export function createApprovals({
         store.auditTool(run.id, run.botId, tool, "allowed", "always");
         return { behavior: "allow", updatedInput: input };
       }
-      const decision = await hold(run, tool, { detail, canAlwaysAllow }, input, closed);
+      const { writeTarget } = policy;
+      const change =
+        proposal && writeTarget ? { ...proposal, action: writeAction(writeTarget) } : proposal;
+      const decision = await hold(run, tool, { detail, change, canAlwaysAllow }, input, closed);
       // A link can be swapped in during a long hold. This narrows that window; it can't close it.
       const after = decision.behavior === "allow" ? checkPath() : undefined;
       if (after && !after.allowed) {
@@ -245,9 +310,10 @@ export function createApprovals({
     },
 
     pending: (): PendingApproval[] =>
-      [...held.values()].map(({ id, detail, canAlwaysAllow, expiresAt }) => ({
+      [...held.values()].map(({ id, detail, change, canAlwaysAllow, expiresAt }) => ({
         id,
         detail,
+        change,
         canAlwaysAllow,
         expiresAt,
       })),

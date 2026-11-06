@@ -2,6 +2,7 @@ import type { MemoryItem } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
 import {
+  changeLines,
   folderName,
   formatElapsed,
   liveStatusLine,
@@ -15,6 +16,21 @@ import {
 
 it("shows characters that would hide or reorder a command, and leaves layout alone", () => {
   expect(visibleDetail("ls\n\tcat ‮gpj.exe\u0000")).toBe("ls\n\tcat [U+202E]gpj.exe[U+0000]");
+});
+
+it("prefixes each line of a change, for LF and CRLF alike", () => {
+  expect(changeLines("+ ", "one\n\ntwo")).toBe("+ one\n+ \n+ two");
+  expect(changeLines("- ", "one\r\ntwo\r\n")).toBe("- one\n- two\n- ");
+});
+
+it("gives empty text no lines, so an edit that only removes adds nothing", () => {
+  expect(changeLines("+ ", "")).toBe("");
+});
+
+it("makes hidden characters in a file's content visible on every line", () => {
+  expect(changeLines("+ ", "safe‮txt.exe\nzero​width\nlone\rreturn")).toBe(
+    "+ safe[U+202E]txt.exe\n+ zero[U+200B]width\n+ lone[U+000D]return",
+  );
 });
 
 it("takes a folder as Windows' Copy as path gives it, and empty as no folder", () => {

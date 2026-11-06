@@ -1,8 +1,35 @@
-import type { Approval, PendingApproval } from "@beebot/contracts";
+import type { Approval, ApprovalChange, PendingApproval } from "@beebot/contracts";
 import { useEffect, useRef, useState } from "react";
 
-import { approvalTitle, visibleDetail } from "../labels";
+import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
 import { postCommand } from "../serverConnection";
+
+function ProposedChange({ change }: { change: ApprovalChange }) {
+  const note = changeNote(change);
+  const removed = changeLines("- ", change.removed ?? "");
+  const added = changeLines("+ ", change.added);
+  return (
+    <>
+      {note && <p className="text-small text-ink-secondary">{note}</p>}
+      {!removed && !added && change.removed === null && (
+        <p className="text-small text-ink-secondary">Empty file</p>
+      )}
+      {(removed || added) && (
+        <pre
+          role="region"
+          tabIndex={0}
+          aria-label="Proposed change"
+          className="max-h-[30dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
+          // On the transcript, a wheel up raises Jump to latest over this card's buttons.
+          onWheel={(event) => event.stopPropagation()}
+        >
+          {removed && <span className="block text-danger">{removed}</span>}
+          {added && <span className="block text-honey">{added}</span>}
+        </pre>
+      )}
+    </>
+  );
+}
 
 function TimeLeft({ expiresAt }: { expiresAt: string }) {
   const [now, setNow] = useState(() => Date.now());
@@ -57,6 +84,7 @@ export function ApprovalCard({
   }
 
   const disabled = busy || !connected;
+  const hiddenChars = pending.change?.hiddenChars ?? 0;
   return (
     <article
       ref={card}
@@ -73,7 +101,11 @@ export function ApprovalCard({
       >
         {visibleDetail(pending.detail)}
       </pre>
+      {pending.change && <ProposedChange change={pending.change} />}
       {error && <p className="text-small text-ink-secondary">{error}</p>}
+      {hiddenChars > 0 && (
+        <p className="text-small text-ink-secondary">{hiddenCharsLine(hiddenChars)}</p>
+      )}
       <div className="flex flex-wrap justify-end gap-1">
         <button
           type="button"
