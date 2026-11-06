@@ -1,5 +1,5 @@
 import type { Bot } from "@beebot/contracts";
-import { Gauge, Hexagon, Plus } from "lucide-react";
+import { Gauge, Hexagon, Plus, ShieldOff } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
@@ -58,6 +58,12 @@ function BotRow({
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2">
           <span className="truncate text-name font-medium">{bot.name}</span>
+          {bot.access === "full" && (
+            <span className="self-center text-danger">
+              <ShieldOff {...iconProps} size={12} />
+              <span className="sr-only">Full access</span>
+            </span>
+          )}
           <span className="flex-1" />
           {last && (
             <span className="shrink-0 text-label text-ink-faint tabular-nums">

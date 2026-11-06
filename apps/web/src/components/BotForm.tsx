@@ -1,9 +1,15 @@
-import { Bot, BotModel, defaultBotModel } from "@beebot/contracts";
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { Bot, defaultBotModel, EngineAccountId } from "@beebot/contracts";
+import {
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
-import { postCommand } from "../serverConnection";
-
-const modelLabels: Record<BotModel, string> = { haiku: "Haiku", sonnet: "Sonnet", opus: "Opus" };
+import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
+import { ModelPicker } from "./ModelPicker";
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
 
@@ -23,6 +29,7 @@ export function BotForm({
   const [personality, setPersonality] = useState(bot?.personality ?? "");
   const [model, setModel] = useState(bot?.model ?? defaultBotModel);
   const [engine, setEngine] = useState<"claude" | "fake">("claude");
+  const catalog = useSyncExternalStore(subscribeToConnection, () => getConnectionState().models);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const saving = useRef(false);
@@ -74,33 +81,21 @@ export function BotForm({
           onChange={(event) => setPersonality(event.target.value)}
         />
       </label>
-      <label className={labelClass}>
+      <div className={labelClass}>
         Model
-        <select
-          className="field text-ink"
-          value={model}
-          onChange={(event) => setModel(BotModel.parse(event.target.value))}
-        >
-          {BotModel.options.map((option) => (
-            <option key={option} value={option}>
-              {modelLabels[option]}
-            </option>
-          ))}
-        </select>
-      </label>
-      {import.meta.env.DEV && !bot && (
-        <label className={labelClass}>
-          Engine
-          <select
-            className="field text-ink"
-            value={engine}
-            onChange={(event) => setEngine(event.target.value === "fake" ? "fake" : "claude")}
-          >
-            <option value="claude">Claude</option>
-            <option value="fake">Test engine</option>
-          </select>
-        </label>
-      )}
+        <ModelPicker
+          accountId={bot?.engineAccountId ?? engine}
+          model={model}
+          catalog={catalog}
+          // A session belongs to one vendor.
+          locked={bot !== undefined}
+          field
+          onPick={(accountId, picked) => {
+            setModel(picked);
+            setEngine(EngineAccountId.parse(accountId));
+          }}
+        />
+      </div>
       {error && (
         <p role="alert" className="text-small text-ink-secondary">
           {error}

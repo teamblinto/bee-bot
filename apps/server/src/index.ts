@@ -62,7 +62,7 @@ async function boot(bootstrap: Bootstrap) {
     store,
     runTurn,
     probeEngine: probe,
-    probeUsage: () => probeUsage(claudeCommand, dataDir),
+    probeUsage: (onModels) => probeUsage(claudeCommand, dataDir, onModels),
   });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe();
@@ -70,6 +70,7 @@ async function boot(bootstrap: Bootstrap) {
     console.error(`beebotd: Claude bots paused: ${pauseReason}`);
     store.pauseReadyBots("claude", pauseReason);
   }
+  server.refreshLimits();
   return async () => {
     await server.close();
     store.close();

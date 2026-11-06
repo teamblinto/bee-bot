@@ -7,6 +7,7 @@ import {
   Approval,
   type ApprovalTool,
   Bot,
+  type BotAccess,
   ChatMessage,
   type ChatState,
   defaultBotModel,
@@ -224,6 +225,16 @@ export const migrations = [
       PRIMARY KEY (account_id, window_id)
     );`,
   },
+  {
+    name: "bot_engine",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN effort TEXT;
+    ALTER TABLE bots ADD COLUMN mode TEXT NOT NULL DEFAULT 'build'
+      CHECK (mode IN ('build', 'plan'));
+    ALTER TABLE bots ADD COLUMN access TEXT NOT NULL DEFAULT 'supervised'
+      CHECK (access IN ('supervised', 'auto-edits', 'full'));`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -248,6 +259,7 @@ const HistoryRow = ChatMessage.pick({ author: true, body: true });
 const FoundMessage = ChatMessage.pick({ author: true, body: true, createdAt: true });
 const RowId = z.object({ rowid: z.number() });
 const Tainted = z.object({ tainted: z.number().transform(Boolean) });
+const Attended = z.object({ attended: z.number().transform(Boolean) });
 const Count = z.object({ count: z.number() });
 const IdRow = z.object({ id: z.string() });
 const QueuedRun = z.object({ id: z.string(), botId: z.string(), engineAccountId: z.string() });
@@ -278,6 +290,7 @@ export type Wake = z.infer<typeof WakeRow>;
 
 export type ClaimedRun = {
   id: string;
+  attended: boolean;
   prompt: string;
   sessionId: string;
   resume: boolean;
@@ -416,7 +429,7 @@ export function openEventStore(dataDir: string) {
   }
 
   const botColumns = `b.id, b.name, b.personality, b.status, b.pause_reason AS pauseReason,
-    r.id AS roomId, b.engine_account_id AS engineAccountId, b.model`;
+    r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id ORDER BY b.rowid`,
   );
@@ -432,7 +445,10 @@ export function openEventStore(dataDir: string) {
   );
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
   const updateBotFields = db.prepare(
-    "UPDATE bots SET name = ?, personality = ?, model = COALESCE(?, model) WHERE id = ?",
+    "UPDATE bots SET name = ?, personality = ?, model = ?, effort = ? WHERE id = ?",
+  );
+  const updateBotEngine = db.prepare(
+    "UPDATE bots SET model = ?, effort = ?, mode = ?, access = ? WHERE id = ?",
   );
   const updateBotStatus = db.prepare("UPDATE bots SET status = ?, pause_reason = ? WHERE id = ?");
 
@@ -509,6 +525,7 @@ export function openEventStore(dataDir: string) {
   const selectAnyPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND status = 'pending'",
   );
+  const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
 
   const runColumns = `id, bot_id AS botId, status, reason, created_at AS createdAt,
     started_at AS startedAt, ended_at AS endedAt, scope_id AS scopeId, wake_id AS wakeId, engine_account_id AS engineAccountId,
@@ -919,19 +936,28 @@ export function openEventStore(dataDir: string) {
         emit({ type: "bot.changed", bot });
         return bot;
       }),
-    // Without a model the bot keeps its own: an edit must not quietly switch it.
-    updateBot: (
-      id: string,
-      fields: Pick<Bot, "name" | "personality"> & Partial<Pick<Bot, "model">>,
-    ) =>
+    getBot,
+    updateBot: (id: string, fields: Pick<Bot, "name" | "personality" | "model" | "effort">) =>
       transaction(() => {
-        updateBotFields.run(fields.name, fields.personality, fields.model ?? null, id);
+        const { name, personality, model, effort } = fields;
+        updateBotFields.run(name, personality, model, effort, id);
         const bot = getBot(id);
         if (bot) {
           emit({ type: "bot.changed", bot });
         }
         return bot;
       }),
+    setBotEngine: (id: string, fields: Pick<Bot, "model" | "effort" | "mode" | "access">) =>
+      transaction(() => {
+        const { model, effort, mode, access } = fields;
+        updateBotEngine.run(model, effort, mode, access, id);
+        const bot = getBot(id);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+        }
+        return bot;
+      }),
+    botAccess: (id: string) => getBot(id)?.access,
     setBotPause: (id: string, reason: Bot["pauseReason"]) =>
       transaction(() => setPause(id, reason)),
     // An owner's pause is left alone: its reason says what the owner has to undo.
@@ -1061,9 +1087,10 @@ export function openEventStore(dataDir: string) {
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
         recordRun(run);
-        const { name, personality, model } = Bot.parse(selectBot.get(run.botId));
+        const { name, personality, model, effort, mode } = Bot.parse(selectBot.get(run.botId));
         return {
           id,
+          attended: Attended.parse(selectWakeAttended.get(run.wakeId)).attended,
           sessionId,
           resume: scope.sessionStarted,
           prompt: turnPrompt(scope, highSeq),
@@ -1073,6 +1100,8 @@ export function openEventStore(dataDir: string) {
             personality,
             engineAccountId: run.engineAccountId,
             model,
+            effort,
+            mode,
             memory: buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
           },
         };
@@ -1175,7 +1204,7 @@ export function openEventStore(dataDir: string) {
       botId: string,
       tool: ApprovalTool,
       status: "allowed" | "refused",
-      reason: "always" | null,
+      reason: "always" | `access:${BotAccess}` | null,
     ) => {
       insertAudit.run(runId, botId, status, reason, tool, new Date().toISOString());
     },

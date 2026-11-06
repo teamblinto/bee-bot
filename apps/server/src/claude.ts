@@ -4,11 +4,12 @@ import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import type { BotModel, EngineStatus, PauseReason } from "@beebot/contracts";
+import { Effort, type EngineModel, type EngineStatus, type PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
 import {
   type BotLaunch,
+  type EngineChoice,
   type RunTurn,
   type ThinkingState,
   toolDetail,
@@ -33,6 +34,9 @@ const toolList = "Read,Write,Edit,Glob,Grep,Bash";
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
 // reaching `approve` would taint the scope. A new memory tool must be added here on purpose.
 const askSettings = JSON.stringify({
+  // Relative to the workspace. Plan mode writes this file without asking, and the default is under
+  // ~/.claude, a path no bot may touch.
+  plansDirectory: ".plans",
   permissions: {
     ask: ["Bash", "Read", "Glob", "Grep"],
     allow: ["memory_search", "memory_get", "memory_propose", "memory_forget"].map(
@@ -64,8 +68,9 @@ const usageLine = `${JSON.stringify({
   request: { subtype: "get_usage" },
 })}\n`;
 
+// The Git Bash path stays: without it the CLI can lose the Bash tool on Windows.
 const clearedEnv =
-  /^(ANTHROPIC_|CLAUDE|T3CODE|AWS_|GOOGLE_APPLICATION|VERTEX_|CLOUD_ML_|DISABLE_|MCP_|ELECTRON_RUN_AS_NODE$)/i;
+  /^(?!CLAUDE_CODE_GIT_BASH_PATH$)(ANTHROPIC_|CLAUDE|T3CODE|AWS_|GOOGLE_APPLICATION|VERTEX_|CLOUD_ML_|DISABLE_|MCP_|ELECTRON_RUN_AS_NODE$)/i;
 
 export function childEnv(parent: NodeJS.ProcessEnv = process.env) {
   return {
@@ -78,11 +83,41 @@ export function childEnv(parent: NodeJS.ProcessEnv = process.env) {
 // The child can't see this variable, so its login may live in the config dir we just hid.
 const authPause = (): PauseReason => (process.env.CLAUDE_CONFIG_DIR ? "config_dir" : "auth_failed");
 
+const allEfforts = Effort.options;
+
+// Used until the CLI's `initialize` reply lists the real models.
+export const staticClaudeModels: EngineModel[] = [
+  { id: "fable", label: "Fable", efforts: allEfforts },
+  { id: "opus", label: "Opus", efforts: allEfforts },
+  { id: "sonnet", label: "Sonnet", efforts: allEfforts },
+  { id: "haiku", label: "Haiku", efforts: allEfforts },
+];
+
+const CliModel = z.object({
+  value: z.string().min(1),
+  displayName: z.string().min(1),
+  supportedEffortLevels: z.array(z.string()).optional(),
+});
+
+// `default` follows whatever the CLI picks today, so a bot on it could change model unasked.
+export function modelsFromInitialize(models: unknown): EngineModel[] | undefined {
+  const listed = z
+    .array(CliModel)
+    .safeParse(models)
+    .data?.filter(({ value }) => value !== "default")
+    .map(({ value, displayName, supportedEffortLevels = [] }) => ({
+      id: value,
+      label: displayName,
+      efforts: supportedEffortLevels.flatMap((level) => Effort.safeParse(level).data ?? []),
+    }));
+  return listed?.length ? listed : undefined;
+}
+
 export function turnArgs(
   personaPath: string,
   sessionId: string,
   resume: boolean,
-  model: BotModel,
+  { model, effort, mode }: EngineChoice,
   configPath: string,
 ) {
   return [
@@ -95,6 +130,9 @@ export function turnArgs(
     "--include-partial-messages",
     "--model",
     model,
+    ...(effort ? ["--effort", effort] : []),
+    // The only mode that ever reaches the CLI: approvals stay with the permission tool below.
+    ...(mode === "plan" ? ["--permission-mode", "plan"] : []),
     "--setting-sources",
     settingSources,
     "--strict-mcp-config",
@@ -168,6 +206,7 @@ const Frame = z.object({
       response: z
         .object({
           claude_code_version: loose,
+          models: loose,
           account: z
             .object({
               subscriptionType: loose,
@@ -499,8 +538,13 @@ function runProcess({
   });
 }
 
-function personaText({ name, personality, memory }: BotLaunch) {
-  return [`Your name is ${name}.`, personality, memory].filter(Boolean).join("\n\n");
+const planNote =
+  "This turn is in Plan mode. The owner can't see your plan file, so put the whole plan in your reply.";
+
+function personaText({ name, personality, memory, mode }: BotLaunch) {
+  return [`Your name is ${name}.`, personality, memory, mode === "plan" ? planNote : ""]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
@@ -565,7 +609,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     const attempt = (asResume: boolean) =>
       runProcess({
         command,
-        args: turnArgs(personaPath, sessionId, asResume, launch.model, configPath),
+        args: turnArgs(personaPath, sessionId, asResume, launch, configPath),
         cwd,
         prompt,
         signal,
@@ -624,7 +668,11 @@ function parseUsageFrame(line: string) {
 
 // Undocumented, so it runs behind ruling R29's guards. The CLI makes the call under its own login:
 // this asks it and nothing else, and it never sends a user message, so no session is opened.
-export function probeUsage(command: readonly string[], cwd: string) {
+export function probeUsage(
+  command: readonly string[],
+  cwd: string,
+  onModels?: (models: EngineModel[]) => void,
+) {
   return new Promise<UsageProbe>((resolve) => {
     const [file = "", ...prefix] = command;
     const child = NodeChildProcess.spawn(file, [...prefix, ...usageArgs], {
@@ -675,6 +723,10 @@ export function probeUsage(command: readonly string[], cwd: string) {
         } else if (rejection) {
           finish(unavailableProbe("unsupported"));
         } else {
+          const models = modelsFromInitialize(frame.response.response?.models);
+          if (models) {
+            onModels?.(models);
+          }
           child.stdin.write(usageLine);
         }
       } else if (frame.response?.request_id === "usage-1") {

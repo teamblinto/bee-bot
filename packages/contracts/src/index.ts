@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 7;
+export const protocolVersion = 8;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -29,9 +29,32 @@ export const PauseReason = z.enum([
 ]);
 export type PauseReason = z.infer<typeof PauseReason>;
 
-export const BotModel = z.enum(["haiku", "sonnet", "opus"]);
+// What the catalog allows is decided by the server, which knows what the CLI offers today.
+export const BotModel = z.string().trim().min(1).max(100);
 export type BotModel = z.infer<typeof BotModel>;
 export const defaultBotModel: BotModel = "sonnet";
+
+export const Effort = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export type Effort = z.infer<typeof Effort>;
+
+export const BotMode = z.enum(["build", "plan"]);
+export type BotMode = z.infer<typeof BotMode>;
+
+export const BotAccess = z.enum(["supervised", "auto-edits", "full"]);
+export type BotAccess = z.infer<typeof BotAccess>;
+
+export const EngineModel = z.object({
+  id: BotModel,
+  label: z.string(),
+  efforts: z.array(Effort),
+});
+export type EngineModel = z.infer<typeof EngineModel>;
+
+// By engine account. Absent accounts aren't offered on this server.
+export const ModelCatalog = z.record(z.string(), z.array(EngineModel));
+export type ModelCatalog = z.infer<typeof ModelCatalog>;
+
+export const EngineAccountId = z.enum(["claude", "fake"]);
 
 export const Bot = z.object({
   id: z.string(),
@@ -42,6 +65,10 @@ export const Bot = z.object({
   roomId: z.string(),
   engineAccountId: z.string(),
   model: BotModel,
+  // Null leaves the choice to the CLI.
+  effort: Effort.nullable(),
+  mode: BotMode,
+  access: BotAccess,
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -301,6 +328,8 @@ export const ServerMessage = z.discriminatedUnion("type", [
   }),
   // The whole pending set, sent on subscribe and on every change. Never persisted.
   z.object({ type: z.literal("pending-approvals"), approvals: z.array(PendingApproval) }),
+  // The whole catalog, sent on subscribe and on every change. Never persisted.
+  z.object({ type: z.literal("model-catalog"), models: ModelCatalog }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 
@@ -314,9 +343,25 @@ export const Command = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("create-bot"),
     ...botFields,
-    engineAccountId: z.enum(["claude", "fake"]).optional(),
+    engineAccountId: EngineAccountId.optional(),
   }),
-  z.object({ type: z.literal("update-bot"), botId: z.uuid(), ...botFields }),
+  z.object({
+    type: z.literal("update-bot"),
+    botId: z.uuid(),
+    ...botFields,
+    // Only so a change can be refused: a session belongs to one vendor.
+    engineAccountId: EngineAccountId.optional(),
+  }),
+  // A partial update. A missing field keeps its value, and a null effort clears it.
+  z.object({
+    type: z.literal("set-bot-engine"),
+    botId: z.uuid(),
+    engineAccountId: EngineAccountId.optional(),
+    model: BotModel.optional(),
+    effort: Effort.nullable().optional(),
+    mode: BotMode.optional(),
+    access: BotAccess.optional(),
+  }),
   z.object({ type: z.literal("set-bot-paused"), botId: z.uuid(), paused: z.boolean() }),
   z.object({
     type: z.literal("send-message"),

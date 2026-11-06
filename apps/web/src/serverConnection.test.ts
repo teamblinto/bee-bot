@@ -23,6 +23,9 @@ const bot: Bot = {
   roomId: "room",
   engineAccountId: "fake",
   model: "sonnet",
+  effort: null,
+  mode: "build",
+  access: "supervised",
 };
 const message = (id: string): ChatMessage => ({
   id,
@@ -102,6 +105,7 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
   loaded: true,
   seq,
   chat: { ...emptyChat, ...chat },
+  models: undefined,
   drafts: {},
   liveTools: {},
   thinking: {},

@@ -6,11 +6,15 @@ import * as NodePath from "node:path";
 import type { Duplex } from "node:stream";
 
 import {
+  type Bot,
   type Bootstrap,
   ClientMessage,
   Command,
   defaultBotModel,
+  type Effort,
+  type EngineModel,
   EngineStatus,
+  type ModelCatalog,
   type ProtocolNotice,
   protocolVersion,
   type ServerMessage,
@@ -20,6 +24,7 @@ import {
 import { type WebSocket, WebSocketServer } from "ws";
 
 import { createApprovals } from "./approvals.ts";
+import { staticClaudeModels } from "./claude.ts";
 import { fakeRunTurn, type RunTurn, workspacePath } from "./engine.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
@@ -40,7 +45,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   store: EventStore;
   probeEngine: () => Promise<EngineStatus>;
   runTurn?: RunTurn;
-  probeUsage?: (() => Promise<UsageProbe>) | undefined;
+  probeUsage?: ((onModels: (models: EngineModel[]) => void) => Promise<UsageProbe>) | undefined;
   // Where Claude Code keeps its transcripts.
   projectsDir?: string | undefined;
   usageRefreshGapMs?: number | undefined;
@@ -115,6 +120,47 @@ export async function startServer({
 }: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
+  let claudeModels = staticClaudeModels;
+
+  const catalog = (): ModelCatalog => ({
+    claude: claudeModels,
+    ...(fakeEngine && { fake: staticClaudeModels }),
+  });
+  const modelsOf = (accountId: string) =>
+    accountId === "claude" ? claudeModels : staticClaudeModels;
+
+  function setClaudeModels(models: EngineModel[]) {
+    if (JSON.stringify(models) !== JSON.stringify(claudeModels)) {
+      claudeModels = models;
+      broadcast({ type: "model-catalog", models: catalog() });
+    }
+  }
+
+  // A saved model that left the catalog is still the bot's: only a change to one is refused.
+  function engineChoice(
+    bot: Pick<Bot, "model" | "effort" | "engineAccountId">,
+    change: {
+      engineAccountId?: string | undefined;
+      model?: string | undefined;
+      effort?: Effort | null | undefined;
+    },
+  ) {
+    if (change.engineAccountId && change.engineAccountId !== bot.engineAccountId) {
+      return { refused: { status: 409, body: { code: "provider_locked" } } };
+    }
+    const model = change.model ?? bot.model;
+    const entry = modelsOf(bot.engineAccountId).find(({ id }) => id === model);
+    if (!entry && model !== bot.model) {
+      return { refused: { status: 400, body: { code: "unknown_model" } } };
+    }
+    if (change.effort && !entry?.efforts.includes(change.effort)) {
+      return { refused: { status: 400, body: { code: "unsupported_effort" } } };
+    }
+    // Moving to a model without the current level leaves the choice to the CLI.
+    const kept = bot.effort && entry?.efforts.includes(bot.effort) ? bot.effort : null;
+    return { model, effort: change.effort === undefined ? kept : change.effort };
+  }
+
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
   function broadcast(message: ServerMessage) {
@@ -152,7 +198,7 @@ export async function startServer({
   });
   const limits = createLimitRefresher({
     store,
-    probe: probeUsage,
+    probe: probeUsage && (() => probeUsage(setClaudeModels)),
     minGapMs: usageRefreshGapMs,
     onSettled: () => supervisor.pump(),
   });
@@ -214,13 +260,38 @@ export async function startServer({
         if (engineAccountId === "fake" && !fakeEngine) {
           return { status: 403, body: { code: "engine_not_allowed" } };
         }
+        if (!modelsOf(engineAccountId).some(({ id }) => id === model)) {
+          return { status: 400, body: { code: "unknown_model" } };
+        }
         const bot = store.createBot({ name, personality, engineAccountId, model });
         return { status: 200, body: bot };
       }
       case "update-bot": {
-        const { botId, name, personality, model } = command;
-        const bot = store.updateBot(botId, { name, personality, ...(model && { model }) });
-        return bot ? { status: 200, body: bot } : notFound;
+        const { botId, name, personality } = command;
+        const current = store.getBot(botId);
+        if (!current) {
+          return notFound;
+        }
+        const choice = engineChoice(current, command);
+        if (choice.refused) {
+          return choice.refused;
+        }
+        const { model, effort } = choice;
+        return { status: 200, body: store.updateBot(botId, { name, personality, model, effort }) };
+      }
+      case "set-bot-engine": {
+        const current = store.getBot(command.botId);
+        if (!current) {
+          return notFound;
+        }
+        const choice = engineChoice(current, command);
+        if (choice.refused) {
+          return choice.refused;
+        }
+        const { model, effort } = choice;
+        const { mode = current.mode, access = current.access } = command;
+        const bot = store.setBotEngine(command.botId, { model, effort, mode, access });
+        return { status: 200, body: bot };
       }
       case "set-bot-paused": {
         const bot = store.setBotPause(command.botId, command.paused ? "owner" : null);
@@ -427,6 +498,7 @@ export async function startServer({
         try {
           send(client, catchUp(message.afterSeq));
           send(client, { type: "pending-approvals", approvals: approvals.pending() });
+          send(client, { type: "model-catalog", models: catalog() });
           subscribers.add(client);
         } catch (error) {
           console.error(error);
@@ -447,6 +519,8 @@ export async function startServer({
 
   return {
     port: (server.address() as AddressInfo).port,
+    // Fills the model catalog too, so the first picker shows what the CLI offers.
+    refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
     close: async () => {
       approvals.close();
       await supervisor.close();

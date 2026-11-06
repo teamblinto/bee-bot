@@ -3,20 +3,29 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { EngineStatus } from "@beebot/contracts";
+import { Effort, EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   childEnv,
   createClaudeRunTurn,
+  modelsFromInitialize,
   probeEngine,
   probeUsage,
+  staticClaudeModels,
   turnArgs,
   writeMcpConfig,
 } from "./claude.ts";
-import { type BotLaunch, type ThinkingState, toolDetail, type ToolStart } from "./engine.ts";
+import {
+  type BotLaunch,
+  type EngineChoice,
+  type ThinkingState,
+  toolDetail,
+  type ToolStart,
+} from "./engine.ts";
 import type { WindowUpdate } from "./usage.ts";
 
+const plain: EngineChoice = { model: "sonnet", effort: null, mode: "build" };
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
 const launch: BotLaunch = {
   botId: "7f0f6a55-5a4c-4c37-9d0b-2f3c1d2e6b10",
@@ -24,6 +33,8 @@ const launch: BotLaunch = {
   personality: "Terse.",
   engineAccountId: "claude",
   model: "opus",
+  effort: null,
+  mode: "build",
   memory: "",
 };
 const prompt = "the owner's private question";
@@ -333,6 +344,7 @@ describe("a turn", () => {
     expect(flag("--tools")).toBe("Read,Write,Edit,Glob,Grep,Bash");
     expect(flag("--permission-prompt-tool")).toBe("mcp__bee__approve");
     expect(JSON.parse(flag("--settings") ?? "")).toEqual({
+      plansDirectory: ".plans",
       permissions: {
         ask: ["Bash", "Read", "Glob", "Grep"],
         allow: [
@@ -346,14 +358,72 @@ describe("a turn", () => {
   });
 
   it("starts a session by ID and continues it with --resume", () => {
-    expect(turnArgs("p", "s", false, "sonnet", "c").slice(-2)).toEqual(["--session-id", "s"]);
-    expect(turnArgs("p", "s", true, "sonnet", "c").slice(-2)).toEqual(["--resume", "s"]);
+    expect(turnArgs("p", "s", false, plain, "c").slice(-2)).toEqual(["--session-id", "s"]);
+    expect(turnArgs("p", "s", true, plain, "c").slice(-2)).toEqual(["--resume", "s"]);
+  });
+
+  describe.each([
+    ["a new session", false],
+    ["a resumed session", true],
+  ])("on %s", (_, resume) => {
+    const args = (choice: Partial<EngineChoice>) =>
+      turnArgs("p", "s", resume, { ...plain, ...choice }, "c");
+    const flag = (list: string[], name: string) =>
+      list.includes(name) ? list[list.indexOf(name) + 1] : undefined;
+
+    it.each(["fable", "opus", "claude-sonnet-4-6"])("passes the model %s", (model) => {
+      expect(flag(args({ model }), "--model")).toBe(model);
+    });
+
+    it.each(Effort.options)("passes the effort %s", (effort) => {
+      expect(flag(args({ effort }), "--effort")).toBe(effort);
+    });
+
+    it("adds --effort and --permission-mode only when they are set", () => {
+      expect(args({})).not.toContain("--effort");
+      expect(args({})).not.toContain("--permission-mode");
+      expect(flag(args({ mode: "plan" }), "--permission-mode")).toBe("plan");
+    });
+
+    it("never hands approvals to the CLI", () => {
+      const all = [args({}), args({ mode: "plan", effort: "max" })].flat();
+      for (const banned of ["bypassPermissions", "acceptEdits", "auto", "dontAsk"]) {
+        expect(all).not.toContain(banned);
+      }
+      expect(all.join(" ")).not.toMatch(/dangerously/);
+    });
   });
 
   it("reports tool starts by name, in order", async () => {
     const { outcome, tools } = turn("tool-use");
     expect(await outcome).toEqual({ kind: "completed", text: "noted" });
     expect(tools).toEqual(["Bash", "Read"]);
+  });
+});
+
+describe("the model list", () => {
+  const listed = [
+    { value: "default", displayName: "Default (recommended)", supportedEffortLevels: ["low"] },
+    { value: "fable", displayName: "Fable 5.1", supportedEffortLevels: ["low", "ultra", "max"] },
+    { value: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5" },
+  ];
+
+  it("reads the CLI's models, leaving out `default` and levels Bee doesn't know", () => {
+    expect(modelsFromInitialize(listed)).toEqual([
+      { id: "fable", label: "Fable 5.1", efforts: ["low", "max"] },
+      { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", efforts: [] },
+    ]);
+  });
+
+  it.each([[undefined], [[]], ["nope"], [[{ value: 1 }]]])(
+    "falls back when the reply holds %j",
+    (models) => {
+      expect(modelsFromInitialize(models)).toBeUndefined();
+    },
+  );
+
+  it("offers fable in the static catalog", () => {
+    expect(staticClaudeModels.map(({ id }) => id)).toContain("fable");
   });
 });
 
@@ -526,6 +596,13 @@ describe("the child environment", () => {
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
       ]),
     );
+  });
+
+  it("keeps the Git Bash path, which the CLI needs for its Bash tool on Windows", () => {
+    expect(childEnv({ CLAUDE_CODE_GIT_BASH_PATH: "bash.exe", CLAUDE_X: "y" })).toEqual(
+      expect.objectContaining({ CLAUDE_CODE_GIT_BASH_PATH: "bash.exe" }),
+    );
+    expect(childEnv({ CLAUDE_X: "y" })).not.toHaveProperty("CLAUDE_X");
   });
 
   it("clears names case-insensitively, as Windows treats them", () => {

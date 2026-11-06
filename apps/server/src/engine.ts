@@ -2,7 +2,7 @@ import { once } from "node:events";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers/promises";
 
-import type { BotModel, PauseReason } from "@beebot/contracts";
+import type { Bot, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { WindowUpdate } from "./usage.ts";
@@ -15,12 +15,13 @@ export type TurnOutcome =
   // The engine no longer has this session: the supervisor restarts from the room digest.
   | { kind: "session_lost" };
 
-export type BotLaunch = {
+export type EngineChoice = Pick<Bot, "model" | "effort" | "mode">;
+
+export type BotLaunch = EngineChoice & {
   botId: string;
   name: string;
   personality: string;
   engineAccountId: string;
-  model: BotModel;
   memory: string;
 };
 

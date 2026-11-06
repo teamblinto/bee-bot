@@ -16,8 +16,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
-import { inputDigest } from "./approvals.ts";
-import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
+import { createApprovals, inputDigest } from "./approvals.ts";
+import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
@@ -859,5 +859,138 @@ describe("memory tools", () => {
     vi.restoreAllMocks();
     expect(answer).toBe("Memory is unavailable right now.");
     expect(printed).not.toContain(secret);
+  });
+});
+
+describe("access levels", () => {
+  const offLimits = () => NodePath.join(dataDir, "..", "elsewhere", ".ssh", "id_rsa");
+  const toolInput = (tool: string, where: string): Record<string, unknown> =>
+    tool === "Bash"
+      ? { command: "ls" }
+      : tool === "Glob" || tool === "Grep"
+        ? { pattern: "x", path: where }
+        : { file_path: NodePath.join(where, "a.txt") };
+
+  async function atLevel(access: "supervised" | "auto-edits" | "full") {
+    const server = await boot();
+    const { bot, turn } = await server.startTurn();
+    await server.post({ type: "set-bot-engine", botId: bot.id, access });
+    return { ...server, bot, turn };
+  }
+
+  const tools = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"] as const;
+  const cases = tools.flatMap((tool) =>
+    (["inside", "outside"] as const).flatMap((where) => [
+      ["supervised", tool, where, false] as const,
+      [
+        "auto-edits",
+        tool,
+        where,
+        where === "inside" && (tool === "Write" || tool === "Edit"),
+      ] as const,
+      ["full", tool, where, true] as const,
+    ]),
+  );
+
+  it.each(cases)("%s: %s %s the workspace, automatic is %s", async (access, tool, where, auto) => {
+    const { bot, turn, decide, nextCard, client } = await atLevel(access);
+    const place =
+      where === "inside" ? workspacePath(dataDir, bot.id) : NodePath.join(dataDir, "..", "out");
+    const call = mcp(turn.permissions, toolCall(tool, toolInput(tool, place)));
+    if (auto) {
+      expect(await decisionOf(await call)).toMatchObject({ behavior: "allow" });
+      expect(client.cards() ?? []).toEqual([]);
+      expect(auditRows().at(-1)).toEqual({ tool, status: "allowed", reason: `access:${access}` });
+      return;
+    }
+    await decide(await nextCard(), "deny");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+  });
+
+  it.each(["supervised", "auto-edits", "full"] as const)(
+    "refuses a forbidden path at %s",
+    async (access) => {
+      const { turn, client } = await atLevel(access);
+      for (const tool of ["Read", "Write", "Edit"]) {
+        const input = { file_path: offLimits() };
+        const refused = await decisionOf(await mcp(turn.permissions, toolCall(tool, input)));
+        expect(refused).toMatchObject({ behavior: "deny" });
+      }
+      expect(client.cards() ?? []).toEqual([]);
+      expect(auditRows().map(({ status }) => status)).toEqual(["refused", "refused", "refused"]);
+    },
+  );
+
+  it("applies a lowered level to the next call of a running turn", async () => {
+    const { bot, turn, post, nextCard, decide } = await atLevel("full");
+    const bash = () => mcp(turn.permissions, toolCall("Bash", { command: "ls" }));
+    expect(await decisionOf(await bash())).toMatchObject({ behavior: "allow" });
+
+    await post({ type: "set-bot-engine", botId: bot.id, access: "supervised" });
+    const held = bash();
+    await decide(await nextCard(), "deny");
+    expect(await decisionOf(await held)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("never writes the tool input to the audit log", async () => {
+    const { turn } = await atLevel("full");
+    await mcp(turn.permissions, toolCall("Bash", { command }));
+    expect(JSON.stringify(rows("SELECT * FROM audit_log"))).not.toContain(secret);
+    expect(auditRows().at(-1)).toEqual({ tool: "Bash", status: "allowed", reason: "access:full" });
+  });
+
+  it("asks about everything in a Plan turn, even at full access", async () => {
+    const server = await boot();
+    const created = await server.post({
+      type: "create-bot",
+      name: "Ada",
+      personality: "",
+      engineAccountId: "claude",
+    });
+    const bot = (await created.json()) as Bot;
+    await server.post({ type: "set-bot-engine", botId: bot.id, mode: "plan", access: "full" });
+    const before = server.turns.length;
+    await server.post({
+      type: "send-message",
+      messageId: NodeCrypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "plan",
+    });
+    await vi.waitFor(() => expect(server.turns.length).toBe(before + 1), { timeout: 3000 });
+    const { permissions } = server.turns[before] as Turn;
+    const held = mcp(permissions, toolCall("Bash", { command: "rm -rf x" }));
+    await server.decide(await server.nextCard(), "deny");
+    expect(await decisionOf(await held)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("gives full access to attended runs only", async () => {
+    const store = openEventStore(dataDir);
+    cleanups.push(() => store.close());
+    const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+    store.setBotEngine(bot.id, { model: "sonnet", effort: null, mode: "build", access: "full" });
+    store.sendMessage({ id: "m", roomId: bot.roomId, body: "hi", attended: false });
+    const [wake] = store.dueWakes(new Date().toISOString());
+    store.queueRun(wake as NonNullable<typeof wake>);
+    const claimed = store.claimRun(
+      store.queuedRuns()[0]?.id as string,
+      "boot",
+      new Date().toISOString(),
+    );
+    expect(claimed?.attended).toBe(false);
+
+    const approvals = createApprovals({ store, dataDir, onChange: () => {} });
+    cleanups.push(() => approvals.close());
+    const mode = { attended: false, plan: false };
+    approvals.openRun(claimed?.id as string, bot.id, mode);
+    const run = { ...mode, id: claimed?.id as string, botId: bot.id, tokenHash: Buffer.alloc(0) };
+    const closed = new AbortController();
+    const decision = approvals.approve(
+      run,
+      { tool_name: "Bash", input: { command: "ls" } },
+      closed.signal,
+    );
+    expect(approvals.pending()).toHaveLength(1);
+    closed.abort();
+    expect(await decision).toMatchObject({ behavior: "deny" });
   });
 });

@@ -1,7 +1,13 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 
-import { type Approval, ApprovalTool, type Command, type PendingApproval } from "@beebot/contracts";
+import {
+  type Approval,
+  ApprovalTool,
+  type BotAccess,
+  type Command,
+  type PendingApproval,
+} from "@beebot/contracts";
 import { z } from "zod";
 
 import { workspacePath } from "./engine.ts";
@@ -54,7 +60,20 @@ function detailText(
   return typeof file_path === "string" ? file_path : undefined;
 }
 
-type Run = { id: string; botId: string; tokenHash: Buffer };
+type RunMode = { attended: boolean; plan: boolean };
+type Run = RunMode & { id: string; botId: string; tokenHash: Buffer };
+
+// Runs only after the path policy passed, so a forbidden path never gets here. A Plan turn is
+// asked about everything: the CLI leaves Bash to the model there, and the owner asked for no changes.
+function accessAllows(access: BotAccess, tool: ApprovalTool, inside: boolean, run: RunMode) {
+  if (run.plan) {
+    return false;
+  }
+  if (access === "full") {
+    return run.attended;
+  }
+  return access === "auto-edits" && inside && (tool === "Write" || tool === "Edit");
+}
 
 type HeldCall = PendingApproval & {
   runId: string;
@@ -137,9 +156,9 @@ export function createApprovals({
   }
 
   return {
-    openRun: (id: string, botId: string) => {
+    openRun: (id: string, botId: string, mode: RunMode) => {
       const token = NodeCrypto.randomBytes(32).toString("base64url");
-      runs.set(id, { id, botId, tokenHash: sha256(token).digest() });
+      runs.set(id, { ...mode, id, botId, tokenHash: sha256(token).digest() });
       return token;
     },
 
@@ -182,6 +201,12 @@ export function createApprovals({
       if (!policy.allowed) {
         store.auditTool(run.id, run.botId, tool, "refused", null);
         return { behavior: "deny", message: policy.message };
+      }
+      // Read on every call, so lowering the level holds the running turn's next call.
+      const access = store.botAccess(run.botId);
+      if (access && accessAllows(access, tool, policy.inside, run)) {
+        store.auditTool(run.id, run.botId, tool, "allowed", `access:${access}`);
+        return { behavior: "allow", updatedInput: input };
       }
       const canAlwaysAllow = alwaysAllowable.has(tool) && policy.inside;
       if (canAlwaysAllow && store.toolGranted(run.botId, tool)) {

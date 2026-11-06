@@ -273,6 +273,93 @@
     color: var(--color-ink);
   }
 
+  .composer-control {
+    display: inline-flex;
+    min-width: 0;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    max-width: 14rem;
+    padding-inline: 8px;
+    border-radius: var(--radius-field);
+    color: var(--color-ink-secondary);
+    font-size: var(--text-small);
+    line-height: var(--text-small--line-height);
+    white-space: nowrap;
+    transition-property: background-color, color;
+    transition-duration: var(--default-transition-duration);
+    transition-timing-function: var(--ease-bee);
+  }
+
+  .composer-control:hover:not(:disabled) {
+    background-color: var(--color-hover);
+    color: var(--color-ink);
+  }
+
+  .composer-control:disabled {
+    color: var(--color-ink-faint);
+  }
+
+  .popup {
+    inset: auto;
+    margin: 0;
+    max-width: calc(100vw - 16px);
+    transform-origin: bottom left;
+    position-try-fallbacks: flip-block;
+    opacity: 0;
+    scale: 0.98;
+    transition-property: opacity, scale, overlay, display;
+    transition-behavior: allow-discrete;
+    transition-duration: 120ms;
+    transition-timing-function: var(--ease-bee);
+  }
+
+  .popup[data-placement="top"] {
+    margin-bottom: 6px;
+    position-area: top span-right;
+  }
+
+  .popup[data-placement="bottom"] {
+    margin-top: 6px;
+    position-area: bottom span-right;
+  }
+
+  .popup:popover-open {
+    opacity: 1;
+    scale: 1;
+  }
+
+  @starting-style {
+    .popup:popover-open {
+      opacity: 0;
+      scale: 0.98;
+    }
+  }
+
+  .tooltip {
+    inset: auto;
+    margin: 4px;
+    padding: 4px 8px;
+    max-width: 18rem;
+    border-radius: var(--radius-field);
+    background-color: var(--color-ink);
+    color: var(--color-background);
+    font-size: var(--text-label);
+    line-height: var(--text-label--line-height);
+    pointer-events: none;
+    position-area: top;
+    position-try-fallbacks: flip-block, flip-inline;
+  }
+
+  .tooltip[data-side="bottom"] {
+    position-area: bottom;
+  }
+
+  .tooltip[data-side="left"] {
+    position-area: left;
+  }
+
   .shimmer {
     background: linear-gradient(
         90deg,

@@ -4,8 +4,10 @@ Bee Bot adapts parts of the following software.
 
 ## T3 Code
 
-Source: `apps/web/src/visibleAnimation.ts`, `apps/web/src/markdown-incremental.ts` and its test, and
-the usage limit and transcript logic in `apps/web/src/usageLimits.ts` and `apps/server/src/usage.ts`.
+Source: `apps/web/src/visibleAnimation.ts`, `apps/web/src/markdown-incremental.ts` and its test,
+the usage limit and transcript logic in `apps/web/src/usageLimits.ts` and `apps/server/src/usage.ts`,
+and the model picker in `apps/web/src/components/ModelPicker.tsx`, `modelPickerSearch.ts`,
+`EffortGlyph.tsx`, `ComposerControls.tsx` and the provider logos in `Logos.tsx`.
 
 ```text
 MIT License

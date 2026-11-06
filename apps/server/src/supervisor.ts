@@ -129,7 +129,9 @@ export function createSupervisor({
 
   function startTurn(run: ClaimedRun) {
     const controller = new AbortController();
-    const token = approvals.openRun(run.id, run.launch.botId);
+    const { attended, launch } = run;
+    const plan = launch.mode === "plan";
+    const token = approvals.openRun(run.id, launch.botId, { attended, plan });
     const tools: string[] = [];
     const seenTools = new Set<string>();
     const deltas = batchDeltas((text) => onDelta(run.id, text));

@@ -7,6 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
 import {
+  type Bot,
   type ChatState,
   type EngineStatus,
   protocolVersion,
@@ -110,7 +111,7 @@ async function subscribe(port: number, afterSeq: number) {
   const waiters: Array<(message: ServerMessage) => void> = [];
   socket.on("message", (data) => {
     const message = ServerMessage.parse(JSON.parse(data.toString()));
-    if (message.type === "pending-approvals") {
+    if (message.type === "pending-approvals" || message.type === "model-catalog") {
       return;
     }
     const waiter = waiters.shift();
@@ -435,6 +436,122 @@ describe("bot models", () => {
   });
 });
 
+describe("bot engine settings", () => {
+  async function bot(base: string, fields = {}) {
+    const response = await command(base, {
+      type: "create-bot",
+      name: "Ada",
+      personality: "",
+      ...fields,
+    });
+    return ((await response.json()) as Bot).id;
+  }
+  const code = async (response: Response) => ((await response.json()) as { code: string }).code;
+
+  it("gives a new bot the defaults, and updates one field at a time", async () => {
+    const { base, store } = await start();
+    const botId = await bot(base);
+    expect(store.state().bots[0]).toMatchObject({
+      model: "sonnet",
+      effort: null,
+      mode: "build",
+      access: "supervised",
+    });
+    await command(base, { type: "set-bot-engine", botId, effort: "high" });
+    await command(base, { type: "set-bot-engine", botId, mode: "plan" });
+    await command(base, { type: "set-bot-engine", botId, access: "auto-edits" });
+    expect(store.state().bots[0]).toMatchObject({
+      model: "sonnet",
+      effort: "high",
+      mode: "plan",
+      access: "auto-edits",
+    });
+    await command(base, { type: "set-bot-engine", botId, effort: null });
+    expect(store.state().bots[0]?.effort).toBeNull();
+  });
+
+  it("refuses an unknown model, an unsupported effort and a provider change", async () => {
+    const { base, store } = await start();
+    const unknown = await command(base, {
+      type: "create-bot",
+      name: "Ada",
+      personality: "",
+      model: "gpt-9",
+    });
+    expect(unknown.status).toBe(400);
+    expect(await code(unknown)).toBe("unknown_model");
+
+    const botId = await bot(base);
+    const refused = async (change: object, status: number, expected: string) => {
+      const response = await command(base, { type: "set-bot-engine", botId, ...change });
+      expect(response.status).toBe(status);
+      expect(await code(response)).toBe(expected);
+    };
+    await refused({ model: "gpt-9" }, 400, "unknown_model");
+    await refused({ model: "gpt-9", effort: "low" }, 400, "unknown_model");
+    await refused({ effort: "turbo" }, 400, "bad_request");
+    await refused({ engineAccountId: "fake" }, 409, "provider_locked");
+    const edit = { type: "update-bot", botId, name: "Ada", personality: "" };
+    expect(await code(await command(base, { ...edit, model: "gpt-9" }))).toBe("unknown_model");
+    const moved = await command(base, { ...edit, engineAccountId: "fake" });
+    expect(moved.status).toBe(409);
+    expect(store.state().bots[0]?.model).toBe("sonnet");
+  });
+
+  it("serves the CLI's list once a probe finds it, and refuses by that list", async () => {
+    const store = openEventStore(dataDir);
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [appOrigin],
+      store,
+      probeEngine,
+      probeUsage: async (onModels) => {
+        onModels([
+          { id: "sonnet", label: "Sonnet 5.5", efforts: ["low"] },
+          { id: "opus", label: "Opus 5.5", efforts: [] },
+        ]);
+        return { windows: [], unavailable: null };
+      },
+    });
+    cleanups.push(async () => {
+      await server.close();
+      store.close();
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    const client = await subscribe(server.port, 0);
+    await client.next();
+    const botId = await bot(base);
+    await command(base, { type: "set-bot-engine", botId, effort: "low" });
+    server.refreshLimits();
+    await vi.waitFor(async () => {
+      const unsupported = await command(base, { type: "set-bot-engine", botId, effort: "max" });
+      expect(await code(unsupported)).toBe("unsupported_effort");
+    });
+    const gone = await command(base, { type: "set-bot-engine", botId, model: "fable" });
+    expect(await code(gone)).toBe("unknown_model");
+    // Opus has no levels here, so the bot's level can't follow it there.
+    await command(base, { type: "set-bot-engine", botId, model: "opus" });
+    expect(store.state().bots[0]).toMatchObject({ model: "opus", effort: null });
+  });
+
+  it("keeps a saved model that left the catalog, and lets the bot still be edited", async () => {
+    const { base, store } = await start();
+    const botId = await bot(base);
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.prepare("UPDATE bots SET model = 'claude-old' WHERE id = ?").run(botId);
+    db.close();
+
+    const edit = { type: "update-bot", botId, name: "Eve", personality: "", model: "claude-old" };
+    expect((await command(base, edit)).status).toBe(200);
+    expect(store.state().bots[0]).toMatchObject({ name: "Eve", model: "claude-old" });
+    await command(base, { type: "set-bot-engine", botId, mode: "plan" });
+    expect(store.state().bots[0]).toMatchObject({ model: "claude-old", mode: "plan" });
+  });
+});
+
 describe("storage failure", () => {
   it("answers 500 and keeps serving when a write fails", async () => {
     const store = openEventStore(dataDir);
@@ -485,7 +602,10 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'usage_limits';
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_engine';
+      ALTER TABLE bots DROP COLUMN effort; ALTER TABLE bots DROP COLUMN mode;
+      ALTER TABLE bots DROP COLUMN access;
+      DELETE FROM migrations WHERE name = 'usage_limits';
       DROP TABLE usage_checks; DROP TABLE usage_windows;
       DELETE FROM migrations WHERE name = 'run_timing';
       ALTER TABLE messages DROP COLUMN worked_ms;

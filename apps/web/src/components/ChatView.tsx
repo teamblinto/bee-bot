@@ -1,5 +1,5 @@
 import type { Bot } from "@beebot/contracts";
-import { Ellipsis, PanelLeft } from "lucide-react";
+import { Ellipsis, PanelLeft, ShieldOff } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { connectionLines, pauseLine, runLine } from "../labels";
@@ -97,7 +97,7 @@ export function ChatView({
   onOpenDrawer: () => void;
 }) {
   const { chat, drafts, liveTools, thinking, finishedTools } = connection;
-  const { pending, engine, status, commandError, lastSeen } = connection;
+  const { pending, engine, status, commandError, lastSeen, models } = connection;
   const connected = status === "connected";
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
   const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
@@ -149,6 +149,12 @@ export function ChatView({
         <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
           Attended only
         </span>
+        {bot.access === "full" && (
+          <span className="flex shrink-0 items-center gap-1 rounded-full border border-danger/40 bg-danger-surface px-2 py-px text-micro text-danger">
+            <ShieldOff {...iconProps} size={12} />
+            Full access
+          </span>
+        )}
         {bot.engineAccountId === "fake" && (
           <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
             Test engine
@@ -202,7 +208,10 @@ export function ChatView({
           ))}
         </div>
         <Composer
+          key={bot.id}
           bot={bot}
+          catalog={models}
+          runId={active ? run?.id : undefined}
           canSend={connected && bot.status === "ready"}
           canStop={active || Boolean(limited && account?.blockedUntil)}
           connected={connected}

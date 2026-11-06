@@ -3,6 +3,7 @@ import {
   type ClientMessage,
   type Command,
   EngineStatus,
+  type ModelCatalog,
   type PendingApproval,
   protocolVersion,
   type Run,
@@ -40,6 +41,8 @@ export type ConnectionState = {
   finishedTools: Record<string, LiveTool[]>;
   // Card content for pending approvals. The server resends the whole set, so it is never merged.
   pending: PendingApproval[];
+  // Undefined until the server sends it, so no model is called unavailable before then.
+  models: ModelCatalog | undefined;
   engine: EngineStatus | undefined;
   engineChecking: boolean;
   // Last bot message read, by bot ID. Mirrors localStorage.
@@ -163,6 +166,8 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
     }
     case "pending-approvals":
       return { ...state, pending: message.approvals };
+    case "model-catalog":
+      return { ...state, models: message.models };
     case "replay":
     case "event": {
       const incoming = message.type === "replay" ? message.events : [message.event];
@@ -227,6 +232,7 @@ let state: ConnectionState = {
   thinking: {},
   finishedTools: {},
   pending: [],
+  models: undefined,
   engine: undefined,
   engineChecking: false,
   lastSeen: readLastSeen(),
@@ -376,7 +382,10 @@ const errorSentences: Record<string, string> = {
   message_id_reused: "That message couldn't be sent. Send it again.",
   not_found: "That's no longer here.",
   protocol_mismatch: "This app and its server don't match. Update Bee Bot.",
+  provider_locked: "A bot can't change provider after it's created.",
   storage_failed: "Bee Bot couldn't save that. Try again.",
+  unknown_model: "That model isn't available.",
+  unsupported_effort: "That model doesn't support this reasoning level.",
 };
 
 function errorSentence(body: unknown) {

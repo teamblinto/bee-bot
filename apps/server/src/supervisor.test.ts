@@ -1181,6 +1181,8 @@ describe("fake engine", () => {
         personality: "",
         engineAccountId: "fake",
         model: "sonnet",
+        effort: null,
+        mode: "build",
         memory: "",
       },
       signal,
