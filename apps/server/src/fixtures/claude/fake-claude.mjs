@@ -31,16 +31,48 @@ const loggedIn = {
   email: "owner@example.com",
   orgName: "Owner Org",
 };
-const toolStart = (name) => ({
+const toolStart = (name, id = `toolu_${name}`) => ({
   type: "stream_event",
-  event: { type: "content_block_start", content_block: { type: "tool_use", name, input: {} } },
+  event: { type: "content_block_start", content_block: { type: "tool_use", id, name, input: {} } },
 });
+const toolCall = (name, id, input) => ({
+  type: "assistant",
+  message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+});
+const toolResult = (id, fields = {}) => ({
+  type: "user",
+  message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, ...fields }] },
+});
+const thoughtBlock = (thinking) => [
+  {
+    type: "stream_event",
+    event: { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+  },
+  { type: "system", subtype: "thinking_tokens", estimated_tokens: 50 },
+  {
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } },
+  },
+  { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+];
 
 // Limit and retry frames are synthetic: no real one was ever captured.
 const scenarios = {
   success: { frames: () => replay("success.ndjson") },
   thinking: { frames: () => replay("thinking.ndjson") },
   "tool-use": { frames: () => [toolStart("Bash"), toolStart("Read"), ...replay("success.ndjson")] },
+  "tool-detail": {
+    frames: () => [
+      toolStart("Bash", "toolu_1"),
+      toolCall("Bash", "toolu_1", { command: "cat ~/secret-input.txt" }),
+      toolResult("toolu_1", { content: "denied", is_error: true }),
+      toolStart("Read", "toolu_2"),
+      toolCall("Read", "toolu_2", { file_path: "notes.md" }),
+      toolResult("toolu_2", { content: "the file's secret body" }),
+      ...replay("success.ndjson"),
+    ],
+  },
+  "thought-text": { frames: () => [...thoughtBlock("Weighing it"), ...replay("success.ndjson")] },
   "login-lost": { frames: () => fixture("logged-out.ndjson").slice(1), exit: 1 },
   "status-401": { frames: () => [resultFrame({ api_error_status: 401 })], exit: 1 },
   "unknown-error": { frames: () => [resultFrame({ result: "Something new" })], exit: 1 },

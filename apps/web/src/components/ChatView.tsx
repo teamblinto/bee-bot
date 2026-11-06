@@ -96,7 +96,8 @@ export function ChatView({
   onEdit: () => void;
   onOpenDrawer: () => void;
 }) {
-  const { chat, drafts, liveTools, pending, engine, status, commandError, lastSeen } = connection;
+  const { chat, drafts, liveTools, thinking, finishedTools } = connection;
+  const { pending, engine, status, commandError, lastSeen } = connection;
   const connected = status === "connected";
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
   const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
@@ -107,7 +108,11 @@ export function ChatView({
   const limited = run?.reason === "limited";
   const draft = run && drafts[run.id];
   const tools = (run && liveTools[run.id]) ?? [];
+  const thinkingState = run && thinking[run.id];
   const waiting = approvals.some(({ status }) => status === "pending");
+  const toolRunning = tools.some(({ status }) => status === "running");
+  const showThinking =
+    active && !limited && !waiting && (thinkingState?.active || (!draft && !toolRunning));
   const systemLine = runLine(run, account);
   const canContinue = run?.status === "Interrupted" || run?.status === "Cancelled";
   const lastBotMessageId = messages.findLast(({ author }) => author === "bot")?.id;
@@ -170,9 +175,16 @@ export function ChatView({
           bot={bot}
           items={items}
           connected={connected}
+          finishedTools={finishedTools}
           draft={draft}
           liveTools={tools}
-          thinking={active && !limited && !draft && !waiting}
+          workingSince={run?.status === "Running" ? run.startedAt : undefined}
+          endedWork={
+            run?.startedAt && run.endedAt
+              ? Date.parse(run.endedAt) - Date.parse(run.startedAt)
+              : undefined
+          }
+          thought={showThinking ? (thinkingState?.text ?? "") : undefined}
           systemLine={systemLine}
           onContinue={
             canContinue

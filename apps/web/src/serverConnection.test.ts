@@ -7,10 +7,11 @@ import type {
   PendingApproval,
   Run,
   ServerEvent,
+  ServerMessage,
 } from "@beebot/contracts";
 import { beforeAll, expect, it, vi } from "vite-plus/test";
 
-import type { ConnectionState } from "./serverConnection";
+import type { ConnectionState, LiveTool } from "./serverConnection";
 import { buildTranscript } from "./transcript";
 
 const bot: Bot = {
@@ -29,6 +30,7 @@ const message = (id: string): ChatMessage => ({
   author: "human",
   body: id,
   tools: [],
+  workedMs: null,
   createdAt: "now",
 });
 const run = (status: Run["status"]): Run => ({
@@ -37,6 +39,8 @@ const run = (status: Run["status"]): Run => ({
   status,
   reason: null,
   createdAt: "now",
+  startedAt: "now",
+  endedAt: null,
 });
 
 const messageEvent = (seq: number): ServerEvent => ({
@@ -99,6 +103,8 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
   chat: { ...emptyChat, ...chat },
   drafts: {},
   liveTools: {},
+  thinking: {},
+  finishedTools: {},
   pending: [],
   engine: undefined,
   engineChecking: false,
@@ -256,21 +262,102 @@ it("merges messages and approvals by time", () => {
   expect(items.map(({ kind }) => kind)).toEqual(["message", "approval", "message"]);
 });
 
-it("collects live tools and clears them when the run ends", () => {
-  const running = state(3, { runs: [run("Running")] });
-  const first = applyServerMessage(running, { type: "tool", runId: "run", name: "Read" });
-  const second = applyServerMessage(first, { type: "tool", runId: "run", name: "Read" });
-  expect(second.liveTools).toEqual({ run: ["Read", "Read"] });
+const toolStart = (toolId: string, detail: string | null = null): ServerMessage => ({
+  type: "tool-start",
+  runId: "run",
+  toolId,
+  name: "Read",
+  detail,
+});
+const tool = (id: string, fields: Partial<LiveTool> = {}): LiveTool => ({
+  id,
+  name: "Read",
+  detail: null,
+  status: "running",
+  ...fields,
+});
 
-  const ended = applyServerMessage(second, {
+it("upserts live tools by id and marks how they ended", () => {
+  const running = state(3, { runs: [run("Running")] });
+  const started = [toolStart("a"), toolStart("a", "notes.md"), toolStart("b")].reduce(
+    applyServerMessage,
+    running,
+  );
+  expect(started.liveTools.run).toEqual([tool("a", { detail: "notes.md" }), tool("b")]);
+
+  const ended = [
+    { type: "tool-end", runId: "run", toolId: "a", failed: true },
+    { type: "tool-end", runId: "run", toolId: "b", failed: false },
+  ] satisfies ServerMessage[];
+  expect(ended.reduce(applyServerMessage, started).liveTools.run?.map((t) => t.status)).toEqual([
+    "failed",
+    "done",
+  ]);
+});
+
+it("moves a finished turn's tools onto its reply, in memory", () => {
+  const working = {
+    ...state(3, { bots: [bot], runs: [run("Running")] }),
+    liveTools: { run: [tool("a", { detail: "notes.md" })] },
+  };
+  const reply = { ...message("reply"), author: "bot" as const };
+  const replied = applyServerMessage(working, {
     type: "event",
-    event: { seq: 4, createdAt: "now", type: "run.changed", run: run("Completed") },
+    event: { seq: 4, createdAt: "now", type: "message.created", message: reply },
+  });
+  const ended = applyServerMessage(replied, {
+    type: "event",
+    event: { seq: 5, createdAt: "now", type: "run.changed", run: run("Completed") },
   });
   expect(ended.liveTools).toEqual({});
+  expect(ended.finishedTools).toEqual({
+    reply: [tool("a", { detail: "notes.md", status: "done" })],
+  });
+});
+
+it("keeps the tools of a turn with no reply until the bot's next run", () => {
+  const working = {
+    ...state(3, { bots: [bot], runs: [run("Running")] }),
+    liveTools: { run: [tool("a")] },
+  };
+  const failed = applyServerMessage(working, {
+    type: "event",
+    event: { seq: 4, createdAt: "now", type: "run.changed", run: run("Failed") },
+  });
+  expect(failed.liveTools.run).toHaveLength(1);
+  const next = applyServerMessage(failed, {
+    type: "event",
+    event: {
+      seq: 5,
+      createdAt: "now",
+      type: "run.changed",
+      run: { ...run("Queued"), id: "next" },
+    },
+  });
+  expect(next.liveTools).toEqual({});
+});
+
+it("appends thought text and drops it with the run", () => {
+  const thinking = (active: boolean, text: string): ServerMessage => ({
+    type: "thinking",
+    runId: "run",
+    active,
+    text,
+  });
+  const live = [thinking(true, ""), thinking(true, "one "), thinking(true, "two")].reduce(
+    applyServerMessage,
+    state(3, { runs: [run("Running")] }),
+  );
+  expect(live.thinking).toEqual({ run: { active: true, text: "one two" } });
+  const ended = applyServerMessage(live, {
+    type: "event",
+    event: { seq: 4, createdAt: "now", type: "run.changed", run: run("Failed") },
+  });
+  expect(ended.thinking).toEqual({});
 });
 
 it("drops live tools on a snapshot once their run is over", () => {
-  const working = { ...state(3), liveTools: { run: ["Bash"] } };
+  const working = { ...state(3), liveTools: { run: [tool("a")] } };
   const next = applyServerMessage(working, {
     type: "snapshot",
     seq: 5,

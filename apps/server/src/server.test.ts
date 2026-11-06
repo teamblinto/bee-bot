@@ -485,7 +485,9 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_memory';
+    db.exec(`DELETE FROM migrations WHERE name = 'run_timing';
+      ALTER TABLE messages DROP COLUMN worked_ms;
+      DELETE FROM migrations WHERE name = 'bot_memory';
       DROP TRIGGER messages_fts_insert; DROP TRIGGER messages_fts_delete;
       DROP TRIGGER messages_fts_update; DROP TABLE messages_fts; DROP TABLE memory_fts;
       DROP TABLE memory_items; ALTER TABLE scopes DROP COLUMN tainted;
@@ -553,7 +555,9 @@ describe("restart", () => {
     expect(messages.every(({ tools }) => tools[0] === "Read")).toBe(true);
     expect(bots.map(({ id }) => id)).toEqual(["old", "new"]);
     expect(memories).toEqual([]);
-    expect(store.eventsAfter(0)).toMatchObject([{ type: "message.created" }]);
+    // Old events lack `workedMs`, so run_timing clears them and clients take a snapshot.
+    expect(store.eventsAfter(0)).toEqual([]);
+    expect(messages.every(({ workedMs }) => workedMs === null)).toBe(true);
     expect(store.searchMemory("old", "walrus")).toEqual([
       "[room | owner | 2026-01-02] the walrus sings",
       "[room | owner | 2026-01-02] a second line about the walrus",

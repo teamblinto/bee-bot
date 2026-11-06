@@ -1,32 +1,35 @@
 import type { Bot } from "@beebot/contracts";
-import { ArrowDown, ChevronRight } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "react";
 
-import { answeredLine, doneLine, toolLabel } from "../labels";
+import { answeredLine, liveStatusLine, workedLine } from "../labels";
+import type { LiveTool } from "../serverConnection";
 import type { TranscriptItem } from "../transcript";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { columnClass, iconProps } from "./ui";
+import { ThinkingRow, WorkGroup, WorkingLabel } from "./WorkLog";
 
-function ToolLine({ label, tools }: { label: string; tools: string[] }) {
-  // The list only ever grows, so a position is a stable key.
-  const rows = tools.map((name, position) => ({ name, position }));
-  return (
-    <details className="group text-small text-ink-secondary">
-      <summary className="flex w-fit cursor-default list-none items-center gap-1 rounded-field [&::-webkit-details-marker]:hidden">
-        {label}
-        <ChevronRight {...iconProps} className="transition-transform group-open:rotate-90" />
-      </summary>
-      <ul className="mt-1 ml-1 border-l border-edge pl-3">
-        {rows.map(({ name, position }) => (
-          <li key={position}>{toolLabel(name)}</li>
-        ))}
-      </ul>
-    </details>
-  );
-}
+// The list only ever grows, so a position is a stable key.
+const namedTools = (names: string[]) =>
+  names.map((name, position): LiveTool => ({
+    id: String(position),
+    name,
+    detail: null,
+    status: "done",
+  }));
 
-function Item({ item, bot, connected }: { item: TranscriptItem; bot: Bot; connected: boolean }) {
+function Item({
+  item,
+  bot,
+  connected,
+  finishedTools,
+}: {
+  item: TranscriptItem;
+  bot: Bot;
+  connected: boolean;
+  finishedTools: Record<string, LiveTool[]>;
+}) {
   if (item.kind === "approval") {
     const { approval, pending } = item;
     return pending ? (
@@ -46,7 +49,10 @@ function Item({ item, bot, connected }: { item: TranscriptItem; bot: Bot; connec
   return (
     <div className="flex flex-col gap-2">
       {message.tools.length > 0 && (
-        <ToolLine label={doneLine(message.tools.length)} tools={message.tools} />
+        <WorkGroup
+          label={workedLine(message.workedMs, message.tools.length)}
+          tools={finishedTools[message.id] ?? namedTools(message.tools)}
+        />
       )}
       <Markdown text={message.body} />
     </div>
@@ -57,18 +63,27 @@ export function Transcript({
   bot,
   items,
   connected,
+  finishedTools,
   draft,
   liveTools,
-  thinking,
+  workingSince,
+  endedWork,
+  thought,
   systemLine,
   onContinue,
 }: {
   bot: Bot;
   items: TranscriptItem[];
   connected: boolean;
+  finishedTools: Record<string, LiveTool[]>;
   draft: string | undefined;
-  liveTools: string[];
-  thinking: boolean;
+  liveTools: LiveTool[];
+  // Set while the turn runs.
+  workingSince: string | null | undefined;
+  // How long a turn ran that ended without a reply, whose tools still have a place here.
+  endedWork: number | null | undefined;
+  // Undefined when nothing is thinking. Often empty while something is.
+  thought: string | undefined;
   systemLine: string;
   onContinue: (() => void) | undefined;
 }) {
@@ -78,6 +93,8 @@ export function Transcript({
   const sent = useRef(0);
   const last = useRef({ top: 0, height: 0, view: 0 });
   const [away, setAway] = useState(false);
+  const settledItems = items.filter((item) => item.kind !== "approval" || !item.pending);
+  const pendingItems = items.filter((item) => item.kind === "approval" && item.pending);
 
   function follow(on: boolean) {
     following.current = on;
@@ -143,26 +160,36 @@ export function Transcript({
       >
         <div ref={content} role="log" aria-label="Messages" className={`${columnClass} py-6`}>
           <ol>
-            {items.map((item, index) => {
+            {settledItems.map((item, index) => {
               const key = item.kind === "message" ? item.message.id : item.approval.id;
-              const previous = items[index - 1];
+              const previous = settledItems[index - 1];
               const gap = !previous ? "" : previous.sender === item.sender ? "mt-1" : "mt-6";
               return (
                 <li key={key} data-sender={item.sender} className={gap}>
-                  <Item item={item} bot={bot} connected={connected} />
+                  <Item item={item} bot={bot} connected={connected} finishedTools={finishedTools} />
                 </li>
               );
             })}
           </ol>
-          <div className="mt-6 flex flex-col gap-2 empty:hidden">
-            {liveTools.length > 0 && <ToolLine label="Working…" tools={liveTools} />}
-            {/* The finished reply is announced as a message; each delta shouldn't be. */}
-            {draft && (
-              <div aria-live="off">
-                <Markdown text={draft} />
-              </div>
+          {/* The finished reply is announced as a message; each delta shouldn't be. */}
+          <div aria-live="off" className="mt-6 flex flex-col gap-2 empty:hidden">
+            {thought !== undefined && <ThinkingRow text={thought} />}
+            {workingSince && (
+              <WorkGroup live label={<WorkingLabel startedAt={workingSince} />} tools={liveTools} />
             )}
-            {thinking && <p className="shimmer w-fit text-small">Thinking</p>}
+            {!workingSince && endedWork !== undefined && liveTools.length > 0 && (
+              <WorkGroup label={workedLine(endedWork, liveTools.length)} tools={liveTools} />
+            )}
+            {pendingItems.map((item) => (
+              <Item
+                key={item.at}
+                item={item}
+                bot={bot}
+                connected={connected}
+                finishedTools={finishedTools}
+              />
+            ))}
+            {draft && <Markdown text={draft} streaming />}
             {/* Last on purpose: `runs` only has the latest run, and it ended after all of this. */}
             {systemLine && (
               <p className="flex items-center gap-2 text-small text-ink-secondary">
@@ -182,6 +209,9 @@ export function Transcript({
           </div>
         </div>
       </div>
+      <p role="status" className="sr-only">
+        {liveStatusLine(thought !== undefined, workingSince ? liveTools : [], Boolean(draft))}
+      </p>
       {away && (
         <button
           type="button"

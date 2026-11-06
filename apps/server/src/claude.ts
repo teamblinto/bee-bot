@@ -7,7 +7,15 @@ import * as NodeUtil from "node:util";
 import type { BotModel, EngineStatus, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
-import { type BotLaunch, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
+import {
+  type BotLaunch,
+  type RunTurn,
+  type ThinkingState,
+  toolDetail,
+  type ToolStart,
+  type TurnOutcome,
+  workspacePath,
+} from "./engine.ts";
 
 export const testedClaudeVersion = "2.1.318";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
@@ -95,6 +103,16 @@ export function turnArgs(
 
 const loose = z.unknown().optional();
 
+// Carries the full tool input and thought. Only `toolDetail` may read from it, and nothing may log it.
+const Block = z.object({
+  type: loose,
+  id: loose,
+  name: loose,
+  input: loose,
+  tool_use_id: loose,
+  is_error: loose,
+});
+
 const Frame = z.object({
   type: z.string(),
   subtype: loose,
@@ -107,10 +125,17 @@ const Frame = z.object({
   event: z
     .object({
       type: loose,
-      delta: z.object({ type: loose, text: z.unknown() }).optional(),
-      content_block: z.object({ type: loose, name: loose }).optional(),
+      index: loose,
+      delta: z.object({ type: loose, text: loose, thinking: loose }).optional(),
+      content_block: z.object({ type: loose, id: loose, name: loose }).optional(),
     })
     .optional(),
+  // `.catch`: a user frame's content can be a plain string, and a shape change here must never cost
+  // the frame's `error` or the turn's result.
+  message: z
+    .object({ content: z.array(Block).catch([]) })
+    .optional()
+    .catch(undefined),
   rate_limit_info: z
     .object({
       status: loose,
@@ -225,11 +250,24 @@ type Attempt = {
   prompt: string;
   signal: AbortSignal;
   onDelta: (text: string) => void;
-  onTool: (name: string) => void;
+  onToolStart: (tool: ToolStart) => void;
+  onToolEnd: (id: string, failed: boolean) => void;
+  onThinking: (state: ThinkingState) => void;
   onDelivered: () => void;
 };
 
-function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDelivered }: Attempt) {
+function runProcess({
+  command,
+  args,
+  cwd,
+  prompt,
+  signal,
+  onDelta,
+  onToolStart,
+  onToolEnd,
+  onThinking,
+  onDelivered,
+}: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
     const [file = "", ...prefix] = command;
     const child = NodeChildProcess.spawn(file, [...prefix, ...args], {
@@ -256,6 +294,8 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDel
     let stderr = "";
     let stopping = false;
     let settled = false;
+    let thinking = false;
+    let thinkingBlock: unknown;
 
     const after = (ms: number, work: () => void) => timers.add(setTimeout(work, ms));
 
@@ -328,6 +368,39 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDel
       child.stdin.end();
     }
 
+    function setThinking(active: boolean) {
+      if (thinking !== active) {
+        thinking = active;
+        onThinking({ active, text: "" });
+      }
+    }
+
+    function onStreamEvent({ event }: Frame) {
+      const delta = event?.delta;
+      const block = event?.content_block;
+      if (delta?.type === "text_delta" && typeof delta.text === "string") {
+        setThinking(false);
+        onDelta(delta.text);
+      } else if (delta?.type === "thinking_delta" && delta.thinking) {
+        // Empty on every capture so far: the CLI asks for updates, not the thought itself.
+        onThinking({ active: true, text: String(delta.thinking) });
+      }
+      if (event?.type === "content_block_start" && block?.type === "thinking") {
+        thinkingBlock = event.index;
+        setThinking(true);
+      } else if (event?.type === "content_block_stop" && event.index === thinkingBlock) {
+        setThinking(false);
+      } else if (
+        event?.type === "content_block_start" &&
+        block?.type === "tool_use" &&
+        typeof block.name === "string"
+      ) {
+        setThinking(false);
+        const id = typeof block.id === "string" ? block.id : NodeCrypto.randomUUID();
+        onToolStart({ id, name: block.name, detail: null });
+      }
+    }
+
     function onLine(line: string) {
       const frame = line.trim() ? parseFrame(line) : undefined;
       if (!frame || settled) {
@@ -341,26 +414,29 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDel
           openGate(frame);
         }
       } else if (frame.type === "stream_event") {
-        const delta = frame.event?.delta;
-        if (delta?.type === "text_delta" && typeof delta.text === "string") {
-          onDelta(delta.text);
-        }
-        const block = frame.event?.content_block;
-        if (
-          frame.event?.type === "content_block_start" &&
-          block?.type === "tool_use" &&
-          typeof block.name === "string"
-        ) {
-          onTool(block.name);
-        }
+        onStreamEvent(frame);
       } else if (frame.type === "assistant") {
         seen.assistantError = frame.error ?? seen.assistantError;
+        for (const { type, id, name, input } of frame.message?.content ?? []) {
+          if (type === "tool_use" && typeof id === "string" && typeof name === "string") {
+            onToolStart({ id, name, detail: toolDetail(name, input, cwd) });
+          }
+        }
+      } else if (frame.type === "user") {
+        for (const { type, tool_use_id: id, is_error: failed } of frame.message?.content ?? []) {
+          if (type === "tool_result" && typeof id === "string") {
+            onToolEnd(id, failed === true);
+          }
+        }
+      } else if (frame.type === "system" && frame.subtype === "thinking_tokens") {
+        setThinking(true);
       } else if (frame.type === "system" && frame.subtype === "api_retry") {
         apiRetries += 1;
         if (apiRetries >= maxApiRetries) {
           stop();
         }
       } else if (frame.type === "result") {
+        setThinking(false);
         seen.result = frame;
         sessionMissing ||= JSON.stringify(frame.errors ?? "").includes("No conversation found");
         after(lingerMs, stop);
@@ -449,7 +525,9 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     launch,
     signal,
     onDelta,
-    onTool,
+    onToolStart,
+    onToolEnd,
+    onThinking,
     onDelivered,
     permissions,
   }) => {
@@ -468,7 +546,9 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
         prompt,
         signal,
         onDelta,
-        onTool,
+        onToolStart,
+        onToolEnd,
+        onThinking,
         onDelivered,
       });
     if (signal.aborted) {

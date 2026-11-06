@@ -2,13 +2,14 @@ import * as NodeCrypto from "node:crypto";
 
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
-import type { RunTurn, TurnOutcome } from "./engine.ts";
+import type { RunTurn, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 
 const defaultTurnTimeoutMs = 10 * 60_000;
 const tickMs = 1000;
 const minBlockMs = 1000;
 const maxBlockMs = 24 * 60 * 60_000;
+const deltaBatchMs = 50;
 
 type Options = {
   store: EventStore;
@@ -16,7 +17,9 @@ type Options = {
   approvals: Approvals;
   permissionsUrl: () => string;
   onDelta: (runId: string, text: string) => void;
-  onTool: (runId: string, name: string) => void;
+  onToolStart: (runId: string, tool: ToolStart) => void;
+  onToolEnd: (runId: string, id: string, failed: boolean) => void;
+  onThinking: (runId: string, state: ThinkingState) => void;
   turnTimeoutMs?: number | undefined;
 };
 
@@ -49,13 +52,37 @@ function finishedRun(outcome: TurnOutcome, abortReason: unknown, tools: string[]
     : { status: "Failed", reason: "engine_failed" };
 }
 
+// Everything else a run emits flushes first, so a client sees the turn in the order it happened.
+function batchDeltas(send: (text: string) => void) {
+  let pending = "";
+  let timer: NodeJS.Timeout | undefined;
+  function flush() {
+    clearTimeout(timer);
+    timer = undefined;
+    if (pending) {
+      const text = pending;
+      pending = "";
+      send(text);
+    }
+  }
+  return {
+    flush,
+    add(text: string) {
+      pending += text;
+      timer ??= setTimeout(flush, deltaBatchMs);
+    },
+  };
+}
+
 export function createSupervisor({
   store,
   runTurn,
   approvals,
   permissionsUrl,
   onDelta,
-  onTool,
+  onToolStart,
+  onToolEnd,
+  onThinking,
   turnTimeoutMs = defaultTurnTimeoutMs,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
@@ -96,6 +123,8 @@ export function createSupervisor({
     const controller = new AbortController();
     const token = approvals.openRun(run.id, run.launch.botId);
     const tools: string[] = [];
+    const seenTools = new Set<string>();
+    const deltas = batchDeltas((text) => onDelta(run.id, text));
     let remainingMs = turnTimeoutMs;
     let resumedAt = 0;
     let timeout: NodeJS.Timeout | undefined;
@@ -120,17 +149,29 @@ export function createSupervisor({
         resume,
         launch: run.launch,
         signal: controller.signal,
-        onDelta: (text) => onDelta(run.id, text),
-        onTool: (name) => {
-          tools.push(name);
-          if (!name.startsWith("mcp__bee__")) {
-            try {
-              store.markTainted(run.id);
-            } catch (error) {
-              console.error(`beebotd: taint of run ${run.id} was not recorded`, error);
+        onDelta: deltas.add,
+        onToolStart: (tool) => {
+          deltas.flush();
+          if (!seenTools.has(tool.id)) {
+            seenTools.add(tool.id);
+            tools.push(tool.name);
+            if (!tool.name.startsWith("mcp__bee__")) {
+              try {
+                store.markTainted(run.id);
+              } catch (error) {
+                console.error(`beebotd: taint of run ${run.id} was not recorded`, error);
+              }
             }
           }
-          onTool(run.id, name);
+          onToolStart(run.id, tool);
+        },
+        onToolEnd: (id, failed) => {
+          deltas.flush();
+          onToolEnd(run.id, id, failed);
+        },
+        onThinking: (state) => {
+          deltas.flush();
+          onThinking(run.id, state);
         },
         permissions: { url: permissionsUrl(), token },
         onDelivered: () => {
@@ -156,6 +197,7 @@ export function createSupervisor({
         return { kind: "failed" };
       })
       .then((outcome) => {
+        deltas.flush();
         pauseClock();
         turns.delete(run.id);
         approvals.closeRun(run.id);

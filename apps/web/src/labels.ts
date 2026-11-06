@@ -11,6 +11,8 @@ import {
   type RunReason,
 } from "@beebot/contracts";
 
+import type { LiveTool } from "./serverConnection";
+
 const clock = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
@@ -139,17 +141,68 @@ export function answeredLine({ status, reason }: Approval) {
   return reason === "stopped" ? `${answer} · Stopped` : answer;
 }
 
-export const doneLine = (count: number) => `Done · ${count} ${count === 1 ? "tool" : "tools"}`;
+export function formatElapsed(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  if (minutes === 0) {
+    return `${seconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours === 0
+    ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`
+    : `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+export function workedLine(workedMs: number | null, count: number) {
+  const worked = workedMs === null ? "Worked" : `Worked for ${formatElapsed(workedMs)}`;
+  return count === 0 ? worked : `${worked} · ${count} ${count === 1 ? "tool" : "tools"}`;
+}
+
+// The newest line is what the bot is on now.
+export const liveThoughtLine = (text: string) => text.trim().split("\n").at(-1)?.trim() ?? "";
 
 // A Map, because a tool name is whatever the engine reports and could be "constructor".
-const toolLabels = new Map([
-  ["mcp__bee__memory_search", "Searched memory"],
-  ["mcp__bee__memory_get", "Read a memory"],
-  ["mcp__bee__memory_propose", "Saved a memory"],
-  ["mcp__bee__memory_forget", "Forgot a memory"],
+const toolVerbs = new Map([
+  ["Bash", { running: "Running", done: "Ran", bare: "Ran a command" }],
+  ["Read", { running: "Reading", done: "Read", bare: "Read a file" }],
+  ["Write", { running: "Writing", done: "Wrote", bare: "Wrote a file" }],
+  ["Edit", { running: "Editing", done: "Edited", bare: "Edited a file" }],
+  ["Glob", { running: "Finding", done: "Found", bare: "Found files" }],
+  ["Grep", { running: "Searching for", done: "Searched for", bare: "Searched files" }],
+  ["mcp__bee__memory_search", { running: "Searching memory", done: "", bare: "Searched memory" }],
+  ["mcp__bee__memory_get", { running: "Reading a memory", done: "", bare: "Read a memory" }],
+  ["mcp__bee__memory_propose", { running: "Saving a memory", done: "", bare: "Saved a memory" }],
+  [
+    "mcp__bee__memory_forget",
+    { running: "Forgetting a memory", done: "", bare: "Forgot a memory" },
+  ],
 ]);
 
-export const toolLabel = (name: string) => toolLabels.get(name) ?? name;
+export function toolRowLabel({ name, detail, status }: Omit<LiveTool, "id">) {
+  const verbs = toolVerbs.get(name);
+  if (!verbs) {
+    return name;
+  }
+  if (status === "running") {
+    return detail ? `${verbs.running} ${detail}` : `${verbs.running}…`;
+  }
+  return detail ? `${verbs.done} ${detail}` : verbs.bare;
+}
+
+// For screen readers, which get status changes, not every delta.
+export function liveStatusLine(thinking: boolean, tools: LiveTool[], replying: boolean) {
+  const last = tools.at(-1);
+  if (last?.status === "failed") {
+    return `${toolRowLabel(last)} failed`;
+  }
+  if (last?.status === "running") {
+    return toolRowLabel(last);
+  }
+  if (thinking) {
+    return "Thinking";
+  }
+  return replying ? "Writing a reply" : "";
+}
 
 export const memoryNotice =
   "Memory is stored unencrypted on this computer. In Host mode, a shell command you approve can reach it.";

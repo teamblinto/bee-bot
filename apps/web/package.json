@@ -20,12 +20,14 @@
   "devDependencies": {
     "@tailwindcss/vite": "catalog:",
     "@tanstack/router-plugin": "1.168.48",
+    "@types/mdast": "4.0.4",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "6.2.1",
     "oxc-transform-react": "0.156.0",
     "tailwindcss": "catalog:",
+    "unified": "11.0.5",
     "vite": "catalog:",
     "vite-plus": "catalog:"
   }

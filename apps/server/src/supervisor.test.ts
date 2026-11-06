@@ -50,9 +50,21 @@ function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
     memory: string;
     deliver: () => void;
     tool: (name: string) => void;
+    live: Pick<Parameters<RunTurn>[0], "onDelta" | "onToolStart" | "onToolEnd" | "onThinking">;
     finish: (o: TurnOutcome) => void;
   }> = [];
-  const runTurn: RunTurn = ({ prompt, sessionId, resume, launch, signal, onDelivered, onTool }) =>
+  const runTurn: RunTurn = ({
+    prompt,
+    sessionId,
+    resume,
+    launch,
+    signal,
+    onDelivered,
+    onDelta,
+    onToolStart,
+    onToolEnd,
+    onThinking,
+  }) =>
     new Promise((resolve) => {
       turns.push({
         prompt,
@@ -61,7 +73,8 @@ function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
         model: launch.model,
         memory: launch.memory,
         deliver: onDelivered,
-        tool: onTool,
+        tool: (name: string) => onToolStart({ id: crypto.randomUUID(), name, detail: null }),
+        live: { onDelta, onToolStart, onToolEnd, onThinking },
         finish: resolve,
       });
       signal.addEventListener("abort", () => resolve(onAbort));
@@ -1016,6 +1029,111 @@ describe("reconnecting", () => {
   });
 });
 
+describe("live output", () => {
+  const liveFrames = (messages: ServerMessage[]) =>
+    messages.flatMap((message) => {
+      if (message.type === "delta") {
+        return [`delta:${message.text}`];
+      }
+      if (message.type === "tool-start") {
+        return [`tool:${message.name}`];
+      }
+      return message.type === "event" && message.event.type === "message.created"
+        ? [`message:${message.event.message.author}`]
+        : [];
+    });
+
+  it("sends deltas in 50 ms batches, in order", async () => {
+    const engine = scriptedEngine();
+    const { port, createBot, send } = await boot(engine.runTurn);
+    const client = connect(port);
+    await client.ready;
+    await send(await createBot(), "hello");
+    await expectTurns(engine, 1);
+    const live = engine.turns[0]?.live;
+    live?.onDelta("a");
+    live?.onDelta("b");
+    live?.onDelta("c");
+    await vi.waitFor(() => expect(liveFrames(client.messages)).toContain("delta:abc"));
+    live?.onDelta("d");
+    await vi.waitFor(() => expect(liveFrames(client.messages)).toContain("delta:d"));
+  });
+
+  it("flushes before the final message and before a tool, losing nothing", async () => {
+    const engine = scriptedEngine();
+    const { store, port, createBot, send } = await boot(engine.runTurn);
+    const client = connect(port);
+    await client.ready;
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    const live = engine.turns[0]?.live;
+    live?.onDelta("one ");
+    live?.onToolStart({ id: "t1", name: "Read", detail: null });
+    live?.onDelta("two");
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    await vi.waitFor(() =>
+      expect(liveFrames(client.messages)).toEqual([
+        "message:human",
+        "delta:one ",
+        "tool:Read",
+        "delta:two",
+        "message:bot",
+      ]),
+    );
+  });
+
+  it("keeps tool input and thought text out of the database, events and logs", async () => {
+    const logged = vi.spyOn(console, "error");
+    const engine = scriptedEngine();
+    const { store, port, createBot, send } = await boot(engine.runTurn);
+    const client = connect(port);
+    await client.ready;
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    const live = engine.turns[0]?.live;
+    live?.onThinking({ active: true, text: "secret-thought" });
+    live?.onToolStart({ id: "t1", name: "Bash", detail: "cat secret-input" });
+    live?.onToolEnd("t1", true);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    await vi.waitFor(() =>
+      expect(client.messages.some((m) => m.type === "tool-start" && m.detail)).toBe(true),
+    );
+
+    const stored = [
+      JSON.stringify(store.state()),
+      JSON.stringify(store.eventsAfter(0)),
+      ...NodeFS.readdirSync(dataDir, { recursive: true, encoding: "utf8" }).flatMap((name) => {
+        const path = NodePath.join(dataDir, name);
+        return NodeFS.statSync(path).isFile() ? [NodeFS.readFileSync(path, "latin1")] : [];
+      }),
+      JSON.stringify(logged.mock.calls),
+    ].join("\n");
+    expect(stored).toContain("Bash");
+    expect(stored).not.toContain("secret-input");
+    expect(stored).not.toContain("secret-thought");
+    expect(store.state().messages.at(-1)?.tools).toEqual(["Bash"]);
+  });
+
+  it("records how long a finished turn worked", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    const { messages, runs } = store.state();
+    expect(messages[0]?.workedMs).toBeNull();
+    expect(messages[1]?.workedMs).toBeGreaterThanOrEqual(0);
+    expect(runs[0]?.startedAt).toEqual(expect.any(String));
+    expect(runs[0]?.endedAt).toEqual(expect.any(String));
+  });
+});
+
 describe("tool activity", () => {
   it("broadcasts tool names live and keeps them on the reply, in order", async () => {
     const engine = scriptedEngine();
@@ -1030,7 +1148,7 @@ describe("tool activity", () => {
     engine.turns[0]?.finish(reply);
     await expectStatus(store, bot, "Completed");
     expect(store.state().messages.map(({ tools }) => tools)).toEqual([[], ["Bash", "Read"]]);
-    const live = () => client.messages.flatMap((m) => (m.type === "tool" ? [m.name] : []));
+    const live = () => client.messages.flatMap((m) => (m.type === "tool-start" ? [m.name] : []));
     await vi.waitFor(() => expect(live()).toEqual(["Bash", "Read"]));
   });
 
@@ -1067,7 +1185,9 @@ describe("fake engine", () => {
       },
       signal,
       onDelta: () => {},
-      onTool: () => {},
+      onToolStart: () => {},
+      onToolEnd: () => {},
+      onThinking: () => {},
       permissions: { url: "http://127.0.0.1:9/mcp", token: "unused" },
       onDelivered: () => {},
     });

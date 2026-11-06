@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 5;
+export const protocolVersion = 6;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -52,6 +52,8 @@ export const ChatMessage = z.object({
   body: z.string(),
   // Names only, in call order. Tool input is never kept here.
   tools: z.array(z.string()),
+  // How long the turn behind a bot message ran. Null for owners and for rows older than the column.
+  workedMs: z.number().nullable(),
   createdAt: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -86,6 +88,8 @@ export const Run = z.object({
   status: RunStatus,
   reason: RunReason.nullable(),
   createdAt: z.string(),
+  startedAt: z.string().nullable(),
+  endedAt: z.string().nullable(),
 });
 export type Run = z.infer<typeof Run>;
 
@@ -202,8 +206,28 @@ export const ServerMessage = z.discriminatedUnion("type", [
   }),
   // Live output of a running turn. Never persisted, so it has no seq.
   z.object({ type: z.literal("delta"), runId: z.string(), text: z.string() }),
-  // A tool call started. Name only.
-  z.object({ type: z.literal("tool"), runId: z.string(), name: z.string() }),
+  // Live thinking state. `text` is what to append, and is empty when the CLI hides the thought.
+  z.object({
+    type: z.literal("thinking"),
+    runId: z.string(),
+    active: z.boolean(),
+    text: z.string(),
+  }),
+  // A tool call started, or its detail became known: same `toolId`, so clients upsert.
+  // `detail` is a short path or command. Memory only, like all of tool input.
+  z.object({
+    type: z.literal("tool-start"),
+    runId: z.string(),
+    toolId: z.string(),
+    name: z.string(),
+    detail: z.string().nullable(),
+  }),
+  z.object({
+    type: z.literal("tool-end"),
+    runId: z.string(),
+    toolId: z.string(),
+    failed: z.boolean(),
+  }),
   // The whole pending set, sent on subscribe and on every change. Never persisted.
   z.object({ type: z.literal("pending-approvals"), approvals: z.array(PendingApproval) }),
 ]);

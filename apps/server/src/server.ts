@@ -121,7 +121,10 @@ export async function startServer({
     permissionsUrl: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
     turnTimeoutMs,
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
-    onTool: (runId, name) => broadcast({ type: "tool", runId, name }),
+    onToolStart: (runId, { id, name, detail }) =>
+      broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
+    onToolEnd: (runId, toolId, failed) => broadcast({ type: "tool-end", runId, toolId, failed }),
+    onThinking: (runId, { active, text }) => broadcast({ type: "thinking", runId, active, text }),
   });
 
   // Non-browser clients send no Origin; they still need the token.

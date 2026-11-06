@@ -7,7 +7,7 @@ import { EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { childEnv, createClaudeRunTurn, probeEngine, turnArgs, writeMcpConfig } from "./claude.ts";
-import type { BotLaunch } from "./engine.ts";
+import { type BotLaunch, type ThinkingState, toolDetail, type ToolStart } from "./engine.ts";
 
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
 const launch: BotLaunch = {
@@ -81,6 +81,10 @@ function turn(
 ) {
   const deltas: string[] = [];
   const tools: string[] = [];
+  const toolIds = new Set<string>();
+  const starts: ToolStart[] = [];
+  const ends: Array<{ id: string; failed: boolean }> = [];
+  const thinking: ThinkingState[] = [];
   let delivered = 0;
   const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir })({
     prompt,
@@ -89,14 +93,40 @@ function turn(
     launch: { ...launch, memory },
     signal,
     onDelta: (text) => deltas.push(text),
-    onTool: (name) => tools.push(name),
+    onToolStart: ({ id, name, detail }) => {
+      if (!toolIds.has(id)) {
+        tools.push(name);
+      }
+      toolIds.add(id);
+      starts.push({ id, name, detail });
+    },
+    onToolEnd: (id, failed) => ends.push({ id, failed }),
+    onThinking: (state) => thinking.push(state),
     permissions,
     onDelivered: () => {
       delivered += 1;
     },
   });
-  return { outcome, deltas, tools, delivered: () => delivered };
+  return { outcome, deltas, tools, starts, ends, thinking, delivered: () => delivered };
 }
+
+describe("toolDetail", () => {
+  const cwd = NodePath.join("data", "workspace");
+
+  it("keeps one short line, relative to the workspace", () => {
+    const inside = NodePath.join(cwd, "src", "a.ts");
+    expect(toolDetail("Read", { file_path: inside }, cwd)).toBe(NodePath.join("src", "a.ts"));
+    expect(toolDetail("Bash", { command: "a\n   b" }, cwd)).toBe("a b");
+    expect(toolDetail("Bash", { command: "x".repeat(500) }, cwd)).toHaveLength(120);
+  });
+
+  it("gives nothing for tools it doesn't know or input it can't read", () => {
+    expect(toolDetail("mcp__bee__memory_propose", { text: "private" }, cwd)).toBeNull();
+    expect(toolDetail("constructor", {}, cwd)).toBeNull();
+    expect(toolDetail("Bash", { command: 7 }, cwd)).toBeNull();
+    expect(toolDetail("Bash", undefined, cwd)).toBeNull();
+  });
+});
 
 describe("a turn", () => {
   it("streams text and completes from the result, writing the prompt once", async () => {
@@ -105,6 +135,41 @@ describe("a turn", () => {
     expect(deltas.join("")).toBe("noted");
     expect(prompts()).toEqual([prompt]);
     expect(delivered()).toBe(1);
+  });
+
+  it("reports thinking with no text when the CLI hides the thought", async () => {
+    const { outcome, thinking } = turn("thinking");
+    await outcome;
+    expect(thinking).toEqual([
+      { active: true, text: "" },
+      { active: false, text: "" },
+    ]);
+  });
+
+  it("passes thought text on when the CLI sends it", async () => {
+    const { outcome, thinking } = turn("thought-text");
+    await outcome;
+    expect(thinking).toEqual([
+      { active: true, text: "" },
+      { active: true, text: "Weighing it" },
+      { active: false, text: "" },
+    ]);
+  });
+
+  it("reports each tool once by id, with a short detail and its failure state", async () => {
+    const { outcome, tools, starts, ends } = turn("tool-detail");
+    await outcome;
+    expect(tools).toEqual(["Bash", "Read"]);
+    expect(starts).toEqual([
+      { id: "toolu_1", name: "Bash", detail: null },
+      { id: "toolu_1", name: "Bash", detail: "cat ~/secret-input.txt" },
+      { id: "toolu_2", name: "Read", detail: null },
+      { id: "toolu_2", name: "Read", detail: "notes.md" },
+    ]);
+    expect(ends).toEqual([
+      { id: "toolu_1", failed: true },
+      { id: "toolu_2", failed: false },
+    ]);
   });
 
   it("streams text deltas only, not thinking", async () => {
@@ -300,7 +365,9 @@ describe("the credential gate", () => {
       launch,
       signal: new AbortController().signal,
       onDelta: () => {},
-      onTool: () => {},
+      onToolStart: () => {},
+      onToolEnd: () => {},
+      onThinking: () => {},
       permissions,
       onDelivered: () => {},
     });

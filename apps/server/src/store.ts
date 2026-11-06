@@ -196,6 +196,12 @@ export const migrations = [
     END;
     INSERT INTO messages_fts (messages_fts) VALUES ('rebuild');`,
   },
+  {
+    name: "run_timing",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE messages ADD COLUMN worked_ms INTEGER;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -407,12 +413,13 @@ export function openEventStore(dataDir: string) {
      RETURNING ${accountColumns}`,
   );
 
-  const messageColumns = "id, room_id AS roomId, author, body, tools, created_at AS createdAt";
+  const messageColumns =
+    "id, room_id AS roomId, author, body, tools, worked_ms AS workedMs, created_at AS createdAt";
   const selectMessages = db.prepare(`SELECT ${messageColumns} FROM messages ORDER BY event_seq`);
   const selectMessage = db.prepare(`SELECT ${messageColumns} FROM messages WHERE id = ?`);
   const insertMessage = db.prepare(
-    `INSERT INTO messages (id, room_id, author, body, tools, event_seq, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, room_id, author, body, tools, worked_ms, event_seq, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const selectInput = db.prepare(
     `SELECT body, event_seq AS seq FROM messages
@@ -472,7 +479,7 @@ export function openEventStore(dataDir: string) {
   );
 
   const runColumns = `id, bot_id AS botId, status, reason, created_at AS createdAt,
-    scope_id AS scopeId, wake_id AS wakeId, engine_account_id AS engineAccountId,
+    started_at AS startedAt, ended_at AS endedAt, scope_id AS scopeId, wake_id AS wakeId, engine_account_id AS engineAccountId,
     input_high_seq AS inputHighSeq`;
   const selectRun = db.prepare(`SELECT ${runColumns} FROM runs WHERE id = ?`);
   const selectLatestRuns = db.prepare(
@@ -672,6 +679,7 @@ export function openEventStore(dataDir: string) {
       message.author,
       message.body,
       JSON.stringify(message.tools),
+      message.workedMs,
       seq,
       message.createdAt,
     );
@@ -869,6 +877,7 @@ export function openEventStore(dataDir: string) {
           author: "human",
           body: input.body,
           tools: [],
+          workedMs: null,
           createdAt: new Date().toISOString(),
         });
         if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
@@ -1003,6 +1012,7 @@ export function openEventStore(dataDir: string) {
             author: "bot",
             body: finished.reply ?? "",
             tools: finished.tools ?? [],
+            workedMs: run.startedAt ? Date.parse(now) - Date.parse(run.startedAt) : null,
             createdAt: now,
           });
           advanceAck.run(run.inputHighSeq, run.scopeId);

@@ -25,6 +25,9 @@ export type BotLaunch = {
 export const workspacePath = (dataDir: string, botId: string) =>
   NodePath.join(dataDir, "bots", botId, "workspace");
 
+export type ToolStart = { id: string; name: string; detail: string | null };
+export type ThinkingState = { active: boolean; text: string };
+
 // Must settle once `signal` aborts: the supervisor finalizes a run only after its turn has ended.
 export type RunTurn = (turn: {
   prompt: string;
@@ -33,7 +36,10 @@ export type RunTurn = (turn: {
   launch: BotLaunch;
   signal: AbortSignal;
   onDelta: (text: string) => void;
-  onTool: (name: string) => void;
+  // Called again with the same `id` once the detail is known.
+  onToolStart: (tool: ToolStart) => void;
+  onToolEnd: (id: string, failed: boolean) => void;
+  onThinking: (state: ThinkingState) => void;
   // Where this run asks for tool approval. The token is a secret: never log it or put it on argv.
   permissions: { url: string; token: string };
   // Call once the prompt reached the engine: from then on it must never be sent again.
@@ -41,20 +47,54 @@ export type RunTurn = (turn: {
 }) => Promise<TurnOutcome>;
 
 const wordDelayMs = 40;
+const workStepMs = 700;
+const workSteps: Array<[string, string | null, boolean]> = [
+  ["Read", "src/index.ts", false],
+  ["Grep", "createServer", false],
+  ["Bash", "pnpm test --filter missing", true],
+  ["Edit", "src/index.ts", false],
+  ["mcp__bee__memory_search", null, false],
+];
+const workReply = `I checked the entry file and fixed the import.
+
+- Read \`src/index.ts\`
+- One test command failed
+
+\`\`\`ts
+export const port = 5833;
+\`\`\`
+
+Everything else looks fine.`;
 const defaultLimitSeconds = 30;
 
 const ToolResult = z.object({
   result: z.object({ content: z.tuple([z.object({ text: z.string() })]) }),
 });
 
-const inputKeys: Record<string, string> = {
-  Bash: "command",
-  Read: "file_path",
-  Write: "file_path",
-  Edit: "file_path",
-  Glob: "pattern",
-  Grep: "pattern",
-};
+// A Map, because a tool name is whatever the engine reports and could be "constructor".
+const inputKeys = new Map([
+  ["Bash", "command"],
+  ["Read", "file_path"],
+  ["Write", "file_path"],
+  ["Edit", "file_path"],
+  ["Glob", "pattern"],
+  ["Grep", "pattern"],
+]);
+
+const maxDetailChars = 120;
+
+// The whole of what a client may see of a tool's input, and only ever in memory.
+export function toolDetail(name: string, input: unknown, cwd: string) {
+  const key = inputKeys.get(name);
+  const value =
+    key && input && typeof input === "object" ? (input as Record<string, unknown>)[key] : undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const inside = value.startsWith(cwd + NodePath.sep) ? value.slice(cwd.length + 1) : value;
+  const line = inside.replace(/\s+/g, " ").trim();
+  return line.length > maxDetailChars ? `${line.slice(0, maxDetailChars - 1)}…` : line;
+}
 
 type Permissions = { url: string; token: string };
 
@@ -76,7 +116,7 @@ async function askPermission(
     name: "approve",
     arguments: {
       tool_name: tool,
-      input: { [inputKeys[tool] ?? "command"]: detail },
+      input: { [inputKeys.get(tool) ?? "command"]: detail },
       tool_use_id: "fake",
     },
   };
@@ -97,8 +137,17 @@ async function proposeMemory(permissions: Permissions, text: string, signal: Abo
 }
 
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
-// /approve <Tool> <detail...>, /remember <text...>. Anything else streams a reply word by word.
-export const fakeRunTurn: RunTurn = async ({ prompt, signal, onDelta, onTool, permissions }) => {
+// /approve <Tool> <detail...>, /remember <text...>, /work [thought] (a scripted multi-tool turn).
+// Anything else streams a reply word by word.
+export const fakeRunTurn: RunTurn = async ({
+  prompt,
+  signal,
+  onDelta,
+  onToolStart,
+  onToolEnd,
+  onThinking,
+  permissions,
+}) => {
   const line = (prompt.split("\n").at(-1) ?? "").trim();
   const [directive, argument] = line.split(/\s+/);
   switch (directive) {
@@ -115,17 +164,37 @@ export const fakeRunTurn: RunTurn = async ({ prompt, signal, onDelta, onTool, pe
       return { kind: "failed" };
     case "/approve": {
       const [, tool = "", detail = ""] = /^\S+\s+(\S+)\s*(.*)$/.exec(line) ?? [];
-      onTool(tool);
+      onToolStart({ id: "fake-approve", name: tool, detail: detail || null });
       const allowed = await askPermission(permissions, tool, detail, signal);
+      onToolEnd("fake-approve", !allowed);
       const text = `Test engine: ${allowed ? "allowed" : "denied"}`;
       onDelta(text);
       return { kind: "completed", text };
     }
     case "/remember": {
-      onTool("mcp__bee__memory_propose");
+      onToolStart({ id: "fake-remember", name: "mcp__bee__memory_propose", detail: null });
       const text = await proposeMemory(permissions, line.replace(/^\S+\s*/, ""), signal);
+      onToolEnd("fake-remember", false);
       onDelta(text);
       return { kind: "completed", text };
+    }
+    case "/work": {
+      onThinking({
+        active: true,
+        text: argument === "thought" ? "Looking at the files first." : "",
+      });
+      await NodeTimers.setTimeout(workStepMs, undefined, { signal });
+      onThinking({ active: false, text: "" });
+      for (const [index, [name, detail, failed]] of workSteps.entries()) {
+        onToolStart({ id: `fake-${index}`, name, detail });
+        await NodeTimers.setTimeout(workStepMs, undefined, { signal });
+        onToolEnd(`fake-${index}`, failed);
+      }
+      for (const word of workReply.split(/(?<=\s)/)) {
+        await NodeTimers.setTimeout(wordDelayMs, undefined, { signal });
+        onDelta(word);
+      }
+      return { kind: "completed", text: workReply };
     }
     default: {
       const text = `Test engine reply: ${prompt}`;

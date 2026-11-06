@@ -75,9 +75,13 @@ type BootOptions = {
 
 async function boot(options: BootOptions = {}) {
   const turns: Turn[] = [];
-  const scripted: RunTurn = ({ permissions, signal, onTool }) =>
+  const scripted: RunTurn = ({ permissions, signal, onToolStart }) =>
     new Promise((resolve) => {
-      turns.push({ permissions, tool: onTool, finish: resolve });
+      turns.push({
+        permissions,
+        tool: (name: string) => onToolStart({ id: crypto.randomUUID(), name, detail: null }),
+        finish: resolve,
+      });
       signal.addEventListener("abort", () => resolve({ kind: "failed" }));
     });
   const store = openEventStore(dataDir);
@@ -660,7 +664,7 @@ describe("the fake engine's /approve", () => {
     await decide(second, "deny");
     await vi.waitFor(() => expect(store.state().messages).toHaveLength(4));
     expect(store.state().messages[3]?.body).toBe("Test engine: denied");
-    expect(client.messages.some((m) => m.type === "tool" && m.name === "Read")).toBe(true);
+    expect(client.messages.some((m) => m.type === "tool-start" && m.name === "Read")).toBe(true);
 
     const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
     vi.restoreAllMocks();
@@ -836,7 +840,7 @@ describe("memory tools", () => {
       body: `Saved as ${memory?.id}.`,
       tools: ["mcp__bee__memory_propose"],
     });
-    expect(client.messages.some((m) => m.type === "tool")).toBe(true);
+    expect(client.messages.some((m) => m.type === "tool-start")).toBe(true);
     expect(JSON.stringify(rows("SELECT * FROM audit_log"))).not.toContain(secret);
     const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
     vi.restoreAllMocks();

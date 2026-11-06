@@ -13,6 +13,14 @@ import {
 const reconnectDelayMs = 1000;
 const lastSeenKey = "beebot.lastSeen";
 
+// Lives only in this client's memory: after a reload a finished turn has names alone.
+export type LiveTool = {
+  id: string;
+  name: string;
+  detail: string | null;
+  status: "running" | "done" | "failed";
+};
+
 export type ConnectionState = {
   status: "unconfigured" | "connecting" | "connected" | "disconnected" | "incompatible";
   // False until the first snapshot, so the empty initial chat is never taken for a new user.
@@ -21,8 +29,13 @@ export type ConnectionState = {
   chat: ChatState;
   // Live output by run ID. Lost on a reconnect; the final reply arrives as a message.
   drafts: Record<string, string>;
-  // Tool names of running turns, by run ID.
-  liveTools: Record<string, string[]>;
+  // Tool rows of a turn, by run ID. A turn that ended without a reply keeps its rows until the bot's
+  // next run: nothing else shows what it did.
+  liveTools: Record<string, LiveTool[]>;
+  // Thinking state of running turns, by run ID.
+  thinking: Record<string, { active: boolean; text: string }>;
+  // Tool rows of replies finished since this client connected, by message ID.
+  finishedTools: Record<string, LiveTool[]>;
   // Card content for pending approvals. The server resends the whole set, so it is never merged.
   pending: PendingApproval[];
   engine: EngineStatus | undefined;
@@ -41,6 +54,10 @@ function upsert<T extends { id: string }>(items: T[], item: T) {
     : [...items, item];
 }
 
+// A tool still open when its turn ended was cut off, not failed: the engine never said.
+const settled = (tools: LiveTool[]) =>
+  tools.map((tool): LiveTool => (tool.status === "running" ? { ...tool, status: "done" } : tool));
+
 function applyEvent(state: ConnectionState, event: ServerEvent) {
   const { chat } = state;
   switch (event.type) {
@@ -48,18 +65,34 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
       return { ...state, chat: { ...chat, bots: upsert(chat.bots, event.bot) } };
     case "account.changed":
       return { ...state, chat: { ...chat, accounts: upsert(chat.accounts, event.account) } };
-    case "message.created":
-      return { ...state, chat: { ...chat, messages: [...chat.messages, event.message] } };
+    case "message.created": {
+      const { message } = event;
+      const next = { ...state, chat: { ...chat, messages: [...chat.messages, message] } };
+      const botId = chat.bots.find(({ roomId }) => roomId === message.roomId)?.id;
+      const runId = chat.runs.find((run) => run.botId === botId)?.id;
+      const tools = runId && state.liveTools[runId];
+      return message.author === "bot" && tools
+        ? { ...next, finishedTools: { ...state.finishedTools, [message.id]: settled(tools) } }
+        : next;
+    }
     case "run.changed": {
       const { run } = event;
+      const previous = chat.runs.find(({ botId }) => botId === run.botId);
       const runs = [...chat.runs.filter(({ botId }) => botId !== run.botId), run];
       const drafts = { ...state.drafts };
       const liveTools = { ...state.liveTools };
+      const thinking = { ...state.thinking };
+      if (previous && previous.id !== run.id) {
+        delete liveTools[previous.id];
+      }
       if (!isActive(run)) {
         delete drafts[run.id];
+        delete thinking[run.id];
+      }
+      if (run.status === "Completed") {
         delete liveTools[run.id];
       }
-      return { ...state, drafts, liveTools, chat: { ...chat, runs } };
+      return { ...state, drafts, liveTools, thinking, chat: { ...chat, runs } };
     }
     case "approval.changed":
       return { ...state, chat: { ...chat, approvals: upsert(chat.approvals, event.approval) } };
@@ -92,14 +125,34 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
         chat: message.state,
         drafts: keepLive(state.drafts, message.state.runs),
         liveTools: keepLive(state.liveTools, message.state.runs),
+        thinking: keepLive(state.thinking, message.state.runs),
       };
     case "delta": {
       const text = (state.drafts[message.runId] ?? "") + message.text;
       return { ...state, drafts: { ...state.drafts, [message.runId]: text } };
     }
-    case "tool": {
-      const tools = [...(state.liveTools[message.runId] ?? []), message.name];
-      return { ...state, liveTools: { ...state.liveTools, [message.runId]: tools } };
+    case "thinking": {
+      const { runId, active, text } = message;
+      const previous = state.thinking[runId]?.text ?? "";
+      return {
+        ...state,
+        thinking: { ...state.thinking, [runId]: { active, text: previous + text } },
+      };
+    }
+    case "tool-start": {
+      const { runId, toolId: id, name, detail } = message;
+      const known = state.liveTools[runId] ?? [];
+      const tools = known.some((tool) => tool.id === id)
+        ? known.map((tool) => (tool.id === id ? { ...tool, detail } : tool))
+        : [...known, { id, name, detail, status: "running" as const }];
+      return { ...state, liveTools: { ...state.liveTools, [runId]: tools } };
+    }
+    case "tool-end": {
+      const { runId, toolId, failed } = message;
+      const tools = (state.liveTools[runId] ?? []).map((tool): LiveTool =>
+        tool.id === toolId ? { ...tool, status: failed ? "failed" : "done" } : tool,
+      );
+      return { ...state, liveTools: { ...state.liveTools, [runId]: tools } };
     }
     case "pending-approvals":
       return { ...state, pending: message.approvals };
@@ -163,6 +216,8 @@ let state: ConnectionState = {
   },
   drafts: {},
   liveTools: {},
+  thinking: {},
+  finishedTools: {},
   pending: [],
   engine: undefined,
   engineChecking: false,

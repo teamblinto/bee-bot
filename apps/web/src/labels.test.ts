@@ -1,10 +1,43 @@
 import type { MemoryItem } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
-import { memoryReview, visibleDetail } from "./labels";
+import {
+  formatElapsed,
+  liveStatusLine,
+  liveThoughtLine,
+  memoryReview,
+  toolRowLabel,
+  visibleDetail,
+  workedLine,
+} from "./labels";
 
 it("shows characters that would hide or reorder a command, and leaves layout alone", () => {
   expect(visibleDetail("ls\n\tcat ‮gpj.exe\u0000")).toBe("ls\n\tcat [U+202E]gpj.exe[U+0000]");
+});
+
+it("formats a turn's time the way the timer reads", () => {
+  expect(formatElapsed(9_400)).toBe("9s");
+  expect(formatElapsed(62_000)).toBe("1m 02s");
+  expect(formatElapsed(3_720_000)).toBe("1h 02m");
+  expect(workedLine(62_000, 1)).toBe("Worked for 1m 02s · 1 tool");
+  expect(workedLine(null, 2)).toBe("Worked · 2 tools");
+});
+
+it("labels tool rows by state, and by name alone after a reload", () => {
+  const read = { name: "Read", detail: "notes.md" };
+  expect(toolRowLabel({ ...read, status: "running" })).toBe("Reading notes.md");
+  expect(toolRowLabel({ ...read, status: "done" })).toBe("Read notes.md");
+  expect(toolRowLabel({ ...read, detail: null, status: "done" })).toBe("Read a file");
+  expect(toolRowLabel({ name: "constructor", detail: null, status: "done" })).toBe("constructor");
+});
+
+it("announces status changes and takes the newest thought line", () => {
+  const tool = { id: "a", name: "Bash", detail: "ls" };
+  expect(liveStatusLine(true, [], false)).toBe("Thinking");
+  expect(liveStatusLine(false, [{ ...tool, status: "failed" }], false)).toBe("Ran ls failed");
+  expect(liveStatusLine(false, [{ ...tool, status: "running" }], false)).toBe("Running ls");
+  expect(liveStatusLine(false, [], true)).toBe("Writing a reply");
+  expect(liveThoughtLine("first\n  second \n")).toBe("second");
 });
 
 const memory = (id: string, fields: Partial<MemoryItem>): MemoryItem => ({
