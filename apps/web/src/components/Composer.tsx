@@ -69,7 +69,7 @@ export function Composer({
         </p>
       )}
       <form
-        className="flex items-end gap-2 rounded-composer bg-card p-1.5 outline-honey has-[textarea:focus-visible]:outline-2"
+        className="flex items-end gap-2 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md backdrop-saturate-[1.14] transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
         onSubmit={(event) => {
           event.preventDefault();
           void send();
@@ -98,7 +98,7 @@ export function Composer({
           <button
             type="button"
             aria-label="Stop"
-            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-background hover:bg-ink-hover disabled:bg-raised disabled:text-ink-faint"
+            className="icon-send"
             disabled={!connected}
             onClick={() => void sendCommand({ type: "stop-bot", botId: bot.id })}
           >
@@ -108,7 +108,7 @@ export function Composer({
           <button
             type="submit"
             aria-label="Send"
-            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-background hover:bg-ink-hover disabled:bg-raised disabled:text-ink-faint"
+            className="icon-send"
             disabled={!canSend || !value.trim()}
           >
             <ArrowUp {...iconProps} />

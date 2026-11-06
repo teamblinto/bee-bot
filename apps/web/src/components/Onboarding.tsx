@@ -16,10 +16,18 @@ import { iconProps } from "./ui";
 function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
   return (
     <main className="flex min-h-dvh items-center justify-center p-6">
-      <section className="flex w-full max-w-[560px] flex-col gap-5">
-        <div className="flex flex-col gap-1">
+      <section className="surface flex w-full max-w-[520px] flex-col gap-5 p-6">
+        <div className="flex flex-col gap-2">
+          <div aria-hidden className="flex gap-1">
+            {[1, 2, 3].map((step) => (
+              <span
+                key={step}
+                className={`h-1 flex-1 rounded-full ${step <= number ? "bg-honey-fill" : "bg-raised"}`}
+              />
+            ))}
+          </div>
           <p className="text-label text-ink-faint">Step {number} of 3</p>
-          <h1 className="text-heading font-normal">{title}</h1>
+          <h1 className="text-heading font-semibold">{title}</h1>
         </div>
         {children}
       </section>
@@ -94,7 +102,7 @@ function ConnectStep({
           </p>
         )}
         {fix && (
-          <div className="flex flex-col gap-2 rounded-card bg-card p-4">
+          <div className="flex flex-col gap-2 rounded-row border border-edge bg-code p-3">
             <p className="text-small text-ink-secondary">{fix.text}</p>
             {fix.command && (
               <div className="flex items-center justify-between gap-2">
@@ -108,7 +116,7 @@ function ConnectStep({
       <div className="flex items-center justify-end gap-1">
         <button
           type="button"
-          className="button"
+          className="button button-outline"
           disabled={engineChecking}
           onClick={() => void checkEngine()}
         >

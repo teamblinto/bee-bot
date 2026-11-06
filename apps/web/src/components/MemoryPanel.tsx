@@ -102,7 +102,7 @@ export function MemoryPanel({
     <dialog
       ref={dialog}
       aria-label={`${bot.name} memory`}
-      className="m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 rounded-card bg-overlay p-5 text-ink shadow-menu backdrop:bg-scrim open:flex"
+      className="dialog m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
       onClose={onClose}
     >
       <div className="flex items-center justify-between gap-3">
@@ -126,7 +126,7 @@ export function MemoryPanel({
                 <article
                   key={item.id}
                   aria-label={title}
-                  className="flex flex-col gap-2 rounded-card bg-card p-4"
+                  className="surface flex flex-col gap-2 p-3.5"
                 >
                   <h4 className="text-name font-medium">{title}</h4>
                   {lines.map(({ label, text: line }) => (
@@ -139,7 +139,7 @@ export function MemoryPanel({
                   <div className="flex flex-wrap justify-end gap-1">
                     <button
                       type="button"
-                      className="button"
+                      className="button button-outline"
                       disabled={disabled}
                       onClick={() => decide(item.id, "reject")}
                     >

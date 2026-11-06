@@ -12,7 +12,7 @@ import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
 
 const menuItemClass =
-  "w-full rounded-field px-3 py-1.5 text-left text-small hover:bg-raised disabled:text-ink-faint";
+  "w-full rounded-field px-2.5 py-1.5 text-left text-small transition-colors hover:bg-hover disabled:text-ink-faint";
 
 function BotMenu({
   bot,
@@ -44,7 +44,7 @@ function BotMenu({
       <div
         id="bot-menu"
         popover="auto"
-        className="m-0 mt-1 w-40 rounded-menu bg-overlay p-1 text-ink shadow-menu [position-anchor:--bot-menu] [position-area:bottom_span-left]"
+        className="menu m-0 mt-1 w-40 p-1 [position-anchor:--bot-menu] [position-area:bottom_span-left]"
       >
         <button type="button" {...hide} className={menuItemClass} onClick={onMemory}>
           Memory{pendingMemories > 0 && ` (${pendingMemories})`}
@@ -130,7 +130,7 @@ export function ChatView({
 
   return (
     <section className="flex min-w-0 flex-1 flex-col" aria-label={`Chat with ${bot.name}`}>
-      <header className="flex h-12 shrink-0 items-center gap-2 px-3">
+      <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-edge px-3">
         <button
           type="button"
           aria-label="Open bot list"
@@ -141,9 +141,13 @@ export function ChatView({
         </button>
         <Avatar bot={bot} className="size-7" />
         <h2 className="truncate text-name font-medium">{bot.name}</h2>
-        <span className="shrink-0 text-label text-ink-faint">Attended only</span>
+        <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
+          Attended only
+        </span>
         {bot.engineAccountId === "fake" && (
-          <span className="shrink-0 text-label text-ink-faint">Test engine</span>
+          <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
+            Test engine
+          </span>
         )}
         <span className="flex-1" />
         <BotMenu

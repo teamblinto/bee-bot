@@ -38,7 +38,7 @@ function Item({ item, bot, connected }: { item: TranscriptItem; bot: Bot; connec
   const { message } = item;
   if (message.author === "human") {
     return (
-      <p className="ml-auto w-fit max-w-[80%] rounded-bubble bg-card px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">
+      <p className="ml-auto w-fit max-w-[80%] rounded-bubble bg-message px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">
         {message.body}
       </p>
     );
@@ -170,7 +170,7 @@ export function Transcript({
                 {onContinue && (
                   <button
                     type="button"
-                    className="button"
+                    className="button button-outline"
                     disabled={!connected}
                     onClick={onContinue}
                   >
@@ -185,7 +185,7 @@ export function Transcript({
       {away && (
         <button
           type="button"
-          className="button absolute bottom-2 left-1/2 -translate-x-1/2 bg-raised"
+          className="button button-outline absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full! shadow-menu"
           onClick={jumpToLatest}
         >
           <ArrowDown {...iconProps} />

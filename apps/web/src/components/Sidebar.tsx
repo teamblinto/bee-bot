@@ -1,5 +1,5 @@
 import type { Bot } from "@beebot/contracts";
-import { Plus } from "lucide-react";
+import { Hexagon, Plus } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
@@ -51,7 +51,7 @@ function BotRow({
     <button
       type="button"
       aria-current={selected}
-      className="flex w-full items-center gap-2.5 rounded-row p-2 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised"
+      className="flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised"
       onClick={onSelect}
     >
       <Avatar bot={bot} />
@@ -121,15 +121,18 @@ export function Sidebar({
             document.querySelector<HTMLElement>("[data-composer]")?.focus();
           }
         }}
-        className={`fixed inset-y-0 left-0 z-20 flex w-[280px] shrink-0 flex-col bg-sidebar p-2 md:visible md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-20 flex w-[264px] shrink-0 flex-col border-r border-edge bg-sidebar px-2 md:visible md:static md:translate-x-0 ${
           // Visibility animates only on close: an opening drawer must be focusable at once.
           open
             ? "translate-x-0 transition-transform"
             : "invisible -translate-x-full transition-[translate,visibility]"
         }`}
       >
-        <div className="flex h-8 items-center justify-between pl-2">
-          <h1 className="text-name font-semibold">Bee Bot</h1>
+        <div className="flex h-[52px] shrink-0 items-center justify-between pl-2">
+          <h1 className="flex items-center gap-2 text-name font-semibold">
+            <Hexagon {...iconProps} className="text-honey" fill="currentColor" />
+            Bee Bot
+          </h1>
           <button type="button" aria-label="New bot" className="button !px-2" onClick={onNewBot}>
             <Plus {...iconProps} />
           </button>
@@ -151,7 +154,7 @@ export function Sidebar({
         <p
           role="status"
           data-status={connection.status}
-          className="px-2 pt-2 pb-1 text-label text-ink-faint"
+          className="border-t border-edge px-2 py-2.5 text-label text-ink-faint"
         >
           {statusLine(connection)}
         </p>

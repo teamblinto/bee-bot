@@ -61,7 +61,7 @@ export function ApprovalCard({
     <article
       ref={card}
       aria-label={approvalTitle(name, approval.tool)}
-      className="flex max-w-[560px] flex-col gap-2 rounded-card bg-card p-4"
+      className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
     >
       <div className="flex items-baseline justify-between gap-3">
         <h3 className="text-name font-medium">{approvalTitle(name, approval.tool)}</h3>
@@ -69,7 +69,7 @@ export function ApprovalCard({
       </div>
       <pre
         aria-label="Exact request"
-        className="font-mono text-small wrap-anywhere whitespace-pre-wrap"
+        className="rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
       >
         {visibleDetail(pending.detail)}
       </pre>
@@ -77,7 +77,7 @@ export function ApprovalCard({
       <div className="flex flex-wrap justify-end gap-1">
         <button
           type="button"
-          className="button"
+          className="button button-outline"
           disabled={disabled}
           onClick={() => void decide("deny")}
         >
@@ -94,7 +94,7 @@ export function ApprovalCard({
         {pending.canAlwaysAllow && (
           <button
             type="button"
-            className="button"
+            className="button button-outline"
             disabled={disabled}
             onClick={() => void decide("always")}
           >

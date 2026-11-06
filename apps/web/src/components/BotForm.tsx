@@ -137,7 +137,7 @@ export function BotDialog({
     <dialog
       ref={dialog}
       aria-label={bot ? `Edit ${bot.name}` : "New bot"}
-      className="m-auto w-[min(440px,calc(100vw-32px))] rounded-card bg-overlay p-5 text-ink shadow-menu backdrop:bg-scrim"
+      className="dialog m-auto w-[min(440px,calc(100vw-32px))] p-5 backdrop:bg-scrim"
       onClose={onClose}
     >
       <h2 className="mb-4 text-title font-semibold">{bot ? "Edit bot" : "New bot"}</h2>

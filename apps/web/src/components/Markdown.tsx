@@ -23,7 +23,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
       <pre ref={block} tabIndex={0}>
         {children}
       </pre>
-      <div className="absolute top-1.5 right-1.5 rounded-field bg-card">
+      <div className="absolute top-1 right-1 rounded-field bg-code">
         <CopyButton label="Copy code" text={() => block.current?.textContent ?? ""} />
       </div>
     </div>
