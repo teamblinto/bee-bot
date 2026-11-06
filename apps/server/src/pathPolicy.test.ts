@@ -58,6 +58,33 @@ describe("targets in the workspace", () => {
   });
 });
 
+describe("a bot's memory folder", () => {
+  const memoryFile = () => NodePath.join(dataDir, "bots", "ada", "memory", "x.md");
+
+  beforeEach(() => {
+    NodeFS.mkdirSync(NodePath.dirname(memoryFile()));
+    NodeFS.writeFileSync(memoryFile(), "memory");
+  });
+
+  it.each(["Read", "Write", "Edit"] as const)("is refused to %s", (tool) => {
+    expect(check(tool, { file_path: memoryFile() })).toEqual(refused);
+    expect(check(tool, { file_path: "../memory/x.md" })).toEqual(refused);
+  });
+
+  it("is refused to Grep and Glob", () => {
+    expect(check("Grep", { pattern: "x", path: NodePath.dirname(memoryFile()) })).toEqual(refused);
+    expect(check("Grep", { pattern: "x", path: "../memory" })).toEqual(refused);
+    expect(check("Glob", { pattern: "../memory/*" })).toEqual(refused);
+    expect(check("Glob", { pattern: "**/../memory/*" })).toEqual(refused);
+  });
+
+  it("is refused through a link from the workspace", () => {
+    link(NodePath.dirname(memoryFile()), NodePath.join(workspace, "shortcut"));
+    expect(read("shortcut/x.md")).toEqual(refused);
+    expect(check("Write", { file_path: "shortcut/new.md" })).toEqual(refused);
+  });
+});
+
 describe("targets outside the workspace", () => {
   it("are left to the card when nothing protected is touched", () => {
     expect(read(NodePath.join(home, "public", "notes.txt"))).toEqual(outside);

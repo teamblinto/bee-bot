@@ -2,7 +2,7 @@ import type { Bot } from "@beebot/contracts";
 import { ArrowDown, ChevronRight } from "lucide-react";
 import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "react";
 
-import { answeredLine, doneLine } from "../labels";
+import { answeredLine, doneLine, toolLabel } from "../labels";
 import type { TranscriptItem } from "../transcript";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
@@ -19,7 +19,7 @@ function ToolLine({ label, tools }: { label: string; tools: string[] }) {
       </summary>
       <ul className="mt-1 ml-1 border-l border-edge pl-3">
         {rows.map(({ name, position }) => (
-          <li key={position}>{name}</li>
+          <li key={position}>{toolLabel(name)}</li>
         ))}
       </ul>
     </details>

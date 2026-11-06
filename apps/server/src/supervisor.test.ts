@@ -47,6 +47,7 @@ function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
     sessionId: string;
     resume: boolean;
     model: BotModel;
+    memory: string;
     deliver: () => void;
     tool: (name: string) => void;
     finish: (o: TurnOutcome) => void;
@@ -58,6 +59,7 @@ function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
         sessionId,
         resume,
         model: launch.model,
+        memory: launch.memory,
         deliver: onDelivered,
         tool: onTool,
         finish: resolve,
@@ -848,6 +850,35 @@ describe("a lost session", () => {
     expect(run(store, bot)?.status).toBe("Completed");
   });
 
+  it("gives a new session the memory of the old one, and clears its taint", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    const tainted = () => Number(query("SELECT tainted FROM scopes")[0]?.tainted);
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    expect(engine.turns[0]?.memory).toBe("");
+    const first = { id: run(store, bot)?.id ?? "", botId: bot.id };
+    expect(store.proposeMemory(first, { text: "prefers tea", type: "user" })?.status).toBe(
+      "active",
+    );
+    engine.turns[0]?.tool("Read");
+    expect(tainted()).toBe(1);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+
+    await send(bot, "what do I drink?");
+    await expectTurns(engine, 2);
+    expect(tainted()).toBe(1);
+    engine.turns[1]?.finish({ kind: "session_lost" });
+    await expectTurns(engine, 3);
+
+    expect(engine.turns[2]?.sessionId).not.toBe(engine.turns[0]?.sessionId);
+    expect(engine.turns[2]?.resume).toBe(false);
+    expect(engine.turns[2]?.memory).toContain("prefers tea");
+    expect(tainted()).toBe(0);
+  });
+
   it("sends the digest again if the restarted turn dies before delivery", async () => {
     const before = scriptedEngine();
     const first = await boot(before.runTurn);
@@ -1032,6 +1063,7 @@ describe("fake engine", () => {
         personality: "",
         engineAccountId: "fake",
         model: "sonnet",
+        memory: "",
       },
       signal,
       onDelta: () => {},

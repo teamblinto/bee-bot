@@ -14,7 +14,16 @@ export const testedClaudeVersion = "2.1.318";
 const settingSources = "";
 const toolList = "Read,Write,Edit,Glob,Grep,Bash";
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
-const askSettings = JSON.stringify({ permissions: { ask: ["Bash", "Read", "Glob", "Grep"] } });
+// Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
+// reaching `approve` would taint the scope. A new memory tool must be added here on purpose.
+const askSettings = JSON.stringify({
+  permissions: {
+    ask: ["Bash", "Read", "Glob", "Grep"],
+    allow: ["memory_search", "memory_get", "memory_propose", "memory_forget"].map(
+      (name) => `mcp__bee__${name}`,
+    ),
+  },
+});
 const permissionTool = "mcp__bee__approve";
 const mcpTimeoutMs = 900_000;
 
@@ -391,8 +400,8 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDel
   });
 }
 
-function personaText({ name, personality }: BotLaunch) {
-  return [`Your name is ${name}.`, personality].filter(Boolean).join("\n\n");
+function personaText({ name, personality, memory }: BotLaunch) {
+  return [`Your name is ${name}.`, personality, memory].filter(Boolean).join("\n\n");
 }
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);

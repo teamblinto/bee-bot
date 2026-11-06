@@ -3,6 +3,7 @@ import type {
   Bot,
   ChatMessage,
   ChatState,
+  MemoryItem,
   PendingApproval,
   Run,
   ServerEvent,
@@ -63,12 +64,31 @@ const pending = (id: string): PendingApproval => ({
   expiresAt: "later",
 });
 
+const memory = (id: string, status: MemoryItem["status"]): MemoryItem => ({
+  id,
+  botId: "bot",
+  type: "user",
+  source: "agent",
+  sourceRef: "run:run",
+  status,
+  created: "now",
+  supersededBy: null,
+  text: id,
+});
+const memoryEvent = (seq: number, item: MemoryItem): ServerEvent => ({
+  seq,
+  createdAt: "now",
+  type: "memory.changed",
+  memory: item,
+});
+
 const emptyChat: ChatState = {
   bots: [],
   accounts: [],
   messages: [],
   runs: [],
   approvals: [],
+  memories: [],
   noticeAcknowledgedAt: null,
 };
 
@@ -132,10 +152,33 @@ it("reaches the same state by replay as by snapshot", () => {
     messages: [message("m2")],
     runs: [run("Interrupted")],
     approvals: [],
+    memories: [],
     noticeAcknowledgedAt: null,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });
+  expect(replayed).toEqual(snapshotted);
+});
+
+it("reaches the same memories by replay as by snapshot, without superseded or forgotten items", () => {
+  const events = [
+    memoryEvent(1, memory("old", "active")),
+    memoryEvent(2, memory("doomed", "active")),
+    memoryEvent(3, memory("rejected", "pending")),
+    memoryEvent(4, memory("approved", "pending")),
+    memoryEvent(5, memory("waiting", "pending")),
+    memoryEvent(6, memory("new", "active")),
+    memoryEvent(7, { ...memory("old", "superseded"), supersededBy: "new" }),
+    memoryEvent(8, memory("doomed", "forgotten")),
+    memoryEvent(9, memory("rejected", "forgotten")),
+    memoryEvent(10, memory("approved", "active")),
+  ];
+  const chat = {
+    ...emptyChat,
+    memories: [memory("approved", "active"), memory("waiting", "pending"), memory("new", "active")],
+  };
+  const replayed = applyServerMessage(state(0), { type: "replay", events });
+  const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 10, state: chat });
   expect(replayed).toEqual(snapshotted);
 });
 

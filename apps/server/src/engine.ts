@@ -19,6 +19,7 @@ export type BotLaunch = {
   personality: string;
   engineAccountId: string;
   model: BotModel;
+  memory: string;
 };
 
 export const workspacePath = (dataDir: string, botId: string) =>
@@ -55,8 +56,18 @@ const inputKeys: Record<string, string> = {
   Grep: "pattern",
 };
 
+type Permissions = { url: string; token: string };
+
+const callTool = ({ url, token }: Permissions, params: unknown, signal: AbortSignal) =>
+  fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params }),
+    signal,
+  });
+
 async function askPermission(
-  { url, token }: { url: string; token: string },
+  permissions: Permissions,
   tool: string,
   detail: string,
   signal: AbortSignal,
@@ -69,12 +80,7 @@ async function askPermission(
       tool_use_id: "fake",
     },
   };
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params }),
-    signal,
-  });
+  const response = await callTool(permissions, params, signal);
   const data = /^data: (.*)$/m.exec(await response.text())?.[1];
   if (data === undefined) {
     return false;
@@ -83,8 +89,15 @@ async function askPermission(
   return result.content[0].text.startsWith('{"behavior":"allow"');
 }
 
+// Memory tools answer as plain JSON, not as the approval stream.
+async function proposeMemory(permissions: Permissions, text: string, signal: AbortSignal) {
+  const params = { name: "memory_propose", arguments: { text, type: "user" } };
+  const response = await callTool(permissions, params, signal);
+  return ToolResult.parse(await response.json()).result.content[0].text;
+}
+
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
-// /approve <Tool> <detail...>. Anything else streams a reply word by word.
+// /approve <Tool> <detail...>, /remember <text...>. Anything else streams a reply word by word.
 export const fakeRunTurn: RunTurn = async ({ prompt, signal, onDelta, onTool, permissions }) => {
   const line = (prompt.split("\n").at(-1) ?? "").trim();
   const [directive, argument] = line.split(/\s+/);
@@ -105,6 +118,12 @@ export const fakeRunTurn: RunTurn = async ({ prompt, signal, onDelta, onTool, pe
       onTool(tool);
       const allowed = await askPermission(permissions, tool, detail, signal);
       const text = `Test engine: ${allowed ? "allowed" : "denied"}`;
+      onDelta(text);
+      return { kind: "completed", text };
+    }
+    case "/remember": {
+      onTool("mcp__bee__memory_propose");
+      const text = await proposeMemory(permissions, line.replace(/^\S+\s*/, ""), signal);
       onDelta(text);
       return { kind: "completed", text };
     }

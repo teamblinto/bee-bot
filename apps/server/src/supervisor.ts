@@ -123,6 +123,13 @@ export function createSupervisor({
         onDelta: (text) => onDelta(run.id, text),
         onTool: (name) => {
           tools.push(name);
+          if (!name.startsWith("mcp__bee__")) {
+            try {
+              store.markTainted(run.id);
+            } catch (error) {
+              console.error(`beebotd: taint of run ${run.id} was not recorded`, error);
+            }
+          }
           onTool(run.id, name);
         },
         permissions: { url: permissionsUrl(), token },

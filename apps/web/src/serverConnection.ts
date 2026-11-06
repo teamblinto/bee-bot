@@ -63,6 +63,15 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     }
     case "approval.changed":
       return { ...state, chat: { ...chat, approvals: upsert(chat.approvals, event.approval) } };
+    case "memory.changed": {
+      const { memory } = event;
+      // Snapshots hold active and pending only, and replay must land on the same state.
+      const memories =
+        memory.status === "active" || memory.status === "pending"
+          ? upsert(chat.memories, memory)
+          : chat.memories.filter(({ id }) => id !== memory.id);
+      return { ...state, chat: { ...chat, memories } };
+    }
     case "notice.acknowledged":
       return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
   }
@@ -149,6 +158,7 @@ let state: ConnectionState = {
     messages: [],
     runs: [],
     approvals: [],
+    memories: [],
     noticeAcknowledgedAt: null,
   },
   drafts: {},

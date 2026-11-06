@@ -160,6 +160,9 @@ export function createApprovals({
     },
 
     approve: async (run: Run, args: unknown, closed: AbortSignal): Promise<Decision> => {
+      // Before anything else: the stream's tool frame has no order against a memory call on /mcp,
+      // but a tool can't run until this answers. If the write throws, the call is denied.
+      store.markTainted(run.id);
       const parsed = Arguments.safeParse(args);
       if (!parsed.success || !runs.has(run.id) || closed.aborted) {
         return malformed;

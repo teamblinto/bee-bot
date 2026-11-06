@@ -19,14 +19,18 @@ import { WebSocket } from "ws";
 import { inputDigest } from "./approvals.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
 import { startServer } from "./server.ts";
-import { openEventStore } from "./store.ts";
+import { type EventStore, openEventStore } from "./store.ts";
 
 const ownerToken = "t".repeat(43);
 const secret = "hunter2-do-not-keep";
 const command = `echo ${secret}`;
 
 type Permissions = { url: string; token: string };
-type Turn = { permissions: Permissions; finish: (outcome: TurnOutcome) => void };
+type Turn = {
+  permissions: Permissions;
+  tool: (name: string) => void;
+  finish: (outcome: TurnOutcome) => void;
+};
 
 let dataDir: string;
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -71,9 +75,9 @@ type BootOptions = {
 
 async function boot(options: BootOptions = {}) {
   const turns: Turn[] = [];
-  const scripted: RunTurn = ({ permissions, signal }) =>
+  const scripted: RunTurn = ({ permissions, signal, onTool }) =>
     new Promise((resolve) => {
-      turns.push({ permissions, finish: resolve });
+      turns.push({ permissions, tool: onTool, finish: resolve });
       signal.addEventListener("abort", () => resolve({ kind: "failed" }));
     });
   const store = openEventStore(dataDir);
@@ -162,6 +166,13 @@ const toolCall = (tool_name: string, input: unknown) =>
     arguments: { tool_name, input, tool_use_id: "toolu_1" },
   });
 
+async function memoryCall(permissions: Permissions, name: string, args: unknown) {
+  const response = await mcp(permissions, rpc("tools/call", { name, arguments: args }));
+  expect(response.headers.get("content-type")).toBe("application/json");
+  const { result } = (await response.json()) as { result: { content: [{ text: string }] } };
+  return result.content[0].text;
+}
+
 async function decisionOf(response: Response) {
   const text = await response.text();
   const data = /^event: message\ndata: (.*)\n\n$/m.exec(text)?.[1] ?? "";
@@ -197,9 +208,17 @@ describe("the MCP endpoint", () => {
     });
 
     const list = (await (await mcp(permissions, rpc("tools/list"))).json()) as {
-      result: { tools: Array<{ name: string }> };
+      result: { tools: Array<{ name: string; annotations?: unknown }> };
     };
-    expect(list.result.tools.map(({ name }) => name)).toEqual(["approve"]);
+    expect(list.result.tools.map(({ name }) => name)).toEqual([
+      "approve",
+      "memory_search",
+      "memory_get",
+      "memory_propose",
+      "memory_forget",
+    ]);
+    // A read-only hint would let the CLI run a memory call alongside a tool, ahead of the taint.
+    expect(list.result.tools.every(({ annotations }) => annotations === undefined)).toBe(true);
     expect(await (await mcp(permissions, rpc("ping"))).json()).toMatchObject({ result: {} });
 
     const note = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -650,5 +669,191 @@ describe("the fake engine's /approve", () => {
       expect(printed).not.toContain(token);
       expect(JSON.stringify(client.messages)).not.toContain(token);
     }
+  });
+});
+
+describe("memory tools", () => {
+  it("can't reach another bot's memory, whatever the arguments", async () => {
+    const { startTurn, store } = await boot();
+    const { bot: ada, turn } = await startTurn();
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const theirs = store.addMemory({ botId: ben.id, text: "the ben secret", type: "user" });
+    store.sendMessage({ id: "ben-1", roomId: ben.roomId, body: "ben secret", attended: false });
+    const id = theirs?.id ?? "";
+    const missing = NodeCrypto.randomUUID();
+    const file = NodePath.join(dataDir, "bots", ben.id, "memory", `${id}.md`);
+    const bytes = NodeFS.readFileSync(file, "utf8");
+    const answers = async (target: string) => ({
+      get: await memoryCall(turn.permissions, "memory_get", { id: target, botId: ben.id }),
+      forget: await memoryCall(turn.permissions, "memory_forget", {
+        id: target,
+        reason: "stale",
+        botId: ben.id,
+        bot_id: ben.id,
+      }),
+      replace: await memoryCall(turn.permissions, "memory_propose", {
+        text: "overwritten",
+        type: "user",
+        supersedes: target,
+        botId: ben.id,
+      }),
+    });
+
+    expect(await answers(id)).toEqual(await answers(missing));
+    expect((await answers("../../../beebot.db")).get).toBe("Not found.");
+    expect(
+      await memoryCall(turn.permissions, "memory_search", { query: "secret", botId: ben.id }),
+    ).toBe("No results.");
+    expect(NodeFS.readFileSync(file, "utf8")).toBe(bytes);
+    expect(store.activeMemory(ben.id, id)?.text).toBe("the ben secret");
+
+    const saved = await memoryCall(turn.permissions, "memory_propose", {
+      text: "my own",
+      type: "user",
+      botId: ben.id,
+    });
+    const ownId = /as (.+)\.$/.exec(saved)?.[1] ?? "";
+    expect(store.activeMemory(ada.id, ownId)?.botId).toBe(ada.id);
+    expect(store.activeMemory(ben.id, ownId)).toBeUndefined();
+  });
+
+  describe("after a tool in the same turn", () => {
+    const proposal = { text: "taken from a tool", type: "project" };
+    const statusAfterPropose = async (store: EventStore, turn: Turn) => {
+      await memoryCall(turn.permissions, "memory_propose", proposal);
+      return store.state().memories.find(({ text }) => text === proposal.text)?.status;
+    };
+
+    it("a propose lands as pending once the stream shows a tool start", async () => {
+      const { startTurn, store } = await boot();
+      const { turn } = await startTurn();
+      turn.tool("Read");
+      expect(await statusAfterPropose(store, turn)).toBe("pending");
+    });
+
+    // The race: the stream frame may still be in a pipe, so `approve` alone has to order this.
+    it("a propose lands as pending when the stream frame never came, once approve saw the tool", async () => {
+      const { startTurn, store, nextCard, decide } = await boot();
+      const { turn } = await startTurn();
+      const call = mcp(turn.permissions, toolCall("Read", { file_path: "notes.txt" }));
+      const card = await nextCard();
+      expect(await statusAfterPropose(store, turn)).toBe("pending");
+      await decide(card, "allow");
+      expect((await decisionOf(await call)).behavior).toBe("allow");
+    });
+
+    it("approve marks the scope before it even parses the call", async () => {
+      const { startTurn, store } = await boot();
+      const { turn } = await startTurn();
+      const refused = await mcp(turn.permissions, toolCall("NotATool", {}));
+      expect((await decisionOf(refused)).behavior).toBe("deny");
+      expect(await statusAfterPropose(store, turn)).toBe("pending");
+    });
+
+    it("a failed mark denies the tool", async () => {
+      const { startTurn, store, client } = await boot();
+      const { turn } = await startTurn();
+      const failed = vi.spyOn(store, "markTainted").mockImplementation(() => {
+        throw new Error("disk full");
+      });
+      const call = await mcp(turn.permissions, toolCall("Read", { file_path: "notes.txt" }));
+      failed.mockRestore();
+      expect((await decisionOf(call)).behavior).toBe("deny");
+      expect(client.cards()).toEqual([]);
+    });
+
+    it("a memory tool does not taint", async () => {
+      const { startTurn, store } = await boot();
+      const { turn } = await startTurn();
+      turn.tool("mcp__bee__memory_search");
+      await memoryCall(turn.permissions, "memory_search", { query: "x" });
+      expect(await statusAfterPropose(store, turn)).toBe("active");
+    });
+
+    it("forget and supersede only ask, and leave the target active", async () => {
+      const { startTurn, store } = await boot();
+      const { bot, turn } = await startTurn();
+      const target = store.addMemory({ botId: bot.id, text: "keep me", type: "user" });
+      const id = target?.id ?? "";
+      turn.tool("Bash");
+
+      expect(await memoryCall(turn.permissions, "memory_forget", { id, reason: "stale" })).toBe(
+        "Sent to the owner for review.",
+      );
+      expect(
+        await memoryCall(turn.permissions, "memory_propose", {
+          text: "replacement",
+          type: "user",
+          supersedes: id,
+        }),
+      ).toMatch(/^Sent to the owner for review as /);
+
+      expect(store.activeMemory(bot.id, id)?.text).toBe("keep me");
+      expect(
+        store
+          .state()
+          .memories.filter(({ status }) => status === "pending")
+          .map(({ sourceRef }) => sourceRef),
+      ).toEqual([`forget:${id}`, `supersede:${id}`]);
+    });
+
+    it("the taint outlives the turn: a resumed session stays tainted", async () => {
+      const { startTurn, store, post, turns } = await boot();
+      const { bot, turn } = await startTurn();
+      turn.tool("Read");
+      turn.finish({ kind: "completed", text: "done" });
+      await vi.waitFor(() => expect(store.state().runs[0]?.status).toBe("Completed"));
+      await post({
+        type: "send-message",
+        messageId: NodeCrypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "again",
+      });
+      await vi.waitFor(() => expect(turns).toHaveLength(2), { timeout: 3000 });
+      expect(await statusAfterPropose(store, turns[1] as Turn)).toBe("pending");
+    });
+  });
+
+  it("stay out of logs and the audit log, end to end on the fake engine", async () => {
+    const spies = (["log", "info", "warn", "error"] as const).map((level) =>
+      vi.spyOn(console, level).mockImplementation(() => {}),
+    );
+    const { store, post, client } = await boot({ runTurn: fakeRunTurn });
+    const bot = (await (
+      await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId: "fake" })
+    ).json()) as Bot;
+    await post({
+      type: "send-message",
+      messageId: NodeCrypto.randomUUID(),
+      roomId: bot.roomId,
+      body: `/remember ${secret}`,
+    });
+
+    await vi.waitFor(() => expect(store.state().messages).toHaveLength(2), { timeout: 3000 });
+    const [memory] = store.state().memories;
+    expect(memory).toMatchObject({ text: secret, status: "active", source: "agent", type: "user" });
+    expect(store.state().messages[1]).toMatchObject({
+      body: `Saved as ${memory?.id}.`,
+      tools: ["mcp__bee__memory_propose"],
+    });
+    expect(client.messages.some((m) => m.type === "tool")).toBe(true);
+    expect(JSON.stringify(rows("SELECT * FROM audit_log"))).not.toContain(secret);
+    const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    vi.restoreAllMocks();
+    expect(printed).not.toContain(secret);
+  });
+
+  it("answer without the error when the store fails, and log only its kind", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { startTurn } = await boot();
+    const { turn } = await startTurn();
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec("DROP TABLE memory_fts");
+    db.close();
+    const answer = await memoryCall(turn.permissions, "memory_search", { query: secret });
+    const printed = JSON.stringify(errors.mock.calls);
+    vi.restoreAllMocks();
+    expect(answer).toBe("Memory is unavailable right now.");
+    expect(printed).not.toContain(secret);
   });
 });

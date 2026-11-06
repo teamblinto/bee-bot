@@ -15,8 +15,9 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
-import { openEventStore } from "./store.ts";
+import { migrations, openEventStore } from "./store.ts";
 
 const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
@@ -204,6 +205,14 @@ describe("access", () => {
     });
     expect(await upgradeStatus(wsUrl(port, { protocolVersion: "0" }))).toBe(426);
   });
+
+  it("refuses a client from before memory", async () => {
+    const { base, port } = await start();
+    const response = await fetch(`${base}/state?protocolVersion=4`, { headers: auth });
+    expect(response.status).toBe(426);
+    expect(await response.json()).toMatchObject({ code: "protocol_mismatch" });
+    expect(await upgradeStatus(wsUrl(port, { protocolVersion: "4" }))).toBe(426);
+  });
 });
 
 describe("event stream", () => {
@@ -226,6 +235,57 @@ describe("event stream", () => {
     expect(replay.type === "replay" && replay.events.map((event) => event.seq)).toEqual([3, 4]);
     await createBot(base);
     expect(await second.next()).toMatchObject({ type: "event", event: { seq: 5 } });
+  });
+
+  it("carries memory in both the snapshot and the replay", async () => {
+    const { base, port, store } = await start();
+    const { id: botId } = (await (await createBot(base)).json()) as { id: string };
+    const seq = store.bounds().latest;
+    const add = { type: "add-memory", botId, text: "likes tea", memoryType: "user" };
+    await command(base, add);
+
+    const fresh = await subscribe(port, 0);
+    expect(await fresh.next()).toMatchObject({
+      type: "snapshot",
+      state: { memories: [{ text: "likes tea", status: "active", source: "user" }] },
+    });
+
+    const resumed = await subscribe(port, seq);
+    expect(await resumed.next()).toMatchObject({
+      type: "replay",
+      events: [{ type: "memory.changed", memory: { text: "likes tea" } }],
+    });
+  });
+
+  it("gives a client from before this boot a snapshot, and later cursors a replay", async () => {
+    const before = await start();
+    const { id: botId } = (await (await createBot(before.base)).json()) as { id: string };
+    const cursor = before.store.bounds().latest;
+    await before.stop();
+    writeMemoryFile(dataDir, {
+      id: "00000000-0000-4000-8000-000000000002",
+      botId,
+      type: "user",
+      source: "user",
+      sourceRef: "owner",
+      status: "active",
+      created: "2026-11-06T10:15:00.000Z",
+      supersededBy: null,
+      text: "healed at boot",
+    });
+
+    const { base, port, store } = await start();
+    expect(store.bounds().latest).toBe(cursor);
+    const stale = await subscribe(port, cursor);
+    expect(await stale.next()).toMatchObject({
+      type: "snapshot",
+      state: { memories: [{ text: "healed at boot" }] },
+    });
+
+    await createBot(base);
+    await createBot(base);
+    const live = await subscribe(port, cursor + 1);
+    expect(await live.next()).toMatchObject({ type: "replay", events: [{ seq: cursor + 2 }] });
   });
 
   it("falls back to a snapshot when the cursor was pruned", async () => {
@@ -324,6 +384,41 @@ describe("the notice", () => {
   });
 });
 
+describe("memory commands", () => {
+  const uuid = "00000000-0000-4000-8000-000000000001";
+
+  it("add, correct and forget, and answer not_found for what isn't there", async () => {
+    const { base, store } = await start();
+    const { id: botId } = (await (await createBot(base)).json()) as { id: string };
+    const add = { type: "add-memory", botId, text: "  likes tea  ", memoryType: "user" };
+    const first = (await (await command(base, add)).json()) as { id: string; text: string };
+    expect(first.text).toBe("likes tea");
+
+    const correct = { ...add, text: "likes coffee", supersedes: first.id };
+    const second = (await (await command(base, correct)).json()) as { id: string };
+    expect(store.state().memories.map(({ text }) => text)).toEqual(["likes coffee"]);
+
+    const repeat = await command(base, correct);
+    expect(repeat.status).toBe(404);
+    expect(await repeat.json()).toEqual({ code: "not_found" });
+    expect((await command(base, { ...add, botId: uuid })).status).toBe(404);
+
+    const forget = { type: "forget-memory", memoryId: second.id };
+    expect((await command(base, forget)).status).toBe(200);
+    expect(store.state().memories).toEqual([]);
+    expect((await command(base, forget)).status).toBe(404);
+    const decide = { type: "decide-memory", memoryId: second.id, decision: "approve" };
+    expect((await command(base, decide)).status).toBe(404);
+  });
+
+  it("refuse text past the limit", async () => {
+    const { base } = await start();
+    const { id: botId } = (await (await createBot(base)).json()) as { id: string };
+    const add = { type: "add-memory", botId, text: "x".repeat(2001), memoryType: "user" };
+    expect((await command(base, add)).status).toBe(400);
+  });
+});
+
 describe("bot models", () => {
   it("defaults to sonnet, and an edit without a model keeps the bot's own", async () => {
     const { base, store } = await start();
@@ -390,7 +485,11 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'tools_and_approvals';
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_memory';
+      DROP TRIGGER messages_fts_insert; DROP TRIGGER messages_fts_delete;
+      DROP TRIGGER messages_fts_update; DROP TABLE messages_fts; DROP TABLE memory_fts;
+      DROP TABLE memory_items; ALTER TABLE scopes DROP COLUMN tainted;
+      DELETE FROM migrations WHERE name = 'tools_and_approvals';
       DROP TABLE approvals; DROP TABLE bot_tool_grants; DROP TABLE settings;
       ALTER TABLE bots DROP COLUMN model; ALTER TABLE messages DROP COLUMN tools;
       ALTER TABLE audit_log DROP COLUMN tool;
@@ -403,6 +502,76 @@ describe("restart", () => {
     expect(store.eventsAfter(0).every(({ seq }) => seq > 2)).toBe(true);
     const client = await subscribe(port, 1);
     expect(await client.next()).toMatchObject({ type: "snapshot", state: { bots: [{}] } });
+  });
+
+  it("migrates a v4 database and backfills its messages without losing any", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"), {
+      enableForeignKeyConstraints: false,
+    });
+    db.exec(`CREATE TABLE migrations (
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
+    )`);
+    const v4 = migrations.slice(
+      0,
+      migrations.findIndex(({ name }) => name === "bot_memory"),
+    );
+    expect(v4).toHaveLength(5);
+    v4.forEach(({ name, sql }, index) => {
+      db.exec(sql);
+      db.prepare("INSERT INTO migrations VALUES (?, ?, 'then')").run(index + 1, name);
+    });
+    const bodies = ["the walrus sings", "a second line about the walrus", "unrelated"];
+    db.exec(`INSERT INTO bots (id, name, personality, status, created_at)
+        VALUES ('old', 'Ada', '', 'ready', 'then'), ('new', 'Ben', '', 'ready', 'then');
+      INSERT INTO rooms VALUES ('room-old', 'old', 'then'), ('room-new', 'new', 'then');
+      INSERT INTO scopes (id, room_id, bot_id, session_id, session_started)
+        VALUES ('s-old', 'room-old', 'old', 'session', 1), ('s-new', 'room-new', 'new', NULL, 0);`);
+    bodies.forEach((body, index) => {
+      db.prepare(
+        `INSERT INTO messages (id, room_id, author, body, event_seq, created_at, tools)
+         VALUES (?, 'room-old', 'human', ?, ?, '2026-01-02T03:04:05.000Z', '["Read"]')`,
+      ).run(`m${index}`, body, index + 1);
+    });
+    const message = {
+      id: "m0",
+      roomId: "room-old",
+      author: "human",
+      body: bodies[0],
+      tools: ["Read"],
+      createdAt: "2026-01-02T03:04:05.000Z",
+    };
+    db.prepare(
+      "INSERT INTO events (type, payload, created_at) VALUES ('message.created', ?, 'then')",
+    ).run(JSON.stringify({ type: "message.created", message }));
+    db.close();
+
+    const { store } = await start();
+
+    const { messages, bots, memories } = store.state();
+    expect(messages.map(({ body }) => body)).toEqual(bodies);
+    expect(messages.every(({ tools }) => tools[0] === "Read")).toBe(true);
+    expect(bots.map(({ id }) => id)).toEqual(["old", "new"]);
+    expect(memories).toEqual([]);
+    expect(store.eventsAfter(0)).toMatchObject([{ type: "message.created" }]);
+    expect(store.searchMemory("old", "walrus")).toEqual([
+      "[room | owner | 2026-01-02] the walrus sings",
+      "[room | owner | 2026-01-02] a second line about the walrus",
+    ]);
+    expect(store.searchMemory("new", "walrus")).toEqual([]);
+
+    store.sendMessage({ id: "m9", roomId: "room-old", body: "a fresh penguin", attended: false });
+    expect(store.searchMemory("old", "penguin")).toHaveLength(1);
+
+    const check = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    const tainted = check.prepare("SELECT id, tainted FROM scopes ORDER BY id").all();
+    // Throws if the index disagrees with the messages table.
+    check.exec("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 1)");
+    check.close();
+    expect(tainted.map((row) => ({ ...row }))).toEqual([
+      { id: "s-new", tainted: 0 },
+      { id: "s-old", tainted: 1 },
+    ]);
   });
 
   it("keeps events and does not reapply migrations", async () => {

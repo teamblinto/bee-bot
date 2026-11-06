@@ -18,6 +18,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 import { createApprovals } from "./approvals.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
+import { callMemoryTool } from "./memory.ts";
 import type { EventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
 
@@ -101,6 +102,8 @@ export async function startServer({
     }
   }
 
+  // The boot's index rebuild emits nothing, so a cursor from before it can't be caught up by replay.
+  const bootSeq = store.bounds().latest;
   store.onEvent((event) => broadcast({ type: "event", event }));
   const approvals = createApprovals({
     store,
@@ -158,8 +161,8 @@ export async function startServer({
 
   function catchUp(afterSeq: number): ServerMessage {
     const { oldest, latest } = store.bounds();
-    // A cursor of 0 means an empty client, and rows like the seeded account have no event.
-    if (afterSeq === 0 || afterSeq < oldest - 1 || afterSeq > latest) {
+    // Covers cursor 0 too: an empty client, and rows like the seeded account have no event.
+    if (afterSeq <= bootSeq || afterSeq < oldest - 1 || afterSeq > latest) {
       return { type: "snapshot", seq: latest, state: store.state() };
     }
     return { type: "replay", events: store.eventsAfter(afterSeq) };
@@ -215,6 +218,15 @@ export async function startServer({
       case "acknowledge-notice":
         store.acknowledgeNotice();
         return ok;
+      case "add-memory": {
+        const { botId, text, memoryType: type, supersedes } = command;
+        const memory = store.addMemory({ botId, text, type, supersedes });
+        return memory ? { status: 200, body: memory } : notFound;
+      }
+      case "decide-memory":
+        return store.decideMemory(command.memoryId, command.decision) ? ok : notFound;
+      case "forget-memory":
+        return store.forgetMemory(command.memoryId) ? ok : notFound;
     }
   }
 
@@ -261,6 +273,7 @@ export async function startServer({
       response,
       body,
       (args, closed) => approvals.approve(run, args, closed),
+      (name, args) => callMemoryTool(store, run, name, args),
       mcpKeepaliveMs,
     );
   }

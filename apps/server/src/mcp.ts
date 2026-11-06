@@ -3,6 +3,7 @@ import type * as NodeHttp from "node:http";
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
+import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
 
@@ -20,7 +21,9 @@ const tools = [
       required: ["tool_name", "input"],
     },
   },
+  ...memoryTools,
 ];
+const memoryNames = new Set(memoryTools.map(({ name }) => name));
 
 const Rpc = z.object({
   id: z.union([z.string(), z.number()]).optional(),
@@ -75,6 +78,7 @@ export async function answerMcp(
   response: NodeHttp.ServerResponse,
   body: string,
   approve: (args: unknown, closed: AbortSignal) => Promise<Decision>,
+  memory: (name: string, args: unknown) => string,
   keepaliveMs = defaultKeepaliveMs,
 ) {
   const rpc = parseRpc(body);
@@ -104,6 +108,18 @@ export async function answerMcp(
       answer({});
       return;
     case "tools/call": {
+      if (typeof params?.name === "string" && memoryNames.has(params.name)) {
+        let text: string;
+        try {
+          text = memory(params.name, params.arguments);
+        } catch (error) {
+          // The kind only, here and in the answer: the error can quote memory text.
+          console.error(`beebotd: memory tool failed: ${(error as Error)?.name}`);
+          text = "Memory is unavailable right now.";
+        }
+        answer({ content: [{ type: "text", text }] });
+        return;
+      }
       const args = params?.name === "approve" ? params.arguments : undefined;
       await streamToolCall(response, id, (closed) => approve(args, closed), keepaliveMs);
       return;

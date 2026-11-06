@@ -1,35 +1,54 @@
 import type { Bot } from "@beebot/contracts";
 import { Ellipsis, PanelLeft } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { connectionLines, pauseLine, runLine } from "../labels";
 import { type ConnectionState, isActive, markSeen, sendCommand } from "../serverConnection";
 import { buildTranscript } from "../transcript";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
+import { MemoryPanel } from "./MemoryPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
 
 const menuItemClass =
   "w-full rounded-field px-3 py-1.5 text-left text-small hover:bg-raised disabled:text-ink-faint";
 
-function BotMenu({ bot, connected, onEdit }: { bot: Bot; connected: boolean; onEdit: () => void }) {
+function BotMenu({
+  bot,
+  connected,
+  pendingMemories,
+  onEdit,
+  onMemory,
+}: {
+  bot: Bot;
+  connected: boolean;
+  pendingMemories: number;
+  onEdit: () => void;
+  onMemory: () => void;
+}) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
     <>
       <button
         type="button"
-        aria-label="Bot menu"
+        aria-label={
+          pendingMemories > 0 ? `Bot menu, ${pendingMemories} to review in memory` : "Bot menu"
+        }
         popoverTarget="bot-menu"
         className="button !px-2 [anchor-name:--bot-menu]"
       >
         <Ellipsis {...iconProps} />
+        {pendingMemories > 0 && <span className="size-2 shrink-0 rounded-full bg-honey" />}
       </button>
       <div
         id="bot-menu"
         popover="auto"
         className="m-0 mt-1 w-40 rounded-menu bg-overlay p-1 text-ink shadow-menu [position-anchor:--bot-menu] [position-area:bottom_span-left]"
       >
+        <button type="button" {...hide} className={menuItemClass} onClick={onMemory}>
+          Memory{pendingMemories > 0 && ` (${pendingMemories})`}
+        </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
         </button>
@@ -93,6 +112,8 @@ export function ChatView({
   const canContinue = run?.status === "Interrupted" || run?.status === "Cancelled";
   const lastBotMessageId = messages.findLast(({ author }) => author === "bot")?.id;
   const seenId = lastSeen[bot.id];
+  const memories = chat.memories.filter(({ botId }) => botId === bot.id);
+  const [memoryOpen, setMemoryOpen] = useState(false);
 
   useEffect(() => {
     if (lastBotMessageId && lastBotMessageId !== seenId) {
@@ -125,7 +146,13 @@ export function ChatView({
           <span className="shrink-0 text-label text-ink-faint">Test engine</span>
         )}
         <span className="flex-1" />
-        <BotMenu bot={bot} connected={connected} onEdit={onEdit} />
+        <BotMenu
+          bot={bot}
+          connected={connected}
+          pendingMemories={memories.filter(({ status }) => status === "pending").length}
+          onEdit={onEdit}
+          onMemory={() => setMemoryOpen(true)}
+        />
       </header>
       {empty ? (
         <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
@@ -167,6 +194,14 @@ export function ChatView({
           onChange={onComposerText}
         />
       </div>
+      {memoryOpen && (
+        <MemoryPanel
+          bot={bot}
+          memories={memories}
+          connected={connected}
+          onClose={() => setMemoryOpen(false)}
+        />
+      )}
     </section>
   );
 }

@@ -16,6 +16,7 @@ const launch: BotLaunch = {
   personality: "Terse.",
   engineAccountId: "claude",
   model: "opus",
+  memory: "",
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };
@@ -72,7 +73,12 @@ function isAlive(pid: number) {
   }
 }
 
-function turn(scenario: string, signal = new AbortController().signal, resume = false) {
+function turn(
+  scenario: string,
+  signal = new AbortController().signal,
+  resume = false,
+  memory = "",
+) {
   const deltas: string[] = [];
   const tools: string[] = [];
   let delivered = 0;
@@ -80,7 +86,7 @@ function turn(scenario: string, signal = new AbortController().signal, resume = 
     prompt,
     sessionId: "00000000-0000-4000-8000-000000000009",
     resume,
-    launch,
+    launch: { ...launch, memory },
     signal,
     onDelta: (text) => deltas.push(text),
     onTool: (name) => tools.push(name),
@@ -123,6 +129,16 @@ describe("a turn", () => {
     expect(NodeFS.readFileSync(personaPath, "utf8")).toContain("Terse.");
   });
 
+  it("appends the memory primer to the persona file, and nothing when there is none", async () => {
+    const personaPath = NodePath.join(dataDir, "bots", launch.botId, "persona.md");
+    await turn("success", undefined, false, "[Saved memory]\n- likes tea").outcome;
+    expect(NodeFS.readFileSync(personaPath, "utf8")).toBe(
+      "Your name is Ada.\n\nTerse.\n\n[Saved memory]\n- likes tea",
+    );
+    await turn("success").outcome;
+    expect(NodeFS.readFileSync(personaPath, "utf8")).toBe("Your name is Ada.\n\nTerse.");
+  });
+
   it("passes the prompt on stdin only, with no banned flag", async () => {
     await turn("success").outcome;
     const args = spawns()[0]?.args ?? [];
@@ -143,7 +159,15 @@ describe("a turn", () => {
     expect(flag("--tools")).toBe("Read,Write,Edit,Glob,Grep,Bash");
     expect(flag("--permission-prompt-tool")).toBe("mcp__bee__approve");
     expect(JSON.parse(flag("--settings") ?? "")).toEqual({
-      permissions: { ask: ["Bash", "Read", "Glob", "Grep"] },
+      permissions: {
+        ask: ["Bash", "Read", "Glob", "Grep"],
+        allow: [
+          "mcp__bee__memory_search",
+          "mcp__bee__memory_get",
+          "mcp__bee__memory_propose",
+          "mcp__bee__memory_forget",
+        ],
+      },
     });
   });
 

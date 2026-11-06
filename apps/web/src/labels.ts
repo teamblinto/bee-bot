@@ -1,11 +1,14 @@
-import type {
-  Approval,
-  ApprovalTool,
-  Bot,
-  EngineAccount,
-  EngineStatus,
-  Run,
-  RunReason,
+import {
+  type Approval,
+  type ApprovalTool,
+  type Bot,
+  type EngineAccount,
+  type EngineStatus,
+  type MemoryItem,
+  memoryRequest,
+  type MemoryType,
+  type Run,
+  type RunReason,
 } from "@beebot/contracts";
 
 const clock = (iso: string) =>
@@ -137,3 +140,61 @@ export function answeredLine({ status, reason }: Approval) {
 }
 
 export const doneLine = (count: number) => `Done · ${count} ${count === 1 ? "tool" : "tools"}`;
+
+// A Map, because a tool name is whatever the engine reports and could be "constructor".
+const toolLabels = new Map([
+  ["mcp__bee__memory_search", "Searched memory"],
+  ["mcp__bee__memory_get", "Read a memory"],
+  ["mcp__bee__memory_propose", "Saved a memory"],
+  ["mcp__bee__memory_forget", "Forgot a memory"],
+]);
+
+export const toolLabel = (name: string) => toolLabels.get(name) ?? name;
+
+export const memoryNotice =
+  "Memory is stored unencrypted on this computer. In Host mode, a shell command you approve can reach it.";
+
+export const memoryTypeLabels: Record<MemoryType, string> = {
+  user: "About you",
+  feedback: "Feedback",
+  project: "Project",
+  reference: "Reference",
+};
+
+export const memoryLine = ({ type, source, created }: MemoryItem) =>
+  `${memoryTypeLabels[type]} · ${source === "user" ? "You" : "Bot"} · ${shortTime(created)}`;
+
+// What approving would do. `memories` is this bot's: a target that has left it changes the outcome.
+export function memoryReview(item: MemoryItem, memories: MemoryItem[]) {
+  const request = memoryRequest(item);
+  if (!request) {
+    return { title: "Wants to remember this", lines: [{ label: "Memory", text: item.text }] };
+  }
+  const target = memories.find(
+    ({ id, status }) => id === request.targetId && status === "active",
+  )?.text;
+  if (request.kind === "supersede") {
+    return target === undefined
+      ? {
+          title: "Wants to replace a memory that's already gone, so approving adds this as new",
+          lines: [{ label: "Memory", text: item.text }],
+        }
+      : {
+          title: "Wants to replace a memory",
+          lines: [
+            { label: "Replaces", text: target },
+            { label: "With", text: item.text },
+          ],
+        };
+  }
+  const reason = { label: "Bot's reason", text: item.text };
+  return target === undefined
+    ? {
+        title: "Wants to forget a memory that's already gone, so approving changes nothing",
+        lines: [reason],
+      }
+    : {
+        title: "Wants to forget a memory",
+        lines: [{ label: "Forgets", text: target }, reason],
+      };
+}

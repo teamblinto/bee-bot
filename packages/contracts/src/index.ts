@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 4;
+export const protocolVersion = 5;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -122,6 +122,39 @@ export const PendingApproval = z.object({
 });
 export type PendingApproval = z.infer<typeof PendingApproval>;
 
+export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
+export type MemoryType = z.infer<typeof MemoryType>;
+export const MemorySource = z.enum(["user", "agent"]);
+export type MemorySource = z.infer<typeof MemorySource>;
+export const MemoryStatus = z.enum(["pending", "active", "superseded", "forgotten"]);
+export type MemoryStatus = z.infer<typeof MemoryStatus>;
+
+// One limit for the owner and the bot, so one item can never fill the primer.
+export const MemoryText = z.string().trim().min(1).max(2000);
+
+export const MemoryItem = z.object({
+  id: z.uuid(),
+  botId: z.string(),
+  type: MemoryType,
+  source: MemorySource,
+  sourceRef: z.string(),
+  status: MemoryStatus,
+  created: z.string(),
+  supersededBy: z.string().nullable(),
+  text: z.string(),
+});
+export type MemoryItem = z.infer<typeof MemoryItem>;
+
+// A pending item can be a request about another item. Its `text` is then the new text (supersede)
+// or the bot's reason (forget).
+export function memoryRequest({ status, sourceRef }: Pick<MemoryItem, "status" | "sourceRef">) {
+  if (status !== "pending") {
+    return undefined;
+  }
+  const [kind, targetId] = sourceRef.split(":");
+  return (kind === "supersede" || kind === "forget") && targetId ? { kind, targetId } : undefined;
+}
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
@@ -129,6 +162,8 @@ export const ChatState = z.object({
   messages: z.array(ChatMessage),
   runs: z.array(Run),
   approvals: z.array(Approval),
+  // Active and pending only, for every bot.
+  memories: z.array(MemoryItem),
   noticeAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
@@ -139,6 +174,7 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message.created"), message: ChatMessage }),
   z.object({ type: z.literal("run.changed"), run: Run }),
   z.object({ type: z.literal("approval.changed"), approval: Approval }),
+  z.object({ type: z.literal("memory.changed"), memory: MemoryItem }),
   z.object({ type: z.literal("notice.acknowledged"), acknowledgedAt: z.string() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
@@ -202,6 +238,20 @@ export const Command = z.discriminatedUnion("type", [
     digest: z.string(),
     decision: z.enum(["allow", "deny", "always"]),
   }),
+  z.object({
+    type: z.literal("add-memory"),
+    botId: z.uuid(),
+    text: MemoryText,
+    memoryType: MemoryType,
+    // Also how the owner edits an item.
+    supersedes: z.uuid().optional(),
+  }),
+  z.object({
+    type: z.literal("decide-memory"),
+    memoryId: z.uuid(),
+    decision: z.enum(["approve", "reject"]),
+  }),
+  z.object({ type: z.literal("forget-memory"), memoryId: z.uuid() }),
   z.object({ type: z.literal("acknowledge-notice") }),
 ]);
 export type Command = z.infer<typeof Command>;
