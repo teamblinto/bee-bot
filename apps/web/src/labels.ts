@@ -8,6 +8,8 @@ import {
   type MemoryItem,
   memoryRequest,
   type MemoryType,
+  type Routine,
+  type RoutineFiring,
   type Run,
   type RunReason,
   type UsageLimits,
@@ -327,6 +329,57 @@ export function seriesLabel(start: string) {
   const [year = 0, month = 1, day = 1] = start.split("-").map(Number);
   return new Date(year, month - 1, day).toLocaleDateString([], { month: "short", day: "numeric" });
 }
+
+export const routinesNotice =
+  "A routine needs Bee Bot to be open and needs you to press Run. It never starts by itself.";
+
+export const dayAndTime = (iso: string) =>
+  new Date(iso).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+export const routineReadyLine = (name: string) => `${name} is ready to run`;
+
+export const missedLine = (count: number) =>
+  `${formatCount(count)} earlier ${count === 1 ? "run was" : "runs were"} missed`;
+
+export const nextDueLine = ({ nextFireAt }: Routine) =>
+  nextFireAt ? `Next due ${dayAndTime(nextFireAt)}` : "Turned off";
+
+const firingStatusLabels: Record<RoutineFiring["status"], string> = {
+  ready: "Ready to run",
+  ran: "Ran",
+  skipped: "Skipped",
+  missed: "Missed",
+};
+
+const firingReasonLines: Record<NonNullable<RoutineFiring["reason"]>, string> = {
+  no_boundary: "nobody started it before the next run came due",
+  asleep: "Bee Bot wasn't open within a day of it",
+  bot_paused: "the bot was paused",
+  disabled: "the routine was changed or turned off",
+  too_late: "it was past its skip limit",
+};
+
+export function firingLine({ status, reason, slot, missedBefore }: RoutineFiring) {
+  const outcome = `Last: ${firingStatusLabels[status]} ${dayAndTime(slot)}`;
+  const why = reason ? `, ${firingReasonLines[reason]}` : "";
+  const missed = missedBefore > 0 ? `. ${missedLine(missedBefore)}` : "";
+  return `${outcome}${why}${missed}`;
+}
+
+export const routineRefusalLines = {
+  bot_paused: "This bot is paused. Resume it, then try again.",
+  firing_closed: "This run is already closed.",
+  invalid_cron: "That schedule isn't valid.",
+  invalid_timezone: "This computer's time zone isn't recognized.",
+  not_attended: "This run can only start from an open Bee Bot window.",
+  schedule_too_frequent: "A routine can't run more often than every 15 minutes.",
+  too_late: "This run was past its skip limit, so it was skipped.",
+};
 
 export const memoryNotice =
   "Memory is stored unencrypted on this computer. In Host mode, a shell command you approve can reach it.";

@@ -11,6 +11,7 @@
     "@beebot/contracts": "workspace:*",
     "@types/node": "catalog:",
     "@types/ws": "catalog:",
+    "croner": "catalog:",
     "vite-plus": "catalog:",
     "ws": "catalog:",
     "zod": "catalog:"

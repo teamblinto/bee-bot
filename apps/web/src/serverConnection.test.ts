@@ -5,6 +5,8 @@ import type {
   ChatState,
   MemoryItem,
   PendingApproval,
+  Routine,
+  RoutineFiring,
   Run,
   ServerEvent,
   ServerMessage,
@@ -12,7 +14,7 @@ import type {
 import { beforeAll, expect, it, vi } from "vite-plus/test";
 
 import type { ConnectionState, LiveTool } from "./serverConnection";
-import { buildTranscript } from "./transcript";
+import { buildTranscript, isOpenItem } from "./transcript";
 
 const bot: Bot = {
   id: "bot",
@@ -100,6 +102,8 @@ const emptyChat: ChatState = {
   approvals: [],
   memories: [],
   usageLimits: [],
+  routines: [],
+  firings: [],
   noticeAcknowledgedAt: null,
 };
 
@@ -122,10 +126,11 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
 
 let applyServerMessage: typeof import("./serverConnection").applyServerMessage;
 let notificationBodies: typeof import("./serverConnection").notificationBodies;
+let openCards: typeof import("./serverConnection").openCards;
 
 beforeAll(async () => {
   vi.stubGlobal("window", { location: { search: "" } });
-  ({ applyServerMessage, notificationBodies } = await import("./serverConnection"));
+  ({ applyServerMessage, notificationBodies, openCards } = await import("./serverConnection"));
 });
 
 it("drops replayed and live events it already has", () => {
@@ -168,6 +173,8 @@ it("reaches the same state by replay as by snapshot", () => {
     approvals: [],
     memories: [],
     usageLimits: [],
+    routines: [],
+    firings: [],
     noticeAcknowledgedAt: null,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });
@@ -238,7 +245,7 @@ it("replaces the pending set instead of merging it", () => {
 it("shows a pending card again after a reconnect snapshot, and not before its detail arrives", () => {
   const chat = { ...emptyChat, approvals: [approval("pending")] };
   const cards = ({ chat, pending }: ConnectionState) =>
-    buildTranscript(chat.messages, chat.approvals, pending);
+    buildTranscript(chat.messages, chat.approvals, pending, []);
 
   const snapshotted = applyServerMessage(state(9), { type: "snapshot", seq: 4, state: chat });
   expect(cards(snapshotted)).toEqual([]);
@@ -255,7 +262,7 @@ it("shows a pending card again after a reconnect snapshot, and not before its de
 });
 
 it("keeps an answered approval in the transcript with no card content", () => {
-  const items = buildTranscript([], [approval("denied")], [pending("approval")]);
+  const items = buildTranscript([], [approval("denied")], [pending("approval")], []);
   expect(items).toMatchObject([{ kind: "approval", pending: undefined }]);
 });
 
@@ -266,6 +273,7 @@ it("merges messages and approvals by time", () => {
       { ...message("third"), createdAt: "2026-01-01T00:00:03.000Z" },
     ],
     [{ ...approval("allowed"), createdAt: "2026-01-01T00:00:02.000Z" }],
+    [],
     [],
   );
   expect(items.map(({ kind }) => kind)).toEqual(["message", "approval", "message"]);
@@ -404,4 +412,104 @@ it("notifies once per finished run or new approval, and never from history", () 
       approvals: [pending("old"), pending("approval")],
     }),
   ).toEqual(["Ada needs your approval"]);
+});
+
+const routine = (id: string): Routine => ({
+  id,
+  botId: "bot",
+  name: "Standup",
+  prompt: "Say hi",
+  cron: "0 9 * * *",
+  timezone: "UTC",
+  enabled: true,
+  skipIfLaterMins: null,
+  nextFireAt: "later",
+  createdAt: "now",
+});
+const firing = (
+  id: string,
+  routineId: string,
+  status: RoutineFiring["status"],
+  reason: RoutineFiring["reason"] = null,
+): RoutineFiring => ({
+  id,
+  routineId,
+  slot: id,
+  status,
+  reason,
+  missedBefore: 0,
+  createdAt: "now",
+  decidedAt: null,
+});
+const firingEvent = (seq: number, changed: RoutineFiring): ServerEvent => ({
+  seq,
+  createdAt: "now",
+  type: "firing.changed",
+  firing: changed,
+});
+
+it("reaches the same routines and firings by replay as by snapshot", () => {
+  const routineEvent = (seq: number, id: string): ServerEvent => ({
+    seq,
+    createdAt: "now",
+    type: "routine.changed",
+    routine: routine(id),
+  });
+  const events: ServerEvent[] = [
+    routineEvent(1, "a"),
+    routineEvent(2, "b"),
+    routineEvent(3, "gone"),
+    firingEvent(4, firing("a1", "a", "ready")),
+    firingEvent(5, firing("b1", "b", "ready")),
+    firingEvent(6, firing("gone1", "gone", "ready")),
+    // A new slot: the old card closes first, then the new firing replaces it.
+    firingEvent(7, firing("a1", "a", "skipped", "no_boundary")),
+    firingEvent(8, firing("a2", "a", "ready")),
+    firingEvent(9, firing("b1", "b", "ran")),
+    { seq: 10, createdAt: "now", type: "routine.deleted", routineId: "gone" },
+  ];
+  const chat: ChatState = {
+    ...emptyChat,
+    routines: [routine("a"), routine("b")],
+    firings: [firing("b1", "b", "ran"), firing("a2", "a", "ready")],
+  };
+  const replayed = applyServerMessage(state(0), { type: "replay", events });
+  const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 10, state: chat });
+  const byRoutine = (firings: RoutineFiring[]) =>
+    firings.toSorted((a, b) => a.routineId.localeCompare(b.routineId));
+  expect(byRoutine(replayed.chat.firings)).toEqual(byRoutine(snapshotted.chat.firings));
+  expect(replayed.chat.routines).toEqual(snapshotted.chat.routines);
+  expect(replayed.seq).toBe(snapshotted.seq);
+});
+
+it("notifies once for a new ready firing, never for a closed one or from history", () => {
+  const known = state(3, { bots: [bot], routines: [routine("a")] });
+  const ready = firingEvent(4, firing("a1", "a", "ready"));
+
+  expect(notificationBodies(known, { type: "event", event: ready })).toEqual([
+    "Standup is ready to run",
+  ]);
+  const seen = applyServerMessage(known, { type: "event", event: ready });
+  expect(notificationBodies(seen, { type: "replay", events: [ready] })).toEqual([]);
+  expect(
+    notificationBodies(known, { type: "event", event: firingEvent(5, firing("a1", "a", "ran")) }),
+  ).toEqual([]);
+  expect(
+    notificationBodies(known, {
+      type: "snapshot",
+      seq: 9,
+      state: { ...emptyChat, firings: [firing("a1", "a", "ready")] },
+    }),
+  ).toEqual([]);
+});
+
+it("shows only a bot's open firings as cards, among the items waiting at the bottom", () => {
+  const chat: ChatState = {
+    ...emptyChat,
+    routines: [routine("a"), { ...routine("b"), botId: "other" }, routine("c")],
+    firings: [firing("a1", "a", "ready"), firing("b1", "b", "ready"), firing("c1", "c", "ran")],
+  };
+  const cards = openCards(chat, "bot");
+  expect(cards.map(({ firing: { id } }) => id)).toEqual(["a1"]);
+  expect(buildTranscript([message("m")], [], [], cards).map(isOpenItem)).toEqual([false, true]);
 });

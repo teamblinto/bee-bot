@@ -267,6 +267,7 @@ export function createSupervisor({
     const now = new Date().toISOString();
     try {
       store.clearExpiredBlocks(now);
+      store.fireDueRoutines(now);
       for (const wake of store.dueWakes(now)) {
         try {
           settleWake(wake, now);

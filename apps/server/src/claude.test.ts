@@ -50,11 +50,13 @@ beforeEach(() => {
   logPath = NodePath.join(dataDir, "fake-cli.log");
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const name of plantedEnv.splice(0)) {
     delete process.env[name];
   }
-  NodeFS.rmSync(dataDir, { recursive: true, force: true });
+  // Windows locks a killed child's cwd for a few ms after it reports exited, as Access Denied,
+  // which rmSync's maxRetries does not retry.
+  await vi.waitFor(() => NodeFS.rmSync(dataDir, { recursive: true, force: true }));
 });
 
 function plantEnv(name: string, value: string) {
@@ -211,8 +213,7 @@ describe("probeUsage", () => {
     } finally {
       vi.useRealTimers();
     }
-    const pid = spawns()[0]?.pid ?? 0;
-    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+    expect(isAlive(spawns()[0]?.pid ?? 0)).toBe(false);
   });
 });
 

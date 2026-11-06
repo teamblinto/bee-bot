@@ -1,15 +1,34 @@
-import type { Approval, ChatMessage, PendingApproval } from "@beebot/contracts";
+import type {
+  Approval,
+  ChatMessage,
+  PendingApproval,
+  Routine,
+  RoutineFiring,
+} from "@beebot/contracts";
 
 export type TranscriptItem = { at: string; sender: ChatMessage["author"] } & (
   | { kind: "message"; message: ChatMessage }
   | { kind: "approval"; approval: Approval; pending: PendingApproval | undefined }
+  | { kind: "routine"; routine: Routine; firing: RoutineFiring }
 );
+
+export function itemKey(item: TranscriptItem) {
+  if (item.kind === "message") {
+    return item.message.id;
+  }
+  return item.kind === "approval" ? item.approval.id : item.firing.id;
+}
+
+// These wait on the owner, so they stay at the bottom until answered.
+export const isOpenItem = (item: TranscriptItem) =>
+  item.kind === "routine" || (item.kind === "approval" && item.pending !== undefined);
 
 // A pending approval without its in-memory detail has nothing to show yet.
 export function buildTranscript(
   messages: ChatMessage[],
   approvals: Approval[],
   pending: PendingApproval[],
+  cards: Array<{ routine: Routine; firing: RoutineFiring }>,
 ) {
   const items: TranscriptItem[] = messages.map((message) => ({
     kind: "message",
@@ -28,6 +47,9 @@ export function buildTranscript(
         sender: "bot",
       });
     }
+  }
+  for (const { routine, firing } of cards) {
+    items.push({ kind: "routine", routine, firing, at: firing.createdAt, sender: "bot" });
   }
   return items.toSorted((a, b) => a.at.localeCompare(b.at));
 }

@@ -30,6 +30,7 @@ import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engin
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
+import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
 import {
@@ -388,6 +389,39 @@ export async function startServer({
         return store.decideMemory(command.memoryId, command.decision) ? ok : notFound;
       case "forget-memory":
         return store.forgetMemory(command.memoryId) ? ok : notFound;
+      case "create-routine": {
+        if (!store.getBot(command.botId)) {
+          return notFound;
+        }
+        const problem = scheduleProblem(command, new Date().toISOString());
+        return problem
+          ? { status: 400, body: { code: problem } }
+          : { status: 200, body: store.createRoutine(command) };
+      }
+      case "update-routine": {
+        const problem = scheduleProblem(command, new Date().toISOString());
+        if (problem) {
+          return { status: 400, body: { code: problem } };
+        }
+        const routine = store.updateRoutine(command.routineId, command);
+        return routine ? { status: 200, body: routine } : notFound;
+      }
+      case "delete-routine":
+        return store.deleteRoutine(command.routineId) ? ok : notFound;
+      case "start-firing": {
+        const result = store.startFiring(command.firingId, attended);
+        if (result === "not_found") {
+          return notFound;
+        }
+        return result === "started" ? ok : { status: 409, body: { code: result } };
+      }
+      case "skip-firing": {
+        const result = store.skipFiring(command.firingId);
+        if (result === "not_found") {
+          return notFound;
+        }
+        return result === "skipped" ? ok : { status: 409, body: { code: result } };
+      }
     }
   }
 

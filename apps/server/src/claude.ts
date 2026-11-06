@@ -694,7 +694,8 @@ export function probeUsage(
         if (child.pid !== undefined) {
           killTree(child.pid);
         }
-        settle();
+        // Exit settles this. The timer only bounds a kill that silently failed.
+        grace = setTimeout(settle, stopGraceMs);
       }, closeGraceMs);
     }
 

@@ -13,6 +13,8 @@ import {
   UsageSummary,
 } from "@beebot/contracts";
 
+import { routineReadyLine, routineRefusalLines } from "./labels";
+
 const reconnectDelayMs = 1000;
 const lastSeenKey = "beebot.lastSeen";
 
@@ -52,6 +54,13 @@ export type ConnectionState = {
 
 export const isActive = (run: Run | undefined) =>
   run?.status === "Queued" || run?.status === "Running";
+
+export function openCards({ routines, firings }: ChatState, botId: string) {
+  return firings.flatMap((firing) => {
+    const routine = routines.find(({ id }) => id === firing.routineId);
+    return routine?.botId === botId && firing.status === "ready" ? [{ routine, firing }] : [];
+  });
+}
 
 function upsert<T extends { id: string }>(items: T[], item: T) {
   return items.some(({ id }) => id === item.id)
@@ -117,6 +126,19 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     }
     case "notice.acknowledged":
       return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
+    case "routine.changed":
+      return { ...state, chat: { ...chat, routines: upsert(chat.routines, event.routine) } };
+    case "routine.deleted": {
+      const routines = chat.routines.filter(({ id }) => id !== event.routineId);
+      const firings = chat.firings.filter(({ routineId }) => routineId !== event.routineId);
+      return { ...state, chat: { ...chat, routines, firings } };
+    }
+    case "firing.changed": {
+      // Snapshots hold each routine's latest only, and replay must land on the same state.
+      const { firing } = event;
+      const others = chat.firings.filter(({ routineId }) => routineId !== firing.routineId);
+      return { ...state, chat: { ...chat, firings: [...others, firing] } };
+    }
   }
 }
 
@@ -184,7 +206,7 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
 
 // Bodies carry no message content. Snapshots are skipped: they hold history, not news.
 export function notificationBodies(state: ConnectionState, message: ServerMessage) {
-  const { bots, approvals } = state.chat;
+  const { bots, approvals, routines } = state.chat;
   const name = (botId: string | undefined) => bots.find(({ id }) => id === botId)?.name ?? "A bot";
 
   if (message.type === "pending-approvals") {
@@ -194,11 +216,19 @@ export function notificationBodies(state: ConnectionState, message: ServerMessag
   }
   const events =
     message.type === "event" ? [message.event] : message.type === "replay" ? message.events : [];
-  return events.flatMap((event) =>
-    event.type === "run.changed" && event.seq > state.seq && event.run.status === "Completed"
-      ? [`${name(event.run.botId)} finished`]
-      : [],
-  );
+  return events.flatMap((event) => {
+    if (event.seq <= state.seq) {
+      return [];
+    }
+    if (event.type === "run.changed" && event.run.status === "Completed") {
+      return [`${name(event.run.botId)} finished`];
+    }
+    if (event.type === "firing.changed" && event.firing.status === "ready") {
+      const routine = routines.find(({ id }) => id === event.firing.routineId);
+      return [routineReadyLine(routine?.name ?? "A routine")];
+    }
+    return [];
+  });
 }
 
 const params = new URLSearchParams(window.location.search);
@@ -225,6 +255,8 @@ let state: ConnectionState = {
     approvals: [],
     memories: [],
     usageLimits: [],
+    routines: [],
+    firings: [],
     noticeAcknowledgedAt: null,
   },
   drafts: {},
@@ -376,7 +408,8 @@ export async function connect() {
 
 const errorSentences: Record<string, string> = {
   approval_closed: "This request is already closed.",
-  bot_busy: "This bot is working. Wait for it to finish or stop it, then change the folder.",
+  ...routineRefusalLines,
+  bot_busy: "This bot is working. Wait for it to finish or stop it, then try again.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   engine_not_allowed: "The test engine isn't available here.",

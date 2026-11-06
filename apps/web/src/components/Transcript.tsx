@@ -5,9 +5,10 @@ import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "reac
 import { answeredLine, liveStatusLine, workedLine } from "../labels";
 import type { LiveTool } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
-import type { TranscriptItem } from "../transcript";
+import { isOpenItem, itemKey, type TranscriptItem } from "../transcript";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
+import { RoutineCard } from "./RoutineCard";
 import { TimelineMinimap } from "./TimelineMinimap";
 import { columnClass, iconProps } from "./ui";
 import { ThinkingRow, WorkGroup, WorkingLabel } from "./WorkLog";
@@ -41,6 +42,9 @@ function Item({
     ) : (
       <p className="text-small text-ink-secondary">{answeredLine(approval)}</p>
     );
+  }
+  if (item.kind === "routine") {
+    return <RoutineCard routine={item.routine} firing={item.firing} connected={connected} />;
   }
   const { message } = item;
   if (message.author === "human") {
@@ -100,8 +104,8 @@ export function Transcript({
   const sent = useRef(0);
   const last = useRef({ top: 0, height: 0, view: 0 });
   const [away, setAway] = useState(false);
-  const settledItems = items.filter((item) => item.kind !== "approval" || !item.pending);
-  const pendingItems = items.filter((item) => item.kind === "approval" && item.pending);
+  const settledItems = items.filter((item) => !isOpenItem(item));
+  const pendingItems = items.filter(isOpenItem);
 
   function follow(on: boolean) {
     following.current = on;
@@ -191,12 +195,11 @@ export function Transcript({
         <div ref={content} role="log" aria-label="Messages" className={`${columnClass} py-6`}>
           <ol>
             {settledItems.map((item, index) => {
-              const key = item.kind === "message" ? item.message.id : item.approval.id;
               const previous = settledItems[index - 1];
               const gap = !previous ? "" : previous.sender === item.sender ? "mt-1" : "mt-6";
               return (
                 <li
-                  key={key}
+                  key={itemKey(item)}
                   data-sender={item.sender}
                   data-message-id={item.kind === "message" ? item.message.id : undefined}
                   className={gap}
@@ -217,7 +220,7 @@ export function Transcript({
             )}
             {pendingItems.map((item) => (
               <Item
-                key={item.at}
+                key={itemKey(item)}
                 item={item}
                 bot={bot}
                 connected={connected}

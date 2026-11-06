@@ -17,6 +17,8 @@ import {
   MemoryItem,
   memoryRequest,
   type PauseReason,
+  Routine,
+  RoutineFiring,
   Run,
   type RunReason,
   ServerEvent,
@@ -26,6 +28,7 @@ import {
 import { z } from "zod";
 
 import type { BotLaunch } from "./engine.ts";
+import { catchUpWindowMs, dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import {
   buildMemory,
@@ -276,6 +279,33 @@ export const migrations: Array<{
     name: "codex_account",
     sql: "INSERT INTO engine_accounts (id, label) VALUES ('codex', 'Codex');",
   },
+  {
+    name: "routines",
+    sql: `CREATE TABLE routines (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      cron TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      skip_if_later_mins INTEGER,
+      next_fire_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX routines_due ON routines (next_fire_at) WHERE enabled = 1;
+    CREATE TABLE routine_firings (
+      id TEXT PRIMARY KEY,
+      routine_id TEXT NOT NULL REFERENCES routines (id),
+      slot TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('ready', 'ran', 'skipped', 'missed')),
+      reason TEXT,
+      missed_before INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      UNIQUE (routine_id, slot)
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -327,6 +357,7 @@ const WakeRow = z.object({
   attended: z.number().transform(Boolean),
 });
 export type Wake = z.infer<typeof WakeRow>;
+const RoutineRow = Routine.extend({ enabled: z.number().transform(Boolean) });
 
 export type ClaimedRun = {
   id: string;
@@ -405,6 +436,17 @@ function migrate(db: DatabaseSync) {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+type RoutineFields = Pick<
+  Routine,
+  "name" | "prompt" | "cron" | "timezone" | "enabled" | "skipIfLaterMins"
+>;
+
+function routineBody({ name, timezone, prompt }: Routine, slot: string, lateMs: number) {
+  const lateBy = Math.round(lateMs / 60_000);
+  const header = `[Routine "${oneLine(name)}": scheduled_for ${slot} (${timezone}), late_by ${lateBy} minutes]`;
+  return `${header}\n\n${prompt}`;
 }
 
 export type EventStore = ReturnType<typeof openEventStore>;
@@ -699,6 +741,46 @@ export function openEventStore(dataDir: string) {
      ORDER BY f.rank LIMIT ${searchRows}`,
   );
 
+  const routineColumns = `id, bot_id AS botId, name, prompt, cron, timezone, enabled,
+    skip_if_later_mins AS skipIfLaterMins, next_fire_at AS nextFireAt, created_at AS createdAt`;
+  const selectRoutines = db.prepare(`SELECT ${routineColumns} FROM routines ORDER BY rowid`);
+  const selectRoutine = db.prepare(`SELECT ${routineColumns} FROM routines WHERE id = ?`);
+  const selectDueRoutines = db.prepare(
+    `SELECT ${routineColumns} FROM routines
+     WHERE enabled = 1 AND next_fire_at <= ? ORDER BY rowid`,
+  );
+  const insertRoutine = db.prepare(
+    `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, skip_if_later_mins,
+       next_fire_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const updateRoutineFields = db.prepare(
+    `UPDATE routines SET name = ?, prompt = ?, cron = ?, timezone = ?, enabled = ?,
+       skip_if_later_mins = ?, next_fire_at = ? WHERE id = ?`,
+  );
+  const advanceRoutine = db.prepare("UPDATE routines SET next_fire_at = ? WHERE id = ?");
+  const disableRoutine = db.prepare(
+    "UPDATE routines SET enabled = 0, next_fire_at = NULL WHERE id = ?",
+  );
+  const deleteRoutineRow = db.prepare("DELETE FROM routines WHERE id = ?");
+  const firingColumns = `id, routine_id AS routineId, slot, status, reason,
+    missed_before AS missedBefore, created_at AS createdAt, decided_at AS decidedAt`;
+  const selectFiring = db.prepare(`SELECT ${firingColumns} FROM routine_firings WHERE id = ?`);
+  const selectSlot = db.prepare("SELECT 1 FROM routine_firings WHERE routine_id = ? AND slot = ?");
+  const selectLatestFirings = db.prepare(
+    `SELECT ${firingColumns} FROM routine_firings
+     WHERE rowid IN (SELECT MAX(rowid) FROM routine_firings GROUP BY routine_id) ORDER BY rowid`,
+  );
+  const insertFiring = db.prepare(
+    `INSERT INTO routine_firings
+     (id, routine_id, slot, status, reason, missed_before, created_at, decided_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${firingColumns}`,
+  );
+  const closeFiring = db.prepare(
+    `UPDATE routine_firings SET status = ?, reason = ?, decided_at = ?
+     WHERE routine_id = ? AND status = 'ready' RETURNING ${firingColumns}`,
+  );
+  const deleteFirings = db.prepare("DELETE FROM routine_firings WHERE routine_id = ?");
+
   const selectAccountRunning = db.prepare(
     "SELECT 1 FROM runs WHERE engine_account_id = ? AND status = 'Running'",
   );
@@ -847,6 +929,90 @@ export function openEventStore(dataDir: string) {
     );
   }
 
+  // The first message of a burst makes the wake and the rest coalesce into it, so input that
+  // lands during a run already has its one durable follow-up, even if the server dies.
+  function postMessage(input: { id: string; roomId: string; body: string; attended: boolean }) {
+    const existing = selectMessage.get(input.id);
+    if (existing) {
+      const { roomId, body } = MessageRow.parse(existing);
+      return roomId === input.roomId && body === input.body ? "duplicate" : "conflict";
+    }
+    const row = selectScopeForRoom.get(input.roomId);
+    if (!row) {
+      return "not_found";
+    }
+    const scope = Scope.parse(row);
+    addMessage({
+      id: input.id,
+      roomId: input.roomId,
+      author: "human",
+      body: input.body,
+      tools: [],
+      workedMs: null,
+      createdAt: new Date().toISOString(),
+    });
+    if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
+      addWake(scope, `message:${input.id}`, input.attended);
+    }
+    return "sent";
+  }
+
+  const getRoutine = (id: string) => {
+    const row = selectRoutine.get(id);
+    return row ? RoutineRow.parse(row) : undefined;
+  };
+
+  function endOpenFiring(
+    routineId: string,
+    status: RoutineFiring["status"],
+    reason: RoutineFiring["reason"],
+  ) {
+    for (const row of closeFiring.all(status, reason, new Date().toISOString(), routineId)) {
+      emit({ type: "firing.changed", firing: RoutineFiring.parse(row) });
+    }
+  }
+
+  function recordFiring(
+    routine: Routine,
+    { slot, passedOver }: { slot: string; passedOver: number },
+    now: string,
+  ) {
+    let outcome: Pick<RoutineFiring, "status" | "reason"> = { status: "ready", reason: null };
+    if (Date.parse(now) - Date.parse(slot) > catchUpWindowMs) {
+      outcome = { status: "missed", reason: "asleep" };
+    } else if (getBot(routine.botId)?.status === "paused") {
+      outcome = { status: "skipped", reason: "bot_paused" };
+    }
+    const { status, reason } = outcome;
+    const decidedAt = status === "ready" ? null : now;
+    const id = NodeCrypto.randomUUID();
+    const firing = RoutineFiring.parse(
+      insertFiring.get(id, routine.id, slot, status, reason, passedOver, now, decidedAt),
+    );
+    emit({ type: "firing.changed", firing });
+  }
+
+  function fireRoutine(row: unknown, now: string) {
+    const routine = RoutineRow.parse(row);
+    const next = nextSlot(routine, now);
+    transaction(() => {
+      if (next === null) {
+        endOpenFiring(routine.id, "skipped", "disabled");
+        disableRoutine.run(routine.id);
+      } else {
+        const due = dueSlot(routine, z.string().parse(routine.nextFireAt), now);
+        // A slot on record changes nothing, so a repeat can't close the card it opened.
+        if (!selectSlot.get(routine.id, due.slot)) {
+          // First, so a client that replaces by routine ends on the new firing.
+          endOpenFiring(routine.id, "skipped", "no_boundary");
+          recordFiring(routine, due, now);
+        }
+        advanceRoutine.run(next, routine.id);
+      }
+      emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
+    });
+  }
+
   const getMemory = (id: string) => {
     const row = selectMemory.get(id);
     return row ? MemoryItem.parse(row) : undefined;
@@ -970,6 +1136,8 @@ export function openEventStore(dataDir: string) {
         .array(UsageCheck)
         .parse(selectUsageChecks.all())
         .map(({ accountId }) => usageLimits(accountId)),
+      routines: z.array(RoutineRow).parse(selectRoutines.all()),
+      firings: z.array(RoutineFiring).parse(selectLatestFirings.all()),
       noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
     }),
 
@@ -1046,33 +1214,130 @@ export function openEventStore(dataDir: string) {
         }
       }),
 
-    // The first message of a burst makes the wake and the rest coalesce into it, so input that
-    // lands during a run already has its one durable follow-up, even if the server dies.
     sendMessage: (input: { id: string; roomId: string; body: string; attended: boolean }) =>
+      transaction(() => postMessage(input)),
+
+    getRoutine,
+    createRoutine: (fields: RoutineFields & Pick<Routine, "botId">) =>
       transaction(() => {
-        const existing = selectMessage.get(input.id);
-        if (existing) {
-          const { roomId, body } = MessageRow.parse(existing);
-          return roomId === input.roomId && body === input.body ? "duplicate" : "conflict";
+        const now = new Date().toISOString();
+        const { botId, name, prompt, cron, timezone, enabled, skipIfLaterMins } = fields;
+        const id = NodeCrypto.randomUUID();
+        const next = enabled ? nextSlot(fields, now) : null;
+        insertRoutine.run(
+          id,
+          botId,
+          name,
+          prompt,
+          cron,
+          timezone,
+          enabled ? 1 : 0,
+          skipIfLaterMins,
+          next,
+          now,
+        );
+        const routine = RoutineRow.parse(selectRoutine.get(id));
+        emit({ type: "routine.changed", routine });
+        return routine;
+      }),
+    updateRoutine: (id: string, fields: RoutineFields) =>
+      transaction(() => {
+        const current = getRoutine(id);
+        if (!current) {
+          return undefined;
         }
-        const row = selectScopeForRoom.get(input.roomId);
+        const { name, prompt, cron, timezone, enabled, skipIfLaterMins } = fields;
+        const rescheduled =
+          cron !== current.cron || timezone !== current.timezone || enabled !== current.enabled;
+        let next = current.nextFireAt;
+        if (rescheduled) {
+          next = enabled ? nextSlot(fields, new Date().toISOString()) : null;
+          endOpenFiring(id, "skipped", "disabled");
+        }
+        updateRoutineFields.run(
+          name,
+          prompt,
+          cron,
+          timezone,
+          enabled ? 1 : 0,
+          skipIfLaterMins,
+          next,
+          id,
+        );
+        const routine = RoutineRow.parse(selectRoutine.get(id));
+        emit({ type: "routine.changed", routine });
+        return routine;
+      }),
+    deleteRoutine: (id: string) =>
+      transaction(() => {
+        deleteFirings.run(id);
+        const { changes } = deleteRoutineRow.run(id);
+        if (changes > 0) {
+          emit({ type: "routine.deleted", routineId: id });
+        }
+        return changes > 0;
+      }),
+
+    // Row by row, so one bad row can't block the others. A slot is decided only by comparing the
+    // wall clock with the stored time, so a laptop's sleep is just a catch-up on the next tick.
+    fireDueRoutines: (now: string) => {
+      for (const row of selectDueRoutines.all(now)) {
+        try {
+          fireRoutine(row, now);
+        } catch (error) {
+          console.error(`beebotd: routine ${IdRow.safeParse(row).data?.id} failed`, error);
+        }
+      }
+    },
+
+    // Only a person's click reaches this. `attended` can't stand in for one: it says a client is
+    // connected, not that anybody decided anything.
+    startFiring: (id: string, attended: boolean) =>
+      transaction(() => {
+        const row = selectFiring.get(id);
         if (!row) {
           return "not_found";
         }
-        const scope = Scope.parse(row);
-        addMessage({
-          id: input.id,
-          roomId: input.roomId,
-          author: "human",
-          body: input.body,
-          tools: [],
-          workedMs: null,
-          createdAt: new Date().toISOString(),
-        });
-        if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
-          addWake(scope, `message:${input.id}`, input.attended);
+        const firing = RoutineFiring.parse(row);
+        if (firing.status !== "ready") {
+          return "firing_closed";
         }
-        return "sent";
+        if (!attended) {
+          return "not_attended";
+        }
+        const routine = RoutineRow.parse(selectRoutine.get(firing.routineId));
+        const lateMs = Math.max(Date.now() - Date.parse(firing.slot), 0);
+        const { skipIfLaterMins } = routine;
+        if (skipIfLaterMins !== null && lateMs > skipIfLaterMins * 60_000) {
+          endOpenFiring(routine.id, "skipped", "too_late");
+          return "too_late";
+        }
+        const { id: botId, roomId, status } = Bot.parse(selectBot.get(routine.botId));
+        if (status === "paused") {
+          return "bot_paused";
+        }
+        if (selectActiveRun.get(botId)) {
+          return "bot_busy";
+        }
+        endOpenFiring(routine.id, "ran", null);
+        const body = routineBody(routine, firing.slot, lateMs);
+        if (postMessage({ id, roomId, body, attended }) !== "sent") {
+          throw new Error(`firing ${id} could not post its message`);
+        }
+        return "started";
+      }),
+    skipFiring: (id: string) =>
+      transaction(() => {
+        const row = selectFiring.get(id);
+        if (!row) {
+          return "not_found";
+        }
+        const firing = RoutineFiring.parse(row);
+        if (firing.status !== "ready") {
+          return "firing_closed";
+        }
+        endOpenFiring(firing.routineId, "skipped", null);
+        return "skipped";
       }),
 
     continueRun: (runId: string, attended: boolean) =>

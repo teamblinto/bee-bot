@@ -592,7 +592,10 @@ describe("bot avatars", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+    db.exec(`DROP TABLE routine_firings;
+      DROP TABLE routines;
+      DELETE FROM migrations WHERE name = 'routines';
+      DELETE FROM migrations WHERE name = 'codex_account';
       DELETE FROM engine_accounts WHERE id = 'codex';
       DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;
@@ -660,7 +663,10 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+    db.exec(`DROP TABLE routine_firings;
+      DROP TABLE routines;
+      DELETE FROM migrations WHERE name = 'routines';
+      DELETE FROM migrations WHERE name = 'codex_account';
       DELETE FROM engine_accounts WHERE id = 'codex';
       DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;
@@ -1139,7 +1145,10 @@ describe("project folders", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+    db.exec(`DROP TABLE routine_firings;
+      DROP TABLE routines;
+      DELETE FROM migrations WHERE name = 'routines';
+      DELETE FROM migrations WHERE name = 'codex_account';
       DELETE FROM engine_accounts WHERE id = 'codex';
       DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;

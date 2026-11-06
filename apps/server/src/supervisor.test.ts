@@ -1314,3 +1314,108 @@ describe("a project folder", () => {
     expect(engine.turns[1]?.prompt).toBe("hello\n\nagain");
   });
 });
+
+describe("routines", () => {
+  const routineFields = {
+    name: "Standup",
+    prompt: "Say hi",
+    cron: "0 9 * * *",
+    timezone: "UTC",
+    enabled: true,
+    skipIfLaterMins: null,
+  };
+  const pastSlot = "2026-01-01T09:00:00.000Z";
+  // Commands pump once they're done, and a pump is synchronous.
+  const pump = (command: (body: Command) => Promise<Response>) =>
+    command({ type: "acknowledge-notice" });
+
+  function makeDue(id: string) {
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.prepare("UPDATE routines SET next_fire_at = ? WHERE id = ?").run(pastSlot, id);
+    db.close();
+  }
+
+  async function dueRoutine(booted: Awaited<ReturnType<typeof boot>>) {
+    const bot = await booted.createBot();
+    const response = await booted.command({
+      type: "create-routine",
+      botId: bot.id,
+      ...routineFields,
+    });
+    const routine = (await response.json()) as { id: string };
+    makeDue(routine.id);
+    await pump(booted.command);
+    return { bot, firing: booted.store.state().firings[0] };
+  }
+
+  it.each([{ attended: true }, { attended: false }])(
+    "never queues a run for a due slot, with a client connected or not ($attended)",
+    async ({ attended }) => {
+      const engine = scriptedEngine();
+      const booted = await boot(engine.runTurn, { attended });
+      const { firing } = await dueRoutine(booted);
+      expect(firing?.status).toBe("ready");
+      await pump(booted.command);
+      expect(count("wakes")).toBe(0);
+      expect(count("runs")).toBe(0);
+      expect(count("messages")).toBe(0);
+      expect(engine.turns).toHaveLength(0);
+    },
+  );
+
+  it("starts one turn from a click, whose prompt says when it was due", async () => {
+    const engine = scriptedEngine();
+    const booted = await boot(engine.runTurn);
+    const { bot, firing } = await dueRoutine(booted);
+    const firingId = firing?.id ?? "";
+    expect((await booted.command({ type: "start-firing", firingId })).status).toBe(200);
+    const repeat = await booted.command({ type: "start-firing", firingId });
+    expect(repeat.status).toBe(409);
+    expect(await repeat.json()).toEqual({ code: "firing_closed" });
+    await expectTurns(engine, 1);
+    expect(engine.turns[0]?.prompt).toContain(`scheduled_for ${firing?.slot} (UTC)`);
+    expect(engine.turns[0]?.prompt).toContain("late_by");
+    expect(engine.turns[0]?.prompt.endsWith("\n\nSay hi")).toBe(true);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(booted.store, bot, "Completed");
+    expect(count("messages")).toBe(2);
+    expect(booted.store.state().firings[0]?.status).toBe("ran");
+  });
+
+  it("refuses a start with no client connected, and leaves the card open", async () => {
+    const booted = await boot(scriptedEngine().runTurn, { attended: false });
+    const { firing } = await dueRoutine(booted);
+    const response = await booted.command({ type: "start-firing", firingId: firing?.id ?? "" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "not_attended" });
+    expect(booted.store.state().firings[0]?.status).toBe("ready");
+    expect(count("wakes")).toBe(0);
+  });
+
+  it("does not fire a slot again after a restart", async () => {
+    const first = await boot();
+    await dueRoutine(first);
+    await first.stop();
+    const second = await boot();
+    await pump(second.command);
+    expect(count("routine_firings")).toBe(1);
+    expect(second.store.state().firings[0]?.status).toBe("ready");
+  });
+
+  it("refuses a bad schedule with its own code", async () => {
+    const { command, createBot } = await boot();
+    const bot = await createBot();
+    const refusal = async (fields: Partial<typeof routineFields>) => {
+      const body = { type: "create-routine", botId: bot.id, ...routineFields, ...fields } as const;
+      const response = await command(body);
+      return [response.status, await response.json()];
+    };
+    expect(await refusal({ cron: "nope" })).toEqual([400, { code: "invalid_cron" }]);
+    expect(await refusal({ timezone: "Mars/Base" })).toEqual([400, { code: "invalid_timezone" }]);
+    expect(await refusal({ cron: "*/5 * * * *" })).toEqual([
+      400,
+      { code: "schedule_too_frequent" },
+    ]);
+    expect(count("routines")).toBe(0);
+  });
+});

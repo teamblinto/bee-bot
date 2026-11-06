@@ -3,11 +3,18 @@ import { Ellipsis, Folder, PanelLeft, ShieldOff } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { connectionLines, folderName, pauseLine, runLine } from "../labels";
-import { type ConnectionState, isActive, markSeen, sendCommand } from "../serverConnection";
+import {
+  type ConnectionState,
+  isActive,
+  markSeen,
+  openCards,
+  sendCommand,
+} from "../serverConnection";
 import { buildTranscript } from "../transcript";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MemoryPanel } from "./MemoryPanel";
+import { RoutinesPanel } from "./RoutinesPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
 
@@ -20,12 +27,14 @@ function BotMenu({
   pendingMemories,
   onEdit,
   onMemory,
+  onRoutines,
 }: {
   bot: Bot;
   connected: boolean;
   pendingMemories: number;
   onEdit: () => void;
   onMemory: () => void;
+  onRoutines: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -48,6 +57,9 @@ function BotMenu({
       >
         <button type="button" {...hide} className={menuItemClass} onClick={onMemory}>
           Memory{pendingMemories > 0 && ` (${pendingMemories})`}
+        </button>
+        <button type="button" {...hide} className={menuItemClass} onClick={onRoutines}>
+          Routines
         </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
@@ -103,7 +115,7 @@ export function ChatView({
   const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
   const run = chat.runs.find(({ botId }) => botId === bot.id);
   const account = chat.accounts.find(({ id }) => id === bot.engineAccountId);
-  const items = buildTranscript(messages, approvals, pending);
+  const items = buildTranscript(messages, approvals, pending, openCards(chat, bot.id));
   const active = isActive(run);
   const limited = run?.reason === "limited";
   const draft = run && drafts[run.id];
@@ -118,7 +130,9 @@ export function ChatView({
   const lastBotMessageId = messages.findLast(({ author }) => author === "bot")?.id;
   const seenId = lastSeen[bot.id];
   const memories = chat.memories.filter(({ botId }) => botId === bot.id);
+  const routines = chat.routines.filter(({ botId }) => botId === bot.id);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [routinesOpen, setRoutinesOpen] = useState(false);
 
   useEffect(() => {
     if (lastBotMessageId && lastBotMessageId !== seenId) {
@@ -176,6 +190,7 @@ export function ChatView({
           pendingMemories={memories.filter(({ status }) => status === "pending").length}
           onEdit={onEdit}
           onMemory={() => setMemoryOpen(true)}
+          onRoutines={() => setRoutinesOpen(true)}
         />
       </header>
       {empty ? (
@@ -234,6 +249,15 @@ export function ChatView({
           memories={memories}
           connected={connected}
           onClose={() => setMemoryOpen(false)}
+        />
+      )}
+      {routinesOpen && (
+        <RoutinesPanel
+          bot={bot}
+          routines={routines}
+          firings={chat.firings}
+          connected={connected}
+          onClose={() => setRoutinesOpen(false)}
         />
       )}
     </section>

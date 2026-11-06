@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 12;
+export const protocolVersion = 13;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -276,6 +276,40 @@ export const UsageSummary = z.discriminatedUnion("status", [
 ]);
 export type UsageSummary = z.infer<typeof UsageSummary>;
 
+const MessageBody = z.string().trim().min(1).max(32_000);
+const RoutineName = z.string().trim().min(1).max(80);
+
+export const Routine = z.object({
+  id: z.string(),
+  botId: z.string(),
+  name: RoutineName,
+  prompt: MessageBody,
+  cron: z.string(),
+  timezone: z.string(),
+  enabled: z.boolean(),
+  skipIfLaterMins: z.number().nullable(),
+  // Null while disabled.
+  nextFireAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type Routine = z.infer<typeof Routine>;
+
+export const FiringReason = z.enum(["no_boundary", "asleep", "bot_paused", "disabled", "too_late"]);
+export type FiringReason = z.infer<typeof FiringReason>;
+
+export const RoutineFiring = z.object({
+  id: z.string(),
+  routineId: z.string(),
+  slot: z.string(),
+  status: z.enum(["ready", "ran", "skipped", "missed"]),
+  reason: FiringReason.nullable(),
+  // Earlier slots this one passed over. They have no rows of their own.
+  missedBefore: z.number(),
+  createdAt: z.string(),
+  decidedAt: z.string().nullable(),
+});
+export type RoutineFiring = z.infer<typeof RoutineFiring>;
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
@@ -286,6 +320,9 @@ export const ChatState = z.object({
   // Active and pending only, for every bot.
   memories: z.array(MemoryItem),
   usageLimits: z.array(UsageLimits),
+  routines: z.array(Routine),
+  // Only the latest of each routine. An open card always is its routine's latest.
+  firings: z.array(RoutineFiring),
   noticeAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
@@ -299,6 +336,9 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("memory.changed"), memory: MemoryItem }),
   z.object({ type: z.literal("usage.changed"), limits: UsageLimits }),
   z.object({ type: z.literal("notice.acknowledged"), acknowledgedAt: z.string() }),
+  z.object({ type: z.literal("routine.changed"), routine: Routine }),
+  z.object({ type: z.literal("routine.deleted"), routineId: z.string() }),
+  z.object({ type: z.literal("firing.changed"), firing: RoutineFiring }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -364,6 +404,16 @@ const botFields = {
   projectPath: z.string().trim().min(1).max(1024).nullable().optional(),
 };
 
+// Cron and timezone are checked by the server, which gives each its own refusal.
+const routineFields = {
+  name: RoutineName,
+  prompt: MessageBody,
+  cron: z.string().trim().min(1).max(100),
+  timezone: z.string().trim().min(1).max(100),
+  enabled: z.boolean(),
+  skipIfLaterMins: z.number().int().min(1).max(1440).nullable(),
+};
+
 export const Command = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("create-bot"),
@@ -392,7 +442,7 @@ export const Command = z.discriminatedUnion("type", [
     type: z.literal("send-message"),
     messageId: z.uuid(),
     roomId: z.uuid(),
-    body: z.string().trim().min(1).max(32_000),
+    body: MessageBody,
   }),
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
@@ -418,6 +468,11 @@ export const Command = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("forget-memory"), memoryId: z.uuid() }),
   z.object({ type: z.literal("acknowledge-notice") }),
+  z.object({ type: z.literal("create-routine"), botId: z.uuid(), ...routineFields }),
+  z.object({ type: z.literal("update-routine"), routineId: z.uuid(), ...routineFields }),
+  z.object({ type: z.literal("delete-routine"), routineId: z.uuid() }),
+  z.object({ type: z.literal("start-firing"), firingId: z.uuid() }),
+  z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
 ]);
 export type Command = z.infer<typeof Command>;
 

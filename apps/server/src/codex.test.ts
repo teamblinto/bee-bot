@@ -68,7 +68,9 @@ afterEach(async () => {
   for (const name of plantedEnv.splice(0)) {
     delete process.env[name];
   }
-  NodeFS.rmSync(dataDir, { recursive: true, force: true });
+  // Windows locks a killed child's cwd for a few ms after it reports exited, as Access Denied,
+  // which rmSync's maxRetries does not retry.
+  await vi.waitFor(() => NodeFS.rmSync(dataDir, { recursive: true, force: true }));
   NodeFS.rmSync(outside, { recursive: true, force: true });
 });
 

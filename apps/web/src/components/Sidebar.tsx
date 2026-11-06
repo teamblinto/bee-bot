@@ -3,7 +3,7 @@ import { Gauge, Hexagon, Plus, ShieldOff } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
-import { type ConnectionState, isActive } from "../serverConnection";
+import { type ConnectionState, isActive, openCards } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { iconProps } from "./ui";
 
@@ -32,9 +32,9 @@ function BotRow({
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
   const last = messages.at(-1);
   const lastBotMessage = messages.findLast(({ author }) => author === "bot");
-  const waiting = chat.approvals.some(
-    ({ botId, status }) => botId === bot.id && status === "pending",
-  );
+  const waiting =
+    chat.approvals.some(({ botId, status }) => botId === bot.id && status === "pending") ||
+    openCards(chat, bot.id).length > 0;
   const unread = !selected && lastBotMessage && lastBotMessage.id !== lastSeen[bot.id];
   const working = isActive(chat.runs.find(({ botId }) => botId === bot.id));
 
