@@ -1,0 +1,172 @@
+import type { Bot } from "@beebot/contracts";
+import { Ellipsis, PanelLeft } from "lucide-react";
+import { useEffect } from "react";
+
+import { connectionLines, pauseLine, runLine } from "../labels";
+import { type ConnectionState, isActive, markSeen, sendCommand } from "../serverConnection";
+import { buildTranscript } from "../transcript";
+import { Avatar } from "./Avatar";
+import { Composer } from "./Composer";
+import { Transcript } from "./Transcript";
+import { columnClass, iconProps } from "./ui";
+
+const menuItemClass =
+  "w-full rounded-field px-3 py-1.5 text-left text-small hover:bg-raised disabled:text-ink-faint";
+
+function BotMenu({ bot, connected, onEdit }: { bot: Bot; connected: boolean; onEdit: () => void }) {
+  const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="Bot menu"
+        popoverTarget="bot-menu"
+        className="button !px-2 [anchor-name:--bot-menu]"
+      >
+        <Ellipsis {...iconProps} />
+      </button>
+      <div
+        id="bot-menu"
+        popover="auto"
+        className="m-0 mt-1 w-40 rounded-menu bg-overlay p-1 text-ink shadow-menu [position-anchor:--bot-menu] [position-area:bottom_span-left]"
+      >
+        <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
+          Edit
+        </button>
+        <button
+          type="button"
+          {...hide}
+          className={menuItemClass}
+          disabled={!connected}
+          onClick={() =>
+            void sendCommand({
+              type: "set-bot-paused",
+              botId: bot.id,
+              paused: bot.status === "ready",
+            })
+          }
+        >
+          {bot.status === "ready" ? "Pause" : "Resume"}
+        </button>
+        <button
+          type="button"
+          {...hide}
+          className={`${menuItemClass} text-danger`}
+          disabled={!connected}
+          onClick={() => void sendCommand({ type: "stop-all" })}
+        >
+          Stop all
+        </button>
+      </div>
+    </>
+  );
+}
+
+export function ChatView({
+  bot,
+  connection,
+  composerText,
+  onComposerText,
+  onEdit,
+  onOpenDrawer,
+}: {
+  bot: Bot;
+  connection: ConnectionState;
+  composerText: string;
+  onComposerText: (update: (current: string) => string) => void;
+  onEdit: () => void;
+  onOpenDrawer: () => void;
+}) {
+  const { chat, drafts, liveTools, pending, engine, status, commandError, lastSeen } = connection;
+  const connected = status === "connected";
+  const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
+  const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
+  const run = chat.runs.find(({ botId }) => botId === bot.id);
+  const account = chat.accounts.find(({ id }) => id === bot.engineAccountId);
+  const items = buildTranscript(messages, approvals, pending);
+  const active = isActive(run);
+  const limited = run?.reason === "limited";
+  const draft = run && drafts[run.id];
+  const tools = (run && liveTools[run.id]) ?? [];
+  const waiting = approvals.some(({ status }) => status === "pending");
+  const systemLine = runLine(run, account);
+  const canContinue = run?.status === "Interrupted" || run?.status === "Cancelled";
+  const lastBotMessageId = messages.findLast(({ author }) => author === "bot")?.id;
+  const seenId = lastSeen[bot.id];
+
+  useEffect(() => {
+    if (lastBotMessageId && lastBotMessageId !== seenId) {
+      markSeen(bot.id, lastBotMessageId);
+    }
+  }, [bot.id, lastBotMessageId, seenId]);
+
+  const empty = items.length === 0 && !active && !systemLine;
+  const notices = [
+    status !== "connected" && connectionLines[status],
+    bot.pauseReason && pauseLine(bot.pauseReason, engine),
+    commandError,
+  ].filter((line) => typeof line === "string");
+
+  return (
+    <section className="flex min-w-0 flex-1 flex-col" aria-label={`Chat with ${bot.name}`}>
+      <header className="flex h-12 shrink-0 items-center gap-2 px-3">
+        <button
+          type="button"
+          aria-label="Open bot list"
+          className="button !px-2 md:hidden"
+          onClick={onOpenDrawer}
+        >
+          <PanelLeft {...iconProps} />
+        </button>
+        <Avatar bot={bot} className="size-7" />
+        <h2 className="truncate text-name font-medium">{bot.name}</h2>
+        <span className="shrink-0 text-label text-ink-faint">Attended only</span>
+        {bot.engineAccountId === "fake" && (
+          <span className="shrink-0 text-label text-ink-faint">Test engine</span>
+        )}
+        <span className="flex-1" />
+        <BotMenu bot={bot} connected={connected} onEdit={onEdit} />
+      </header>
+      {empty ? (
+        <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
+          <p className="text-empty">{bot.name}</p>
+          {bot.personality && (
+            <p className="line-clamp-3 text-small text-ink-secondary">{bot.personality}</p>
+          )}
+        </div>
+      ) : (
+        <Transcript
+          bot={bot}
+          items={items}
+          connected={connected}
+          draft={draft}
+          liveTools={tools}
+          thinking={active && !limited && !draft && !waiting}
+          systemLine={systemLine}
+          onContinue={
+            canContinue
+              ? () => void sendCommand({ type: "continue-run", runId: run.id })
+              : undefined
+          }
+        />
+      )}
+      <div className={columnClass}>
+        <div role="status">
+          {notices.map((notice) => (
+            <p key={notice} className="mb-2 text-small text-ink-secondary">
+              {notice}
+            </p>
+          ))}
+        </div>
+        <Composer
+          bot={bot}
+          canSend={connected && bot.status === "ready"}
+          canStop={active || Boolean(limited && account?.blockedUntil)}
+          connected={connected}
+          value={composerText}
+          onChange={onComposerText}
+        />
+      </div>
+    </section>
+  );
+}

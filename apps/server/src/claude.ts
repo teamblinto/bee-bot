@@ -1,17 +1,23 @@
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import type { PauseReason } from "@beebot/contracts";
+import type { BotModel, EngineStatus, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
-import type { BotLaunch, RunTurn, TurnOutcome } from "./engine.ts";
+import { type BotLaunch, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
 
 export const testedClaudeVersion = "2.1.318";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
 const settingSources = "";
-const model = "haiku";
+const toolList = "Read,Write,Edit,Glob,Grep,Bash";
+// Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
+const askSettings = JSON.stringify({ permissions: { ask: ["Bash", "Read", "Glob", "Grep"] } });
+const permissionTool = "mcp__bee__approve";
+const mcpTimeoutMs = 900_000;
 
 const gateTimeoutMs = 5000;
 const lingerMs = 5000;
@@ -20,11 +26,6 @@ const closeGraceMs = 1000;
 const maxApiRetries = 5;
 const defaultLimitMs = 5 * 60_000;
 const stderrTailChars = 4096;
-
-// Without this the model prints fake tool calls as chat text instead of saying it can't.
-const noToolsNote =
-  "You have no tools in this conversation: you cannot read or write files, run commands or " +
-  "browse. Never write tool-call syntax. If asked to do any of those, say plainly that you cannot.";
 
 const initializeLine = `${JSON.stringify({
   type: "control_request",
@@ -46,7 +47,13 @@ export function childEnv(parent: NodeJS.ProcessEnv = process.env) {
 // The child can't see this variable, so its login may live in the config dir we just hid.
 const authPause = (): PauseReason => (process.env.CLAUDE_CONFIG_DIR ? "config_dir" : "auth_failed");
 
-export function turnArgs(personaPath: string, sessionId: string, resume: boolean) {
+export function turnArgs(
+  personaPath: string,
+  sessionId: string,
+  resume: boolean,
+  model: BotModel,
+  configPath: string,
+) {
   return [
     "-p",
     "--output-format",
@@ -61,7 +68,13 @@ export function turnArgs(personaPath: string, sessionId: string, resume: boolean
     settingSources,
     "--strict-mcp-config",
     "--tools",
-    "",
+    toolList,
+    "--settings",
+    askSettings,
+    "--mcp-config",
+    configPath,
+    "--permission-prompt-tool",
+    permissionTool,
     // On by default, and on means a persona edit never reaches an existing session.
     "--system-prompt-snapshot",
     "off",
@@ -83,7 +96,13 @@ const Frame = z.object({
   result: loose,
   api_error: loose,
   api_error_status: loose,
-  event: z.object({ delta: z.object({ type: loose, text: z.unknown() }).optional() }).optional(),
+  event: z
+    .object({
+      type: loose,
+      delta: z.object({ type: loose, text: z.unknown() }).optional(),
+      content_block: z.object({ type: loose, name: loose }).optional(),
+    })
+    .optional(),
   rate_limit_info: z
     .object({
       status: loose,
@@ -198,10 +217,11 @@ type Attempt = {
   prompt: string;
   signal: AbortSignal;
   onDelta: (text: string) => void;
+  onTool: (name: string) => void;
   onDelivered: () => void;
 };
 
-function runProcess({ command, args, cwd, prompt, signal, onDelta, onDelivered }: Attempt) {
+function runProcess({ command, args, cwd, prompt, signal, onDelta, onTool, onDelivered }: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
     const [file = "", ...prefix] = command;
     const child = NodeChildProcess.spawn(file, [...prefix, ...args], {
@@ -317,6 +337,14 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onDelivered }
         if (delta?.type === "text_delta" && typeof delta.text === "string") {
           onDelta(delta.text);
         }
+        const block = frame.event?.content_block;
+        if (
+          frame.event?.type === "content_block_start" &&
+          block?.type === "tool_use" &&
+          typeof block.name === "string"
+        ) {
+          onTool(block.name);
+        }
       } else if (frame.type === "assistant") {
         seen.assistantError = frame.error ?? seen.assistantError;
       } else if (frame.type === "system" && frame.subtype === "api_retry") {
@@ -365,35 +393,72 @@ function runProcess({ command, args, cwd, prompt, signal, onDelta, onDelivered }
 }
 
 function personaText({ name, personality }: BotLaunch) {
-  return [`Your name is ${name}.`, personality, noToolsNote].filter(Boolean).join("\n\n");
+  return [`Your name is ${name}.`, personality].filter(Boolean).join("\n\n");
+}
+
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+
+// Created empty and tightened before the content goes in, so the token never sits in a looser file.
+export async function writeMcpConfig(path: string, url: string, token: string) {
+  await NodeFS.mkdir(NodePath.dirname(path), { recursive: true, mode: 0o700 });
+  await (await NodeFS.open(path, "wx", 0o600)).close();
+  if (process.platform === "win32") {
+    const grant = `${NodeOS.userInfo().username}:F`;
+    await execFile("icacls", [path, "/inheritance:r", "/grant:r", grant], { windowsHide: true });
+  }
+  const bee = {
+    type: "http",
+    timeout: mcpTimeoutMs,
+    url,
+    headers: { Authorization: `Bearer ${token}` },
+  };
+  await NodeFS.writeFile(path, JSON.stringify({ mcpServers: { bee } }));
 }
 
 type Options = { command: readonly string[]; dataDir: string };
 
 export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
-  return async ({ prompt, sessionId, resume, launch, signal, onDelta, onDelivered }) => {
-    const botDir = NodePath.join(dataDir, "bots", launch.botId);
-    const cwd = NodePath.join(botDir, "workspace");
-    const personaPath = NodePath.join(botDir, "persona.md");
+  return async ({
+    prompt,
+    sessionId,
+    resume,
+    launch,
+    signal,
+    onDelta,
+    onTool,
+    onDelivered,
+    permissions,
+  }) => {
+    const cwd = workspacePath(dataDir, launch.botId);
+    const personaPath = NodePath.join(NodePath.dirname(cwd), "persona.md");
     await NodeFS.mkdir(cwd, { recursive: true });
     await NodeFS.writeFile(personaPath, personaText(launch));
 
+    const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;
+    const configPath = NodePath.join(dataDir, "runtime", name);
     const attempt = (asResume: boolean) =>
       runProcess({
         command,
-        args: turnArgs(personaPath, sessionId, asResume),
+        args: turnArgs(personaPath, sessionId, asResume, launch.model, configPath),
         cwd,
         prompt,
         signal,
         onDelta,
+        onTool,
         onDelivered,
       });
     if (signal.aborted) {
       return { kind: "failed" };
     }
-    const first = await attempt(resume);
-    const outcome = first === "in_use" && !signal.aborted ? await attempt(true) : first;
-    return outcome === "in_use" ? { kind: "failed" } : outcome;
+    try {
+      await writeMcpConfig(configPath, permissions.url, permissions.token);
+      const first = await attempt(resume);
+      const outcome = first === "in_use" && !signal.aborted ? await attempt(true) : first;
+      return outcome === "in_use" ? { kind: "failed" } : outcome;
+    } finally {
+      // Never fails the turn: the token dies with the run, and the next boot wipes the directory.
+      await NodeFS.rm(configPath, { force: true }).catch(() => {});
+    }
   };
 }
 
@@ -403,10 +468,15 @@ const AuthStatus = z.object({
   apiKeySource: loose,
 });
 
-const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
-
 // Holds the owner's email and org, so nothing from either command may be logged or stored.
-export async function probeClaude(command: readonly string[], cwd: string) {
+export async function probeEngine(command: readonly string[], cwd: string): Promise<EngineStatus> {
+  const status = (pauseReason: PauseReason | null, cliFound = true, versionOk = true) => ({
+    cliFound,
+    versionOk,
+    loggedIn: pauseReason === null,
+    pauseReason,
+    testedVersion: testedClaudeVersion,
+  });
   const [file = "", ...prefix] = command;
   const run = (...args: string[]) =>
     execFile(file, [...prefix, ...args], {
@@ -419,19 +489,17 @@ export async function probeClaude(command: readonly string[], cwd: string) {
   try {
     version = (await run("--version")).stdout;
   } catch {
-    return "cli_missing";
+    return status("cli_missing", false, false);
   }
   if (version.trim().split(/\s/)[0] !== testedClaudeVersion) {
-    return "cli_version";
+    return status("cli_version", true, false);
   }
   try {
-    const status = AuthStatus.parse(JSON.parse((await run("auth", "status", "--json")).stdout));
+    const auth = AuthStatus.parse(JSON.parse((await run("auth", "status", "--json")).stdout));
     const subscription =
-      status.authMethod === "claude.ai" &&
-      status.apiProvider === "firstParty" &&
-      !status.apiKeySource;
-    return subscription ? undefined : authPause();
+      auth.authMethod === "claude.ai" && auth.apiProvider === "firstParty" && !auth.apiKeySource;
+    return status(subscription ? null : authPause());
   } catch {
-    return authPause();
+    return status(authPause());
   }
 }

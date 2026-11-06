@@ -1,8 +1,10 @@
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
 import { Bootstrap, noRestartExitCodes } from "@beebot/contracts";
 
-import { createClaudeRunTurn, probeClaude } from "./claude.ts";
+import { createClaudeRunTurn, probeEngine } from "./claude.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -38,12 +40,15 @@ function openStore(dataDir: string) {
 async function boot(bootstrap: Bootstrap) {
   const store = openStore(bootstrap.dataDir);
   const { claudeCommand = ["claude"], dataDir } = bootstrap;
+  // A crash skips each turn's own cleanup, and these files hold tokens.
+  NodeFS.rmSync(NodePath.join(dataDir, "runtime"), { recursive: true, force: true });
   const claude = createClaudeRunTurn({ command: claudeCommand, dataDir });
   const runTurn: RunTurn = (turn) =>
     turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
-  const server = await startServer({ ...bootstrap, store, runTurn });
+  const probe = () => probeEngine(claudeCommand, dataDir);
+  const server = await startServer({ ...bootstrap, store, runTurn, probeEngine: probe });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
-  const pauseReason = await probeClaude(claudeCommand, dataDir);
+  const { pauseReason } = await probe();
   if (pauseReason) {
     console.error(`beebotd: Claude bots paused: ${pauseReason}`);
     store.pauseReadyBots("claude", pauseReason);

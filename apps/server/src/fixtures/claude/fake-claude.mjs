@@ -24,12 +24,23 @@ function withAccount(account, version = passingInit.response.response.claude_cod
 }
 
 const subscriber = passingInit.response.response.account;
-const loggedIn = { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" };
+const loggedIn = {
+  loggedIn: true,
+  authMethod: "claude.ai",
+  apiProvider: "firstParty",
+  email: "owner@example.com",
+  orgName: "Owner Org",
+};
+const toolStart = (name) => ({
+  type: "stream_event",
+  event: { type: "content_block_start", content_block: { type: "tool_use", name, input: {} } },
+});
 
 // Limit and retry frames are synthetic: no real one was ever captured.
 const scenarios = {
   success: { frames: () => replay("success.ndjson") },
   thinking: { frames: () => replay("thinking.ndjson") },
+  "tool-use": { frames: () => [toolStart("Bash"), toolStart("Read"), ...replay("success.ndjson")] },
   "login-lost": { frames: () => fixture("logged-out.ndjson").slice(1), exit: 1 },
   "status-401": { frames: () => [resultFrame({ api_error_status: 401 })], exit: 1 },
   "unknown-error": { frames: () => [resultFrame({ result: "Something new" })], exit: 1 },
@@ -117,6 +128,9 @@ function send(frames, code) {
 }
 
 log({ pid: process.pid, args, env: Object.keys(process.env) });
+if (args.includes("--mcp-config")) {
+  log({ mcpConfig: NodeFS.readFileSync(args[args.indexOf("--mcp-config") + 1], "utf8") });
+}
 
 if (args[0] === "--version") {
   console.log(`${scenario.version ?? "2.1.318"} (Claude Code)`);

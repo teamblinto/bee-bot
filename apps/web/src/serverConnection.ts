@@ -1,9 +1,9 @@
 import {
-  Bot,
   type ChatState,
   type ClientMessage,
   type Command,
-  ProtocolNotice,
+  EngineStatus,
+  type PendingApproval,
   protocolVersion,
   type Run,
   type ServerEvent,
@@ -11,14 +11,24 @@ import {
 } from "@beebot/contracts";
 
 const reconnectDelayMs = 1000;
+const lastSeenKey = "beebot.lastSeen";
 
 export type ConnectionState = {
   status: "unconfigured" | "connecting" | "connected" | "disconnected" | "incompatible";
-  notice: string | undefined;
+  // False until the first snapshot, so the empty initial chat is never taken for a new user.
+  loaded: boolean;
   seq: number;
   chat: ChatState;
   // Live output by run ID. Lost on a reconnect; the final reply arrives as a message.
   drafts: Record<string, string>;
+  // Tool names of running turns, by run ID.
+  liveTools: Record<string, string[]>;
+  // Card content for pending approvals. The server resends the whole set, so it is never merged.
+  pending: PendingApproval[];
+  engine: EngineStatus | undefined;
+  engineChecking: boolean;
+  // Last bot message read, by bot ID. Mirrors localStorage.
+  lastSeen: Record<string, string>;
   commandError: string | undefined;
 };
 
@@ -44,27 +54,46 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
       const { run } = event;
       const runs = [...chat.runs.filter(({ botId }) => botId !== run.botId), run];
       const drafts = { ...state.drafts };
+      const liveTools = { ...state.liveTools };
       if (!isActive(run)) {
         delete drafts[run.id];
+        delete liveTools[run.id];
       }
-      return { ...state, drafts, chat: { ...chat, runs } };
+      return { ...state, drafts, liveTools, chat: { ...chat, runs } };
     }
+    case "approval.changed":
+      return { ...state, chat: { ...chat, approvals: upsert(chat.approvals, event.approval) } };
+    case "notice.acknowledged":
+      return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
   }
+}
+
+function keepLive<T>(byRun: Record<string, T>, runs: Run[]) {
+  const live = runs.filter(isActive).map(({ id }) => id);
+  return Object.fromEntries(Object.entries(byRun).filter(([id]) => live.includes(id)));
 }
 
 export function applyServerMessage(state: ConnectionState, message: ServerMessage) {
   switch (message.type) {
-    case "snapshot": {
-      const live = message.state.runs.filter(isActive).map(({ id }) => id);
-      const drafts = Object.fromEntries(
-        Object.entries(state.drafts).filter(([id]) => live.includes(id)),
-      );
-      return { ...state, seq: message.seq, chat: message.state, drafts };
-    }
+    case "snapshot":
+      return {
+        ...state,
+        loaded: true,
+        seq: message.seq,
+        chat: message.state,
+        drafts: keepLive(state.drafts, message.state.runs),
+        liveTools: keepLive(state.liveTools, message.state.runs),
+      };
     case "delta": {
       const text = (state.drafts[message.runId] ?? "") + message.text;
       return { ...state, drafts: { ...state.drafts, [message.runId]: text } };
     }
+    case "tool": {
+      const tools = [...(state.liveTools[message.runId] ?? []), message.name];
+      return { ...state, liveTools: { ...state.liveTools, [message.runId]: tools } };
+    }
+    case "pending-approvals":
+      return { ...state, pending: message.approvals };
     case "replay":
     case "event": {
       const incoming = message.type === "replay" ? message.events : [message.event];
@@ -79,16 +108,55 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
   }
 }
 
+// Bodies carry no message content. Snapshots are skipped: they hold history, not news.
+export function notificationBodies(state: ConnectionState, message: ServerMessage) {
+  const { bots, approvals } = state.chat;
+  const name = (botId: string | undefined) => bots.find(({ id }) => id === botId)?.name ?? "A bot";
+
+  if (message.type === "pending-approvals") {
+    return message.approvals
+      .filter(({ id }) => !state.pending.some((known) => known.id === id))
+      .map(({ id }) => `${name(approvals.find((a) => a.id === id)?.botId)} needs your approval`);
+  }
+  const events =
+    message.type === "event" ? [message.event] : message.type === "replay" ? message.events : [];
+  return events.flatMap((event) =>
+    event.type === "run.changed" && event.seq > state.seq && event.run.status === "Completed"
+      ? [`${name(event.run.botId)} finished`]
+      : [],
+  );
+}
+
 const params = new URLSearchParams(window.location.search);
 const serverUrl = params.get("serverUrl");
 const token = params.get("token");
 
+function readLastSeen(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(lastSeenKey) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
 let state: ConnectionState = {
   status: serverUrl && token ? "connecting" : "unconfigured",
-  notice: undefined,
+  loaded: false,
   seq: 0,
-  chat: { bots: [], accounts: [], messages: [], runs: [] },
+  chat: {
+    bots: [],
+    accounts: [],
+    messages: [],
+    runs: [],
+    approvals: [],
+    noticeAcknowledgedAt: null,
+  },
   drafts: {},
+  liveTools: {},
+  pending: [],
+  engine: undefined,
+  engineChecking: false,
+  lastSeen: readLastSeen(),
   commandError: undefined,
 };
 const listeners = new Set<() => void>();
@@ -107,6 +175,18 @@ export function subscribeToConnection(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+export function markSeen(botId: string, messageId: string) {
+  const lastSeen = { ...state.lastSeen, [botId]: messageId };
+  localStorage.setItem(lastSeenKey, JSON.stringify(lastSeen));
+  setState({ ...state, lastSeen });
+}
+
+export function requestNotifications() {
+  if (Notification.permission === "default") {
+    void Notification.requestPermission();
+  }
+}
+
 function endpoint(path: string) {
   const url = new URL(path, serverUrl ?? undefined);
   url.searchParams.set("protocolVersion", String(protocolVersion));
@@ -116,6 +196,27 @@ function endpoint(path: string) {
 function reconnect() {
   setState({ ...state, status: "disconnected" });
   setTimeout(() => void connect(), reconnectDelayMs);
+}
+
+async function fetchEngine() {
+  try {
+    const response = await fetch(endpoint("/engine"), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return response.ok ? EngineStatus.safeParse(await response.json()).data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Each call re-probes the CLI on the server, which can take seconds, so calls never overlap.
+export async function checkEngine() {
+  if (state.engineChecking) {
+    return;
+  }
+  setState({ ...state, engineChecking: true });
+  const engine = await fetchEngine();
+  setState({ ...state, engine, engineChecking: false });
 }
 
 // A browser can't read the status of a refused WebSocket, so a version mismatch is found over HTTP.
@@ -132,8 +233,7 @@ export async function connect() {
     return;
   }
   if (health.status === 426) {
-    const notice = ProtocolNotice.parse(await health.json());
-    setState({ ...state, status: "incompatible", notice: notice.message });
+    setState({ ...state, status: "incompatible" });
     return;
   }
   if (!health.ok) {
@@ -149,38 +249,55 @@ export async function connect() {
     const subscribe: ClientMessage = { type: "subscribe", afterSeq: state.seq };
     socket.send(JSON.stringify(subscribe));
     setState({ ...state, status: "connected" });
+    void checkEngine();
   };
-  socket.onmessage = (message: MessageEvent<string>) => {
-    setState(applyServerMessage(state, ServerMessage.parse(JSON.parse(message.data))));
+  socket.onmessage = (event: MessageEvent<string>) => {
+    const message = ServerMessage.parse(JSON.parse(event.data));
+    if (!document.hasFocus()) {
+      for (const body of notificationBodies(state, message)) {
+        void new Notification("Bee Bot", { body });
+      }
+    }
+    setState(applyServerMessage(state, message));
   };
   socket.onclose = reconnect;
 }
 
-// Answers undefined on failure, after reporting it in `commandError`.
-export async function sendCommand(command: Command) {
+const errorSentences: Record<string, string> = {
+  approval_closed: "This request is already closed.",
+  digest_mismatch: "This request changed, so nothing was decided.",
+  always_not_allowed: "Always allow isn't available for this request.",
+  engine_not_allowed: "The test engine isn't available here.",
+  message_id_reused: "That message couldn't be sent. Send it again.",
+  not_found: "That's no longer here.",
+  protocol_mismatch: "This app and its server don't match. Update Bee Bot.",
+  storage_failed: "Bee Bot couldn't save that. Try again.",
+};
+
+function errorSentence(body: unknown) {
+  const code = body && typeof body === "object" && "code" in body ? String(body.code) : "";
+  return errorSentences[code] ?? "That didn't work. Try again.";
+}
+
+type CommandResult = { ok: true; body: unknown } | { ok: false; message: string };
+
+// For callers that show their own failure. `message` is always a plain sentence.
+export async function postCommand(command: Command): Promise<CommandResult> {
   try {
     const response = await fetch(endpoint("/commands"), {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(command),
     });
-    if (!response.ok) {
-      throw new Error(`The server answered ${response.status}.`);
-    }
     const body: unknown = await response.json();
-    setState({ ...state, commandError: undefined });
-    return body;
-  } catch (error) {
-    setState({ ...state, commandError: String(error) });
-    return undefined;
+    return response.ok ? { ok: true, body } : { ok: false, message: errorSentence(body) };
+  } catch {
+    return { ok: false, message: "Can't reach the Bee Bot server. Try again in a moment." };
   }
 }
 
-export async function createBot(
-  name: string,
-  personality: string,
-  engineAccountId: "claude" | "fake",
-) {
-  const command = { type: "create-bot", name, personality, engineAccountId } as const;
-  return Bot.safeParse(await sendCommand(command)).data;
+// For quick actions with no place of their own: a failure shows above the composer.
+export async function sendCommand(command: Command) {
+  const result = await postCommand(command);
+  setState({ ...state, commandError: result.ok ? undefined : result.message });
 }

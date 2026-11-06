@@ -11,8 +11,11 @@
   "dependencies": {
     "@beebot/contracts": "workspace:*",
     "@tanstack/react-router": "1.170.46",
+    "lucide-react": "1.68.0",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "catalog:",

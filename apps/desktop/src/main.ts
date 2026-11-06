@@ -1,10 +1,16 @@
 import * as NodePath from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, shell } from "electron";
 
 import { startServer, stopServer } from "./server.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
+
+// Windows drops notifications from an app whose ID doesn't match its Start Menu shortcut.
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.teamblinto.beebot");
+}
 
 let connection: Awaited<ReturnType<typeof startServer>>;
 let serverStopped = false;
@@ -13,7 +19,7 @@ function createWindow() {
   const window = new BrowserWindow({
     show: false,
     autoHideMenuBar: true,
-    minWidth: 840,
+    minWidth: 360,
     minHeight: 620,
     webPreferences: {
       contextIsolation: true,
@@ -23,14 +29,32 @@ function createWindow() {
   });
 
   window.once("ready-to-show", () => window.show());
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (["http:", "https:"].includes(URL.parse(url)?.protocol ?? "")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
+  });
 
   const query = { serverUrl: connection.url, token: connection.token };
+  const webIndex = NodePath.join(
+    __dirname,
+    app.isPackaged ? "../web/index.html" : "../../web/dist/index.html",
+  );
+  const isApp = (url: URL | null) =>
+    devServerUrl
+      ? url?.origin === new URL(devServerUrl).origin
+      : url?.protocol === "file:" && url.pathname === pathToFileURL(webIndex).pathname;
+  window.webContents.on("will-navigate", (event) => {
+    if (!isApp(URL.parse(event.url))) {
+      event.preventDefault();
+    }
+  });
+
   if (devServerUrl) {
     void window.loadURL(`${devServerUrl}?${new URLSearchParams(query)}`);
   } else {
-    const webIndex = app.isPackaged ? "../web/index.html" : "../../web/dist/index.html";
-    void window.loadFile(NodePath.join(__dirname, webIndex), { query });
+    void window.loadFile(webIndex, { query });
   }
 }
 
@@ -66,7 +90,7 @@ async function start() {
       ),
       dataDir: NodePath.join(app.getPath("userData"), "server"),
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
-      fakeEngine: !app.isPackaged,
+      fakeEngine: Boolean(devServerUrl),
     });
   } catch {
     app.quit();

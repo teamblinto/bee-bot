@@ -1,0 +1,654 @@
+import * as NodeCrypto from "node:crypto";
+import { once } from "node:events";
+import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+import {
+  type Bot,
+  type Command,
+  type PendingApproval,
+  protocolVersion,
+  ServerMessage,
+} from "@beebot/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { WebSocket } from "ws";
+
+import { inputDigest } from "./approvals.ts";
+import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
+import { startServer } from "./server.ts";
+import { openEventStore } from "./store.ts";
+
+const ownerToken = "t".repeat(43);
+const secret = "hunter2-do-not-keep";
+const command = `echo ${secret}`;
+
+type Permissions = { url: string; token: string };
+type Turn = { permissions: Permissions; finish: (outcome: TurnOutcome) => void };
+
+let dataDir: string;
+const cleanups: Array<() => Promise<void> | void> = [];
+
+beforeEach(() => {
+  dataDir = NodeFS.realpathSync.native(
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-approvals-")),
+  );
+});
+
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    await cleanup();
+  }
+  NodeFS.rmSync(dataDir, { recursive: true, force: true });
+});
+
+function connect(port: number) {
+  const params = new URLSearchParams({
+    protocolVersion: String(protocolVersion),
+    token: ownerToken,
+  });
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?${params}`);
+  cleanups.push(() => socket.terminate());
+  const messages: ServerMessage[] = [];
+  socket.on("message", (data) => messages.push(ServerMessage.parse(JSON.parse(data.toString()))));
+  const cards = () =>
+    messages.flatMap((m) => (m.type === "pending-approvals" ? [m.approvals] : [])).at(-1);
+  const ready = once(socket, "open").then(async () => {
+    socket.send(JSON.stringify({ type: "subscribe", afterSeq: 0 }));
+    await vi.waitFor(() => expect(cards()).toBeDefined());
+  });
+  return { socket, messages, cards, ready };
+}
+
+type BootOptions = {
+  runTurn?: RunTurn;
+  approvalTimeoutMs?: number;
+  turnTimeoutMs?: number;
+  mcpKeepaliveMs?: number;
+};
+
+async function boot(options: BootOptions = {}) {
+  const turns: Turn[] = [];
+  const scripted: RunTurn = ({ permissions, signal }) =>
+    new Promise((resolve) => {
+      turns.push({ permissions, finish: resolve });
+      signal.addEventListener("abort", () => resolve({ kind: "failed" }));
+    });
+  const store = openEventStore(dataDir);
+  const server = await startServer({
+    port: 0,
+    token: ownerToken,
+    dataDir,
+    allowedOrigins: [],
+    fakeEngine: true,
+    store,
+    probeEngine: async () => ({
+      cliFound: true,
+      versionOk: true,
+      loggedIn: true,
+      pauseReason: null,
+      testedVersion: "2.1.318",
+    }),
+    runTurn: scripted,
+    ...options,
+  });
+  let open = true;
+  const stop = async () => {
+    if (open) {
+      open = false;
+      await server.close();
+      store.close();
+    }
+  };
+  cleanups.push(stop);
+  const client = connect(server.port);
+  await client.ready;
+
+  const post = (body: Command) =>
+    fetch(`http://127.0.0.1:${server.port}/commands?protocolVersion=${protocolVersion}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      body: JSON.stringify(body),
+    });
+
+  async function startTurn(engineAccountId: "claude" | "fake" = "claude") {
+    const bot = (await (
+      await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId })
+    ).json()) as Bot;
+    const before = turns.length;
+    await post({
+      type: "send-message",
+      messageId: NodeCrypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hello",
+    });
+    await vi.waitFor(() => expect(turns.length).toBe(before + 1), { timeout: 3000 });
+    return { bot, turn: turns[before] as Turn };
+  }
+
+  const decide = (card: PendingApproval, decision: "allow" | "deny" | "always", digest?: string) =>
+    post({
+      type: "decide-approval",
+      approvalId: card.id,
+      digest:
+        digest ?? (store.state().approvals.find(({ id }) => id === card.id)?.digest as string),
+      decision,
+    });
+
+  const nextCard = async (count = 1) => {
+    await vi.waitFor(() => expect(client.cards()).toHaveLength(count), { timeout: 3000 });
+    return client.cards()?.at(-1) as PendingApproval;
+  };
+
+  return { store, port: server.port, stop, client, post, startTurn, decide, nextCard, turns };
+}
+
+const rpc = (method: string, params?: unknown, id: number | undefined = 1) =>
+  JSON.stringify({ jsonrpc: "2.0", id, method, params });
+
+function mcp({ url, token }: Permissions, body: string, headers: Record<string, string> = {}) {
+  return fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, ...headers },
+    body,
+  });
+}
+
+const toolCall = (tool_name: string, input: unknown) =>
+  rpc("tools/call", {
+    name: "approve",
+    arguments: { tool_name, input, tool_use_id: "toolu_1" },
+  });
+
+async function decisionOf(response: Response) {
+  const text = await response.text();
+  const data = /^event: message\ndata: (.*)\n\n$/m.exec(text)?.[1] ?? "";
+  return JSON.parse(JSON.parse(data).result.content[0].text) as {
+    behavior: string;
+    message?: string;
+    updatedInput?: unknown;
+  };
+}
+
+function rows(sql: string) {
+  const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+  try {
+    return db.prepare(sql).all() as Array<Record<string, unknown>>;
+  } finally {
+    db.close();
+  }
+}
+
+const auditRows = () =>
+  rows("SELECT tool, status, reason FROM audit_log WHERE tool IS NOT NULL ORDER BY id");
+
+describe("the MCP endpoint", () => {
+  it("answers the handshake as plain JSON, and notifications with 202", async () => {
+    const { startTurn } = await boot();
+    const { permissions } = (await startTurn()).turn;
+
+    const init = await mcp(permissions, rpc("initialize", { protocolVersion: "2025-06-18" }));
+    expect(init.headers.get("content-type")).toBe("application/json");
+    expect(await init.json()).toMatchObject({
+      id: 1,
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
+    });
+
+    const list = (await (await mcp(permissions, rpc("tools/list"))).json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(list.result.tools.map(({ name }) => name)).toEqual(["approve"]);
+    expect(await (await mcp(permissions, rpc("ping"))).json()).toMatchObject({ result: {} });
+
+    const note = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+    expect((await mcp(permissions, note)).status).toBe(202);
+
+    const unknown = await mcp(permissions, rpc("server/discover"));
+    expect(await unknown.json()).toMatchObject({ id: 1, error: { code: -32601 } });
+  });
+
+  it("refuses other methods, any Origin, and bad bodies", async () => {
+    const { startTurn } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const bearer = { Authorization: `Bearer ${permissions.token}` };
+    expect((await fetch(permissions.url, { headers: bearer })).status).toBe(405);
+    const fromBrowser = await mcp(permissions, rpc("ping"), { Origin: "http://127.0.0.1:5833" });
+    expect(fromBrowser.status).toBe(403);
+    expect(fromBrowser.headers.has("access-control-allow-origin")).toBe(false);
+    expect((await mcp(permissions, "not json")).status).toBe(400);
+  });
+
+  it("takes a 1 MB Write, past the 256 KB command cap, but not one over 16 MB", async () => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const content = "x".repeat(1024 * 1024);
+    const call = mcp(permissions, toolCall("Write", { file_path: "big.txt", content }));
+    await decide(await nextCard(), "deny");
+    expect((await call).status).toBe(200);
+    const huge = "x".repeat(17 * 1024 * 1024);
+    const refused = await mcp(permissions, toolCall("Write", { file_path: "a", content: huge }));
+    expect(refused.status).toBe(413);
+  });
+
+  it("flushes SSE headers at once, keeps the line alive, then frames the result", async () => {
+    const { startTurn, nextCard, decide } = await boot({ mcpKeepaliveMs: 10 });
+    const { permissions } = (await startTurn()).turn;
+
+    const response = await mcp(permissions, toolCall("Bash", { command }));
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).toBe(": keepalive\n\n");
+
+    await decide(await nextCard(), "allow");
+    let text = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      text += decoder.decode(value);
+    }
+    const frame = text.replaceAll(": keepalive\n\n", "");
+    expect(frame).toMatch(/^event: message\ndata: \{.*\}\n\n$/);
+    const message = JSON.parse(frame.split("data: ")[1] ?? "");
+    expect(message).toMatchObject({ jsonrpc: "2.0", id: 1 });
+    expect(JSON.parse(message.result.content[0].text)).toEqual({
+      behavior: "allow",
+      updatedInput: { command },
+    });
+  });
+});
+
+describe("run tokens", () => {
+  it("are refused once their run ends, and owner credentials never work", async () => {
+    const { startTurn, store } = await boot();
+    const { turn, bot } = await startTurn();
+    expect((await mcp(turn.permissions, rpc("ping"))).status).toBe(200);
+    const owner = { ...turn.permissions, token: ownerToken };
+    expect((await mcp(owner, rpc("ping"))).status).toBe(401);
+    expect((await mcp({ ...turn.permissions, token: "" }, rpc("ping"))).status).toBe(401);
+
+    turn.finish({ kind: "completed", text: "done" });
+    await vi.waitFor(() => {
+      expect(store.state().runs.find(({ botId }) => botId === bot.id)?.status).toBe("Completed");
+    });
+    expect((await mcp(turn.permissions, rpc("ping"))).status).toBe(401);
+  });
+
+  it("act only on their own run", async () => {
+    const { startTurn, nextCard, store } = await boot();
+    const first = await startTurn("claude");
+    const second = await startTurn("fake");
+    expect(first.turn.permissions.token).not.toBe(second.turn.permissions.token);
+
+    void mcp(second.turn.permissions, toolCall("Bash", { command })).catch(() => {});
+    await nextCard();
+    const [approval] = store.state().approvals;
+    const run = store.state().runs.find(({ id }) => id === approval?.runId);
+    expect(run?.botId).toBe(second.bot.id);
+    expect(approval?.botId).toBe(second.bot.id);
+  });
+
+  it("are refused after a stop, while the turn is still winding down", async () => {
+    const { startTurn, post } = await boot();
+    const { turn, bot } = await startTurn();
+    await post({ type: "stop-bot", botId: bot.id });
+    expect((await mcp(turn.permissions, rpc("ping"))).status).toBe(401);
+  });
+});
+
+describe("a tool call", () => {
+  it("is denied with no card for an unknown tool or malformed input", async () => {
+    const { startTurn, client, store } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    for (const body of [
+      toolCall("WebFetch", { url: "https://example.com" }),
+      toolCall("Bash", "not an object"),
+      toolCall("Bash", { command: 7 }),
+      toolCall("Read", {}),
+      rpc("tools/call", { name: "other", arguments: {} }),
+    ]) {
+      expect(await decisionOf(await mcp(permissions, body))).toMatchObject({ behavior: "deny" });
+    }
+    expect(client.cards()).toEqual([]);
+    expect(store.state().approvals).toEqual([]);
+  });
+
+  it("is refused with no card or row when the path is off limits, and audited", async () => {
+    const { startTurn, client, store } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const file_path = NodePath.join(dataDir, "..", "elsewhere", ".ssh", "id_rsa");
+    const decision = await decisionOf(await mcp(permissions, toolCall("Read", { file_path })));
+    expect(decision.behavior).toBe("deny");
+    expect(decision.message).toContain("off limits");
+    expect(client.cards()).toEqual([]);
+    expect(store.state().approvals).toEqual([]);
+    expect(auditRows()).toEqual([{ tool: "Read", status: "refused", reason: null }]);
+  });
+
+  it("is refused on allow when a link swapped in during the hold makes the path off limits", async () => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { turn, bot } = await startTurn();
+    const workspace = NodePath.join(dataDir, "bots", bot.id, "workspace");
+    NodeFS.mkdirSync(workspace, { recursive: true });
+    const link = NodePath.join(workspace, "swapped");
+    const file_path = NodePath.join(link, "beebot.db");
+    const call = mcp(turn.permissions, toolCall("Read", { file_path }));
+    const card = await nextCard();
+    NodeFS.symlinkSync(dataDir, link, "junction");
+    await decide(card, "allow");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("shows the exact command, waits, and releases the input on allow", async () => {
+    const { startTurn, nextCard, decide, store } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    const card = await nextCard();
+    expect(card).toMatchObject({ detail: command, canAlwaysAllow: false });
+    expect(Date.parse(card.expiresAt)).toBeGreaterThan(Date.now());
+    expect(store.state().approvals[0]).toMatchObject({
+      tool: "Bash",
+      status: "pending",
+      digest: inputDigest("Bash", { command }),
+    });
+
+    expect((await decide(card, "allow")).status).toBe(200);
+    expect(await decisionOf(await call)).toEqual({
+      behavior: "allow",
+      updatedInput: { command },
+    });
+    expect(store.state().approvals[0]).toMatchObject({ status: "allowed", reason: "owner" });
+    expect(auditRows()).toEqual([{ tool: "Bash", status: "allowed", reason: "owner" }]);
+  });
+
+  it.each([
+    ["Read", { file_path: "notes.txt" }, "notes.txt"],
+    ["Write", { file_path: "a b.txt", content: "x" }, "a b.txt"],
+    ["Edit", { file_path: "a.txt", old_string: "x", new_string: "y" }, "a.txt"],
+    ["Glob", { pattern: "*.txt", path: "src" }, "*.txt in src"],
+    ["Grep", { pattern: "TODO" }, "TODO"],
+  ])("describes %s with the model's own strings", async (tool, input, detail) => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall(tool, input));
+    const card = await nextCard();
+    expect(card.detail).toBe(detail);
+    await decide(card, "deny");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("keeps the input out of the database, the events and the logs", async () => {
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
+      vi.spyOn(console, method),
+    );
+    const { startTurn, nextCard, decide, stop } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    await decide(await nextCard(), "deny");
+    await call;
+    await stop();
+    const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    vi.restoreAllMocks();
+    expect(printed).not.toContain(secret);
+    for (const file of NodeFS.readdirSync(dataDir).filter((name) => name.startsWith("beebot"))) {
+      expect(NodeFS.readFileSync(NodePath.join(dataDir, file), "latin1")).not.toContain(secret);
+    }
+  });
+});
+
+describe("a decision", () => {
+  it("is refused when the digest differs, and the card stays open", async () => {
+    const { startTurn, nextCard, decide, client } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    const card = await nextCard();
+    const refused = await decide(card, "allow", inputDigest("Bash", { command: "rm -rf /" }));
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ code: "digest_mismatch" });
+    expect(client.cards()).toHaveLength(1);
+    await decide(card, "deny");
+    await call;
+  });
+
+  it("is refused the second time, and for an unknown approval", async () => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    const card = await nextCard();
+    const digest = inputDigest("Bash", { command });
+    expect((await decide(card, "deny", digest)).status).toBe(200);
+    const second = await decide(card, "allow", digest);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toEqual({ code: "approval_closed" });
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+    const unknown = await decide({ ...card, id: NodeCrypto.randomUUID() }, "allow", digest);
+    expect(await unknown.json()).toEqual({ code: "approval_closed" });
+  });
+});
+
+describe("always allow", () => {
+  it.each([
+    ["Bash", { command }],
+    ["Write", { file_path: "a.txt", content: "x" }],
+    ["Edit", { file_path: "a.txt" }],
+  ])("is refused for %s", async (tool, input) => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall(tool, input));
+    const card = await nextCard();
+    expect(card.canAlwaysAllow).toBe(false);
+    const refused = await decide(card, "always");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ code: "always_not_allowed" });
+    expect(rows("SELECT * FROM bot_tool_grants")).toEqual([]);
+    await decide(card, "deny");
+    await call;
+  });
+
+  it("is refused outside the workspace", async () => {
+    const { startTurn, nextCard, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const file_path = NodePath.join(dataDir, "..", "elsewhere", "notes.txt");
+    const call = mcp(permissions, toolCall("Read", { file_path }));
+    const card = await nextCard();
+    expect(card.canAlwaysAllow).toBe(false);
+    expect((await decide(card, "always")).status).toBe(403);
+    await decide(card, "deny");
+    await call;
+  });
+
+  it("saves the grant before releasing the call, for this bot and tool only", async () => {
+    const { startTurn, nextCard, decide, client, store, turns } = await boot();
+    const { turn, bot } = await startTurn();
+    const read = (file_path: string) => mcp(turn.permissions, toolCall("Read", { file_path }));
+
+    const first = read("notes.txt");
+    const card = await nextCard();
+    expect(card.canAlwaysAllow).toBe(true);
+    expect((await decide(card, "always")).status).toBe(200);
+    expect(await decisionOf(await first)).toMatchObject({ behavior: "allow" });
+    expect(rows("SELECT bot_id AS botId, tool FROM bot_tool_grants")).toEqual([
+      { botId: bot.id, tool: "Read" },
+    ]);
+
+    const count = store.state().approvals.length;
+    expect(await decisionOf(await read("other.txt"))).toEqual({
+      behavior: "allow",
+      updatedInput: { file_path: "other.txt" },
+    });
+    expect(store.state().approvals).toHaveLength(count);
+    expect(auditRows().at(-1)).toEqual({ tool: "Read", status: "allowed", reason: "always" });
+
+    const outside = read(NodePath.join(dataDir, "..", "elsewhere", "notes.txt"));
+    const outsideCard = await nextCard();
+    await decide(outsideCard, "deny");
+    expect(await decisionOf(await outside)).toMatchObject({ behavior: "deny" });
+
+    const glob = mcp(turn.permissions, toolCall("Glob", { pattern: "*" }));
+    const globCard = await nextCard();
+    await decide(globCard, "deny");
+    await glob;
+
+    turn.finish({ kind: "completed", text: "done" });
+    await vi.waitFor(() => expect(client.cards()).toEqual([]));
+    expect(turns).toHaveLength(1);
+  });
+});
+
+describe("a held call", () => {
+  it("is denied when the timeout passes", async () => {
+    const { startTurn, store, client } = await boot({ approvalTimeoutMs: 30 });
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+    expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "timeout" });
+    await vi.waitFor(() => expect(client.cards()).toEqual([]));
+    expect(auditRows()).toEqual([{ tool: "Bash", status: "denied", reason: "timeout" }]);
+  });
+
+  it.each(["stop-bot", "stop-all"] as const)("is denied by %s", async (type) => {
+    const { startTurn, nextCard, store, post } = await boot();
+    const { turn, bot } = await startTurn();
+    const call = mcp(turn.permissions, toolCall("Bash", { command }));
+    await nextCard();
+    await post(type === "stop-bot" ? { type, botId: bot.id } : { type });
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+    expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "stopped" });
+    await vi.waitFor(() => {
+      expect(store.state().runs.find(({ botId }) => botId === bot.id)?.status).toBe("Cancelled");
+    });
+  });
+
+  it("is denied when its run ends", async () => {
+    const { startTurn, nextCard, store } = await boot();
+    const { turn } = await startTurn();
+    const call = mcp(turn.permissions, toolCall("Bash", { command }));
+    await nextCard();
+    turn.finish({ kind: "failed" });
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+    expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "stopped" });
+  });
+
+  it("is denied when the CLI drops the connection", async () => {
+    const { startTurn, nextCard, store, client } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const { hostname, port, pathname } = new URL(permissions.url);
+    const request = NodeHttp.request({
+      host: hostname,
+      port,
+      path: pathname,
+      method: "POST",
+      headers: { Authorization: `Bearer ${permissions.token}` },
+    });
+    request.on("error", () => {});
+    request.end(toolCall("Bash", { command }));
+    await nextCard();
+    request.destroy();
+    await vi.waitFor(() => {
+      expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "stopped" });
+    });
+    expect(client.cards()).toEqual([]);
+  });
+
+  it("reappears for a client that reconnects", async () => {
+    const { startTurn, nextCard, port, decide } = await boot();
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    const card = await nextCard();
+
+    const later = connect(port);
+    await later.ready;
+    expect(later.cards()).toEqual([card]);
+    await decide(card, "deny");
+    await call;
+  });
+
+  it("expires on restart, with an event and an audit row", async () => {
+    const first = await boot();
+    const { permissions } = (await first.startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command })).catch(() => "dropped" as const);
+    await first.nextCard();
+    await first.stop();
+    await call;
+    expect(rows("SELECT status FROM approvals")).toEqual([{ status: "pending" }]);
+
+    const second = await boot();
+    expect(second.client.cards()).toEqual([]);
+    expect(second.store.state().approvals[0]).toMatchObject({
+      status: "expired",
+      reason: "server_restarted",
+    });
+    const events = second.store.eventsAfter(0).filter(({ type }) => type === "approval.changed");
+    expect(events.at(-1)).toMatchObject({ approval: { status: "expired" } });
+    expect(auditRows().at(-1)).toEqual({
+      tool: "Bash",
+      status: "expired",
+      reason: "server_restarted",
+    });
+  });
+});
+
+describe("the turn timer", () => {
+  it("pauses while a card waits and resumes with the time that was left", async () => {
+    const { startTurn, nextCard, decide, store } = await boot({ turnTimeoutMs: 400 });
+    const { turn, bot } = await startTurn();
+    const status = () => store.state().runs.find(({ botId }) => botId === bot.id);
+    const call = mcp(turn.permissions, toolCall("Bash", { command }));
+    const card = await nextCard();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(status()?.status).toBe("Running");
+    await decide(card, "allow");
+    await call;
+    await vi.waitFor(() => expect(status()?.reason).toBe("timeout"), { timeout: 1000 });
+  });
+});
+
+describe("the fake engine's /approve", () => {
+  const consoleMethods = ["log", "info", "warn", "error", "debug"] as const;
+
+  it("goes through the real gate and never prints the token", async () => {
+    const spies = consoleMethods.map((method) => vi.spyOn(console, method));
+    const tokens: string[] = [];
+    const runTurn: RunTurn = (turn) => {
+      tokens.push(turn.permissions.token);
+      return fakeRunTurn(turn);
+    };
+    const { store, post, nextCard, decide, client } = await boot({ runTurn });
+    const send = (roomId: string, body: string) =>
+      post({ type: "send-message", messageId: NodeCrypto.randomUUID(), roomId, body });
+    const bot = (await (
+      await post({ type: "create-bot", name: "Fay", personality: "", engineAccountId: "fake" })
+    ).json()) as Bot;
+
+    await send(bot.roomId, "/approve Bash npm run build --flag");
+    const card = await nextCard();
+    expect(card.detail).toBe("npm run build --flag");
+    await decide(card, "allow");
+    await vi.waitFor(() => expect(store.state().messages).toHaveLength(2));
+    expect(store.state().messages[1]).toMatchObject({
+      body: "Test engine: allowed",
+      tools: ["Bash"],
+    });
+
+    await send(bot.roomId, "/approve Read notes.txt");
+    const second = await nextCard();
+    expect(second.detail).toBe("notes.txt");
+    await decide(second, "deny");
+    await vi.waitFor(() => expect(store.state().messages).toHaveLength(4));
+    expect(store.state().messages[3]?.body).toBe("Test engine: denied");
+    expect(client.messages.some((m) => m.type === "tool" && m.name === "Read")).toBe(true);
+
+    const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    vi.restoreAllMocks();
+    expect(tokens).toHaveLength(2);
+    for (const token of tokens) {
+      expect(printed).not.toContain(token);
+      expect(JSON.stringify(client.messages)).not.toContain(token);
+    }
+  });
+});

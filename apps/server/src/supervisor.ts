@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import { admit } from "./admission.ts";
+import type { Approvals } from "./approvals.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 
@@ -12,12 +13,16 @@ const maxBlockMs = 24 * 60 * 60_000;
 type Options = {
   store: EventStore;
   runTurn: RunTurn;
+  approvals: Approvals;
+  permissionsUrl: () => string;
   onDelta: (runId: string, text: string) => void;
+  onTool: (runId: string, name: string) => void;
   turnTimeoutMs?: number | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
-function finishedRun(outcome: TurnOutcome, abortReason: unknown): FinishedRun {
+// A finished reply holds too: a stop or timeout landing after `result` has nothing left to stop.
+function finishedRun(outcome: TurnOutcome, abortReason: unknown, tools: string[]): FinishedRun {
   if (outcome.kind === "limited") {
     const blockMs = Math.min(Math.max(outcome.retryAfterMs, minBlockMs), maxBlockMs);
     return {
@@ -33,25 +38,36 @@ function finishedRun(outcome: TurnOutcome, abortReason: unknown): FinishedRun {
       pauseBot: outcome.pauseReason ?? "auth_failed",
     };
   }
+  if (outcome.kind === "completed") {
+    return { status: "Completed", reason: null, reply: outcome.text, tools };
+  }
   if (abortReason === "stop") {
     return { status: "Cancelled", reason: "stopped" };
   }
-  if (abortReason === "timeout") {
-    return { status: "Failed", reason: "timeout" };
-  }
-  return outcome.kind === "completed"
-    ? { status: "Completed", reason: null, reply: outcome.text }
+  return abortReason === "timeout"
+    ? { status: "Failed", reason: "timeout" }
     : { status: "Failed", reason: "engine_failed" };
 }
 
 export function createSupervisor({
   store,
   runTurn,
+  approvals,
+  permissionsUrl,
   onDelta,
+  onTool,
   turnTimeoutMs = defaultTurnTimeoutMs,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
-  const turns = new Map<string, { controller: AbortController; ended: Promise<void> }>();
+  const turns = new Map<
+    string,
+    {
+      controller: AbortController;
+      ended: Promise<void>;
+      pauseClock: () => void;
+      resumeClock: () => void;
+    }
+  >();
   let closing = false;
 
   store.recover(bootId);
@@ -78,7 +94,25 @@ export function createSupervisor({
 
   function startTurn(run: ClaimedRun) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort("timeout"), turnTimeoutMs);
+    const token = approvals.openRun(run.id, run.launch.botId);
+    const tools: string[] = [];
+    let remainingMs = turnTimeoutMs;
+    let resumedAt = 0;
+    let timeout: NodeJS.Timeout | undefined;
+    const resumeClock = () => {
+      if (!timeout) {
+        resumedAt = Date.now();
+        timeout = setTimeout(() => controller.abort("timeout"), remainingMs);
+      }
+    };
+    const pauseClock = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = undefined;
+        remainingMs = Math.max(remainingMs - (Date.now() - resumedAt), 0);
+      }
+    };
+    resumeClock();
     const attempt = (prompt: string, sessionId: string, resume: boolean) =>
       runTurn({
         prompt,
@@ -87,6 +121,11 @@ export function createSupervisor({
         launch: run.launch,
         signal: controller.signal,
         onDelta: (text) => onDelta(run.id, text),
+        onTool: (name) => {
+          tools.push(name);
+          onTool(run.id, name);
+        },
+        permissions: { url: permissionsUrl(), token },
         onDelivered: () => {
           try {
             store.markDelivered(run.id);
@@ -110,12 +149,13 @@ export function createSupervisor({
         return { kind: "failed" };
       })
       .then((outcome) => {
-        clearTimeout(timeout);
+        pauseClock();
         turns.delete(run.id);
+        approvals.closeRun(run.id);
         // Left Running on purpose: the next boot marks it Interrupted.
         if (!closing) {
           try {
-            store.finishRun(run.id, bootId, finishedRun(outcome, controller.signal.reason));
+            store.finishRun(run.id, bootId, finishedRun(outcome, controller.signal.reason, tools));
           } catch (error) {
             // A run left Running would hold its bot and account until the next boot.
             console.error(`beebotd: run ${run.id} did not finish cleanly`, error);
@@ -125,7 +165,7 @@ export function createSupervisor({
         }
       })
       .catch((error: unknown) => console.error(error));
-    turns.set(run.id, { controller, ended });
+    turns.set(run.id, { controller, ended, pauseClock, resumeClock });
   }
 
   function startRun(runId: string, botId: string, now: string) {
@@ -169,7 +209,19 @@ export function createSupervisor({
   function stopBot(botId: string) {
     const running = store.stopBot(botId);
     if (running) {
+      approvals.closeRun(running);
       turns.get(running)?.controller.abort("stop");
+    }
+  }
+
+  // A turn waiting on the owner isn't using its time.
+  function syncClocks() {
+    for (const [runId, { pauseClock, resumeClock }] of turns) {
+      if (approvals.isHolding(runId)) {
+        pauseClock();
+      } else {
+        resumeClock();
+      }
     }
   }
 
@@ -179,6 +231,7 @@ export function createSupervisor({
   return {
     pump,
     stopBot,
+    syncClocks,
     stopAll: () => {
       for (const botId of store.botIds()) {
         stopBot(botId);

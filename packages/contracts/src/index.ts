@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 3;
+export const protocolVersion = 4;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -29,6 +29,10 @@ export const PauseReason = z.enum([
 ]);
 export type PauseReason = z.infer<typeof PauseReason>;
 
+export const BotModel = z.enum(["haiku", "sonnet", "opus"]);
+export type BotModel = z.infer<typeof BotModel>;
+export const defaultBotModel: BotModel = "sonnet";
+
 export const Bot = z.object({
   id: z.string(),
   name: z.string(),
@@ -37,6 +41,7 @@ export const Bot = z.object({
   pauseReason: PauseReason.nullable(),
   roomId: z.string(),
   engineAccountId: z.string(),
+  model: BotModel,
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -45,6 +50,8 @@ export const ChatMessage = z.object({
   roomId: z.string(),
   author: z.enum(["human", "bot"]),
   body: z.string(),
+  // Names only, in call order. Tool input is never kept here.
+  tools: z.array(z.string()),
   createdAt: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -89,12 +96,40 @@ export const EngineAccount = z.object({
 });
 export type EngineAccount = z.infer<typeof EngineAccount>;
 
+export const ApprovalTool = z.enum(["Read", "Write", "Edit", "Glob", "Grep", "Bash"]);
+export type ApprovalTool = z.infer<typeof ApprovalTool>;
+
+// Durable, so it must never carry tool input: that can hold secrets.
+export const Approval = z.object({
+  id: z.string(),
+  runId: z.string(),
+  botId: z.string(),
+  tool: ApprovalTool,
+  digest: z.string(),
+  status: z.enum(["pending", "allowed", "denied", "expired"]),
+  reason: z.enum(["owner", "timeout", "stopped", "server_restarted"]).nullable(),
+  createdAt: z.string(),
+  decidedAt: z.string().nullable(),
+});
+export type Approval = z.infer<typeof Approval>;
+
+// The card's content. Lives only in server memory, for as long as the tool call is held.
+export const PendingApproval = z.object({
+  id: z.string(),
+  detail: z.string(),
+  canAlwaysAllow: z.boolean(),
+  expiresAt: z.string(),
+});
+export type PendingApproval = z.infer<typeof PendingApproval>;
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
   accounts: z.array(EngineAccount),
   messages: z.array(ChatMessage),
   runs: z.array(Run),
+  approvals: z.array(Approval),
+  noticeAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -103,6 +138,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("account.changed"), account: EngineAccount }),
   z.object({ type: z.literal("message.created"), message: ChatMessage }),
   z.object({ type: z.literal("run.changed"), run: Run }),
+  z.object({ type: z.literal("approval.changed"), approval: Approval }),
+  z.object({ type: z.literal("notice.acknowledged"), acknowledgedAt: z.string() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -129,12 +166,17 @@ export const ServerMessage = z.discriminatedUnion("type", [
   }),
   // Live output of a running turn. Never persisted, so it has no seq.
   z.object({ type: z.literal("delta"), runId: z.string(), text: z.string() }),
+  // A tool call started. Name only.
+  z.object({ type: z.literal("tool"), runId: z.string(), name: z.string() }),
+  // The whole pending set, sent on subscribe and on every change. Never persisted.
+  z.object({ type: z.literal("pending-approvals"), approvals: z.array(PendingApproval) }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 
 const botFields = {
   name: z.string().trim().min(1).max(80),
   personality: z.string().trim().max(4000),
+  model: BotModel.optional(),
 };
 
 export const Command = z.discriminatedUnion("type", [
@@ -154,8 +196,25 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
   z.object({ type: z.literal("continue-run"), runId: z.uuid() }),
+  z.object({
+    type: z.literal("decide-approval"),
+    approvalId: z.uuid(),
+    digest: z.string(),
+    decision: z.enum(["allow", "deny", "always"]),
+  }),
+  z.object({ type: z.literal("acknowledge-notice") }),
 ]);
 export type Command = z.infer<typeof Command>;
+
+// Strict, because the probe reads output holding the owner's email and organization.
+export const EngineStatus = z.strictObject({
+  cliFound: z.boolean(),
+  versionOk: z.boolean(),
+  loggedIn: z.boolean(),
+  pauseReason: PauseReason.nullable(),
+  testedVersion: z.string(),
+});
+export type EngineStatus = z.infer<typeof EngineStatus>;
 
 export const ProtocolNotice = z.object({
   code: z.literal("protocol_mismatch"),

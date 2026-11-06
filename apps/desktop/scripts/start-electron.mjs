@@ -9,7 +9,11 @@ const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
 
 const remoteDebuggingPort = process.env.BEEBOT_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
-const electronArgs = remoteDebuggingPort ? [`--remote-debugging-port=${remoteDebuggingPort}`] : [];
+const userDataDir = process.env.BEEBOT_DESKTOP_USER_DATA_DIR?.trim();
+const electronArgs = [
+  ...(remoteDebuggingPort ? [`--remote-debugging-port=${remoteDebuggingPort}`] : []),
+  ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : []),
+];
 
 const child = NodeChildProcess.spawn(electronPath, [...electronArgs, "."], {
   stdio: "inherit",

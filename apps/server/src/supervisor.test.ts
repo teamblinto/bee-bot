@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   type Bot,
+  type BotModel,
   type Command,
   protocolVersion,
   type RunStatus,
@@ -45,18 +46,36 @@ function scriptedEngine(onAbort: TurnOutcome = { kind: "failed" }) {
     prompt: string;
     sessionId: string;
     resume: boolean;
+    model: BotModel;
     deliver: () => void;
+    tool: (name: string) => void;
     finish: (o: TurnOutcome) => void;
   }> = [];
-  const runTurn: RunTurn = ({ prompt, sessionId, resume, signal, onDelivered }) =>
+  const runTurn: RunTurn = ({ prompt, sessionId, resume, launch, signal, onDelivered, onTool }) =>
     new Promise((resolve) => {
-      turns.push({ prompt, sessionId, resume, deliver: onDelivered, finish: resolve });
+      turns.push({
+        prompt,
+        sessionId,
+        resume,
+        model: launch.model,
+        deliver: onDelivered,
+        tool: onTool,
+        finish: resolve,
+      });
       signal.addEventListener("abort", () => resolve(onAbort));
     });
   return { turns, runTurn };
 }
 
 const reply: TurnOutcome = { kind: "completed", text: "done" };
+
+const probeEngine = async () => ({
+  cliFound: true,
+  versionOk: true,
+  loggedIn: true,
+  pauseReason: null,
+  testedVersion: "2.1.318",
+});
 
 function connect(port: number, afterSeq = 0) {
   const params = new URLSearchParams({ protocolVersion: String(protocolVersion), token });
@@ -87,8 +106,10 @@ async function boot(
   const server = await startServer({
     port: 0,
     token,
+    dataDir,
     allowedOrigins: [],
     store,
+    probeEngine,
     runTurn,
     turnTimeoutMs: options.turnTimeoutMs,
   });
@@ -160,7 +181,14 @@ describe("sending", () => {
 
   it("streams deltas without persisting them and stores the final reply", async () => {
     const store = openEventStore(dataDir);
-    const server = await startServer({ port: 0, token, allowedOrigins: [], store });
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [],
+      store,
+      probeEngine,
+    });
     cleanups.push(async () => {
       await server.close();
       store.close();
@@ -419,8 +447,31 @@ describe("outcomes", () => {
     expect(ackedSeq()).toBe(0);
   });
 
-  it("cancels on stop, ignoring a late result, and drops the pending follow-up", async () => {
-    const engine = scriptedEngine({ kind: "completed", text: "too late" });
+  it("keeps a reply that finished just before a stop or a timeout", async () => {
+    const stopped = scriptedEngine({ kind: "completed", text: "made it" });
+    const { store, command, createBot, send } = await boot(stopped.runTurn);
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(stopped, 1);
+    await send(bot, "more");
+    await command({ type: "stop-bot", botId: bot.id });
+    await expectStatus(store, bot, "Completed");
+    expect(store.state().messages.map(({ body }) => body)).toEqual(["hello", "more", "made it"]);
+    expect(pendingWakes()).toBe(0);
+    expect(stopped.turns).toHaveLength(1);
+  });
+
+  it("keeps a reply that finished just before the turn timed out", async () => {
+    const engine = scriptedEngine({ kind: "completed", text: "made it" });
+    const { store, createBot, send } = await boot(engine.runTurn, { turnTimeoutMs: 20 });
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectStatus(store, bot, "Completed");
+    expect(store.state().messages.at(-1)?.body).toBe("made it");
+  });
+
+  it("cancels on stop and drops the pending follow-up", async () => {
+    const engine = scriptedEngine();
     const { store, command, createBot, send } = await boot(engine.runTurn);
     const bot = await createBot();
     await send(bot, "hello");
@@ -934,15 +985,58 @@ describe("reconnecting", () => {
   });
 });
 
+describe("tool activity", () => {
+  it("broadcasts tool names live and keeps them on the reply, in order", async () => {
+    const engine = scriptedEngine();
+    const { store, port, createBot, send } = await boot(engine.runTurn);
+    const client = connect(port);
+    await client.ready;
+    const bot = await createBot();
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.tool("Bash");
+    engine.turns[0]?.tool("Read");
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    expect(store.state().messages.map(({ tools }) => tools)).toEqual([[], ["Bash", "Read"]]);
+    const live = () => client.messages.flatMap((m) => (m.type === "tool" ? [m.name] : []));
+    await vi.waitFor(() => expect(live()).toEqual(["Bash", "Read"]));
+  });
+
+  it("runs the turn on the bot's model", async () => {
+    const engine = scriptedEngine();
+    const { command, createBot, send } = await boot(engine.runTurn);
+    const bot = await createBot();
+    await command({
+      type: "update-bot",
+      botId: bot.id,
+      name: "Ada",
+      personality: "",
+      model: "opus",
+    });
+    await send(bot, "hello");
+    await expectTurns(engine, 1);
+    expect(engine.turns[0]?.model).toBe("opus");
+  });
+});
+
 describe("fake engine", () => {
   const turn = (prompt: string, signal = new AbortController().signal) =>
     fakeRunTurn({
       prompt,
       sessionId: "s",
       resume: false,
-      launch: { botId: "b", name: "Ada", personality: "", engineAccountId: "fake" },
+      launch: {
+        botId: "b",
+        name: "Ada",
+        personality: "",
+        engineAccountId: "fake",
+        model: "sonnet",
+      },
       signal,
       onDelta: () => {},
+      onTool: () => {},
+      permissions: { url: "http://127.0.0.1:9/mcp", token: "unused" },
       onDelivered: () => {},
     });
 

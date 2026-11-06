@@ -7,28 +7,32 @@ import {
   type Bootstrap,
   ClientMessage,
   Command,
+  defaultBotModel,
+  EngineStatus,
   type ProtocolNotice,
   protocolVersion,
   type ServerMessage,
 } from "@beebot/contracts";
 import { type WebSocket, WebSocketServer } from "ws";
 
+import { createApprovals } from "./approvals.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
+import { answerMcp, sendJson } from "./mcp.ts";
 import type { EventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
 
 const maxBodyBytes = 256 * 1024;
+// A `Write` call carries the whole file.
+const maxMcpBodyBytes = 16 * 1024 * 1024;
 
-type Options = Pick<Bootstrap, "port" | "token" | "allowedOrigins" | "fakeEngine"> & {
+type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
+  probeEngine: () => Promise<EngineStatus>;
   runTurn?: RunTurn;
   turnTimeoutMs?: number | undefined;
+  approvalTimeoutMs?: number | undefined;
+  mcpKeepaliveMs?: number | undefined;
 };
-
-function sendJson(response: NodeHttp.ServerResponse, status: number, body: unknown) {
-  response.writeHead(status, { "Content-Type": "application/json" });
-  response.end(JSON.stringify(body));
-}
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
   const text = JSON.stringify(body);
@@ -54,16 +58,16 @@ function parseClientMessage(text: string) {
 }
 
 // Past the cap the stream is still drained: abandoning it would destroy the socket and the answer.
-async function readBody(request: NodeHttp.IncomingMessage) {
+async function readBody(request: NodeHttp.IncomingMessage, maxBytes: number) {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request as AsyncIterable<Buffer>) {
     size += chunk.length;
-    if (size <= maxBodyBytes) {
+    if (size <= maxBytes) {
       chunks.push(chunk);
     }
   }
-  return size <= maxBodyBytes ? Buffer.concat(chunks).toString() : undefined;
+  return size <= maxBytes ? Buffer.concat(chunks).toString() : undefined;
 }
 
 function parseCommand(text: string | undefined) {
@@ -77,11 +81,15 @@ function parseCommand(text: string | undefined) {
 export async function startServer({
   port,
   token,
+  dataDir,
   allowedOrigins,
   fakeEngine = false,
   store,
+  probeEngine,
   runTurn = fakeRunTurn,
   turnTimeoutMs,
+  approvalTimeoutMs,
+  mcpKeepaliveMs,
 }: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -94,11 +102,23 @@ export async function startServer({
   }
 
   store.onEvent((event) => broadcast({ type: "event", event }));
+  const approvals = createApprovals({
+    store,
+    dataDir,
+    timeoutMs: approvalTimeoutMs,
+    onChange: () => {
+      broadcast({ type: "pending-approvals", approvals: approvals.pending() });
+      supervisor.syncClocks();
+    },
+  });
   const supervisor = createSupervisor({
     store,
     runTurn,
+    approvals,
+    permissionsUrl: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
     turnTimeoutMs,
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
+    onTool: (runId, name) => broadcast({ type: "tool", runId, name }),
   });
 
   // Non-browser clients send no Origin; they still need the token.
@@ -153,15 +173,16 @@ export async function startServer({
     const attended = subscribers.size > 0;
     switch (command.type) {
       case "create-bot": {
-        const { name, personality, engineAccountId = "claude" } = command;
+        const { name, personality, engineAccountId = "claude", model = defaultBotModel } = command;
         if (engineAccountId === "fake" && !fakeEngine) {
           return { status: 403, body: { code: "engine_not_allowed" } };
         }
-        return { status: 200, body: store.createBot({ name, personality, engineAccountId }) };
+        const bot = store.createBot({ name, personality, engineAccountId, model });
+        return { status: 200, body: bot };
       }
       case "update-bot": {
-        const { botId, name, personality } = command;
-        const bot = store.updateBot(botId, { name, personality });
+        const { botId, name, personality, model } = command;
+        const bot = store.updateBot(botId, { name, personality, ...(model && { model }) });
         return bot ? { status: 200, body: bot } : notFound;
       }
       case "set-bot-paused": {
@@ -189,6 +210,11 @@ export async function startServer({
         }
         return result === "continued" ? ok : { status: 409, body: { code: result } };
       }
+      case "decide-approval":
+        return approvals.decide(command);
+      case "acknowledge-notice":
+        store.acknowledgeNotice();
+        return ok;
     }
   }
 
@@ -196,7 +222,7 @@ export async function startServer({
     request: NodeHttp.IncomingMessage,
     response: NodeHttp.ServerResponse,
   ) {
-    const command = parseCommand(await readBody(request));
+    const command = parseCommand(await readBody(request, maxBodyBytes));
     if (!command) {
       sendJson(response, 400, { code: "bad_request" });
       return;
@@ -211,10 +237,58 @@ export async function startServer({
     }
   }
 
+  // The CLI is the only caller, so an Origin means a browser is trying its luck.
+  async function handleMcp(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
+    if (request.headers.origin !== undefined) {
+      sendJson(response, 403, { code: "origin_refused" });
+      return;
+    }
+    if (request.method !== "POST") {
+      sendJson(response, 405, { code: "method_not_allowed" });
+      return;
+    }
+    const run = approvals.authenticate(request.headers.authorization?.replace(/^Bearer /, ""));
+    if (!run) {
+      sendJson(response, 401, { code: "unauthorized" });
+      return;
+    }
+    const body = await readBody(request, maxMcpBodyBytes);
+    if (body === undefined) {
+      sendJson(response, 413, { code: "too_large" });
+      return;
+    }
+    await answerMcp(
+      response,
+      body,
+      (args, closed) => approvals.approve(run, args, closed),
+      mcpKeepaliveMs,
+    );
+  }
+
+  async function handleEngine(response: NodeHttp.ServerResponse) {
+    try {
+      const status = EngineStatus.parse(await probeEngine());
+      if (status.pauseReason) {
+        store.pauseReadyBots("claude", status.pauseReason);
+      } else {
+        store.clearEnginePauses("claude");
+      }
+      sendJson(response, 200, status);
+    } catch (error) {
+      console.error(`beebotd: engine check failed: ${(error as Error)?.name}`);
+      sendJson(response, 500, { code: "engine_check_failed" });
+    }
+  }
+
   const server = NodeHttp.createServer((request, response) => {
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
     if (!url) {
       sendJson(response, 400, { code: "bad_request" });
+      return;
+    }
+
+    if (url.pathname === "/mcp") {
+      handleMcp(request, response).catch(() => response.destroy());
       return;
     }
 
@@ -246,6 +320,8 @@ export async function startServer({
         console.error(error);
         sendJson(response, 500, { code: "storage_failed" });
       }
+    } else if (request.method === "GET" && url.pathname === "/engine") {
+      void handleEngine(response);
     } else if (request.method === "POST" && url.pathname === "/commands") {
       handleCommand(request, response).catch(() => response.destroy());
     } else {
@@ -279,6 +355,7 @@ export async function startServer({
         // and joining subscribers.
         try {
           send(client, catchUp(message.afterSeq));
+          send(client, { type: "pending-approvals", approvals: approvals.pending() });
           subscribers.add(client);
         } catch (error) {
           console.error(error);
@@ -300,6 +377,7 @@ export async function startServer({
   return {
     port: (server.address() as AddressInfo).port,
     close: async () => {
+      approvals.close();
       await supervisor.close();
       for (const client of sockets.clients) {
         client.terminate();

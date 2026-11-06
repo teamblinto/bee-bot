@@ -6,7 +6,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import { type ChatState, protocolVersion, ServerMessage } from "@beebot/contracts";
+import {
+  type ChatState,
+  type EngineStatus,
+  protocolVersion,
+  ServerMessage,
+} from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
@@ -17,11 +22,22 @@ const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
 const auth = { Authorization: `Bearer ${token}` };
 
+const healthy: EngineStatus = {
+  cliFound: true,
+  versionOk: true,
+  loggedIn: true,
+  pauseReason: null,
+  testedVersion: "2.1.318",
+};
+
 let dataDir: string;
+let engineStatus: EngineStatus;
+const probeEngine = async () => engineStatus;
 const cleanups: Array<() => Promise<void> | void> = [];
 
 beforeEach(() => {
   dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-server-"));
+  engineStatus = healthy;
 });
 
 afterEach(async () => {
@@ -33,7 +49,14 @@ afterEach(async () => {
 
 async function start(port = 0) {
   const store = openEventStore(dataDir);
-  const server = await startServer({ port, token, allowedOrigins: [appOrigin], store });
+  const server = await startServer({
+    port,
+    token,
+    dataDir,
+    allowedOrigins: [appOrigin],
+    store,
+    probeEngine,
+  });
   let open = true;
   const stop = async () => {
     if (open) {
@@ -86,6 +109,9 @@ async function subscribe(port: number, afterSeq: number) {
   const waiters: Array<(message: ServerMessage) => void> = [];
   socket.on("message", (data) => {
     const message = ServerMessage.parse(JSON.parse(data.toString()));
+    if (message.type === "pending-approvals") {
+      return;
+    }
     const waiter = waiters.shift();
     if (waiter) {
       waiter(message);
@@ -234,13 +260,95 @@ describe("event stream", () => {
   });
 });
 
+describe("engine status", () => {
+  const engine = (base: string) => http(base, "/engine", { headers: auth });
+  const paused: EngineStatus = {
+    cliFound: true,
+    versionOk: true,
+    loggedIn: false,
+    pauseReason: "auth_failed",
+    testedVersion: "2.1.318",
+  };
+
+  it("sits behind the owner token and the Origin check", async () => {
+    const { base } = await start();
+    expect((await http(base, "/engine")).status).toBe(401);
+    const foreign = { ...auth, Origin: "https://evil.example" };
+    expect((await http(base, "/engine", { headers: foreign })).status).toBe(403);
+  });
+
+  it("answers the sanitized status from a fresh probe", async () => {
+    const { base } = await start();
+    expect(await (await engine(base)).json()).toEqual(healthy);
+    engineStatus = paused;
+    expect(await (await engine(base)).json()).toEqual(paused);
+  });
+
+  it("refuses to pass on anything beyond the contract", async () => {
+    const { base } = await start();
+    engineStatus = { ...healthy, email: "owner@example.com" } as EngineStatus;
+    const response = await engine(base);
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain("owner@example.com");
+  });
+
+  it("pauses ready Claude bots, clears engine pauses, and leaves the owner's alone", async () => {
+    const { base, store } = await start();
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "claude" });
+    const fake = store.createBot({ name: "Fay", personality: "", engineAccountId: "fake" });
+    store.setBotPause(ben.id, "owner");
+    const reasons = () => store.state().bots.map(({ pauseReason }) => pauseReason);
+
+    engineStatus = paused;
+    await engine(base);
+    expect(reasons()).toEqual(["auth_failed", "owner", null]);
+
+    engineStatus = healthy;
+    await engine(base);
+    expect(reasons()).toEqual([null, "owner", null]);
+    expect(store.state().bots.map(({ id }) => id)).toEqual([ada.id, ben.id, fake.id]);
+  });
+});
+
+describe("the notice", () => {
+  it("stores the first acknowledgement only, with one event", async () => {
+    const { base, store } = await start();
+    expect(store.state().noticeAcknowledgedAt).toBeNull();
+    await command(base, { type: "acknowledge-notice" });
+    const first = store.state().noticeAcknowledgedAt;
+    expect(first).not.toBeNull();
+    await command(base, { type: "acknowledge-notice" });
+    expect(store.state().noticeAcknowledgedAt).toBe(first);
+    expect(store.eventsAfter(0).map(({ type }) => type)).toEqual(["notice.acknowledged"]);
+  });
+});
+
+describe("bot models", () => {
+  it("defaults to sonnet, and an edit without a model keeps the bot's own", async () => {
+    const { base, store } = await start();
+    await createBot(base);
+    await command(base, { type: "create-bot", name: "Ben", personality: "", model: "opus" });
+    expect(store.state().bots.map(({ model }) => model)).toEqual(["sonnet", "opus"]);
+
+    const ben = store.state().bots[1];
+    const edit = { type: "update-bot", botId: ben?.id, name: "Ben", personality: "" };
+    await command(base, edit);
+    expect(store.state().bots[1]?.model).toBe("opus");
+    await command(base, { ...edit, model: "haiku" });
+    expect(store.state().bots[1]?.model).toBe("haiku");
+  });
+});
+
 describe("storage failure", () => {
   it("answers 500 and keeps serving when a write fails", async () => {
     const store = openEventStore(dataDir);
     const server = await startServer({
       port: 0,
       token,
+      dataDir,
       allowedOrigins: [],
+      probeEngine,
       store: {
         ...store,
         createBot: () => {
@@ -273,6 +381,28 @@ describe("restart", () => {
     expect(store.eventsAfter(0)).toEqual([]);
     await createBot(base);
     expect(store.eventsAfter(0).map((event) => event.seq)).toEqual([2]);
+  });
+
+  it("reads rows from before bots had models and messages had tools", async () => {
+    const seeded = openEventStore(dataDir);
+    const { roomId } = seeded.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    seeded.sendMessage({ id: "m", roomId, body: "hello", attended: false });
+    seeded.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec(`DELETE FROM migrations WHERE name = 'tools_and_approvals';
+      DROP TABLE approvals; DROP TABLE bot_tool_grants; DROP TABLE settings;
+      ALTER TABLE bots DROP COLUMN model; ALTER TABLE messages DROP COLUMN tools;
+      ALTER TABLE audit_log DROP COLUMN tool;
+      UPDATE events SET payload = json_remove(payload, '$.bot.model', '$.message.tools');`);
+    db.close();
+
+    const { store, port } = await start();
+    expect(store.state().bots[0]?.model).toBe("sonnet");
+    expect(store.state().messages[0]?.tools).toEqual([]);
+    expect(store.eventsAfter(0).every(({ seq }) => seq > 2)).toBe(true);
+    const client = await subscribe(port, 1);
+    expect(await client.next()).toMatchObject({ type: "snapshot", state: { bots: [{}] } });
   });
 
   it("keeps events and does not reapply migrations", async () => {

@@ -4,9 +4,12 @@ import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  Approval,
+  type ApprovalTool,
   Bot,
   ChatMessage,
   type ChatState,
+  defaultBotModel,
   EngineAccount,
   type EventBody,
   type PauseReason,
@@ -121,6 +124,36 @@ const migrations = [
       session_started = session_id IS NOT NULL;
     INSERT INTO engine_accounts (id, label) VALUES ('claude', 'Claude');`,
   },
+  {
+    name: "tools_and_approvals",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN model TEXT NOT NULL DEFAULT 'sonnet';
+    ALTER TABLE messages ADD COLUMN tools TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE audit_log ADD COLUMN tool TEXT;
+    CREATE TABLE approvals (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs (id),
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      tool TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'expired')),
+      reason TEXT,
+      created_at TEXT NOT NULL,
+      decided_at TEXT
+    );
+    CREATE INDEX approvals_pending ON approvals (status) WHERE status = 'pending';
+    CREATE TABLE bot_tool_grants (
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      tool TEXT NOT NULL,
+      PRIMARY KEY (bot_id, tool)
+    );
+    CREATE TABLE settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      notice_acknowledged_at TEXT
+    );
+    INSERT INTO settings (id) VALUES (1);`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -137,6 +170,10 @@ const Scope = z.object({
 });
 type Scope = z.infer<typeof Scope>;
 const Input = z.object({ body: z.string(), seq: z.number() });
+const MessageRow = ChatMessage.extend({
+  tools: z.string().transform((text) => z.array(z.string()).parse(JSON.parse(text))),
+});
+const Settings = z.object({ noticeAcknowledgedAt: z.string().nullable() });
 const HistoryRow = ChatMessage.pick({ author: true, body: true });
 const Count = z.object({ count: z.number() });
 const IdRow = z.object({ id: z.string() });
@@ -168,12 +205,15 @@ export type FinishedRun = {
   status: "Completed" | "Failed" | "Cancelled";
   reason: RunReason | null;
   reply?: string;
+  tools?: string[];
   blockedUntil?: string;
   pauseBot?: PauseReason;
 };
 
 const continuationNote =
   "Your previous turn was cut off before it finished. Continue from where you left off.";
+const approvalsInState = 500;
+const enginePauses = ["auth_failed", "cli_missing", "cli_version", "config_dir"];
 const digestCap = 16_000;
 const digestRows = 200;
 const digestHeader =
@@ -291,7 +331,7 @@ export function openEventStore(dataDir: string) {
   }
 
   const botColumns = `b.id, b.name, b.personality, b.status, b.pause_reason AS pauseReason,
-    r.id AS roomId, b.engine_account_id AS engineAccountId`;
+    r.id AS roomId, b.engine_account_id AS engineAccountId, b.model`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id ORDER BY b.rowid`,
   );
@@ -299,14 +339,16 @@ export function openEventStore(dataDir: string) {
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id WHERE b.id = ?`,
   );
   const insertBot = db.prepare(
-    `INSERT INTO bots (id, name, personality, status, engine_account_id, created_at)
-     VALUES (?, ?, ?, 'ready', ?, ?)`,
+    `INSERT INTO bots (id, name, personality, status, engine_account_id, model, created_at)
+     VALUES (?, ?, ?, 'ready', ?, ?, ?)`,
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",
   );
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
-  const updateBotFields = db.prepare("UPDATE bots SET name = ?, personality = ? WHERE id = ?");
+  const updateBotFields = db.prepare(
+    "UPDATE bots SET name = ?, personality = ?, model = COALESCE(?, model) WHERE id = ?",
+  );
   const updateBotStatus = db.prepare("UPDATE bots SET status = ?, pause_reason = ? WHERE id = ?");
 
   const accountColumns = "id, label, blocked_until AS blockedUntil";
@@ -318,12 +360,12 @@ export function openEventStore(dataDir: string) {
      RETURNING ${accountColumns}`,
   );
 
-  const messageColumns = "id, room_id AS roomId, author, body, created_at AS createdAt";
+  const messageColumns = "id, room_id AS roomId, author, body, tools, created_at AS createdAt";
   const selectMessages = db.prepare(`SELECT ${messageColumns} FROM messages ORDER BY event_seq`);
   const selectMessage = db.prepare(`SELECT ${messageColumns} FROM messages WHERE id = ?`);
   const insertMessage = db.prepare(
-    `INSERT INTO messages (id, room_id, author, body, event_seq, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, room_id, author, body, tools, event_seq, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   const selectInput = db.prepare(
     `SELECT body, event_seq AS seq FROM messages
@@ -426,7 +468,35 @@ export function openEventStore(dataDir: string) {
      WHERE status = 'Running' AND boot_id != ? RETURNING ${runColumns}`,
   );
   const insertAudit = db.prepare(
-    "INSERT INTO audit_log (run_id, bot_id, status, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+    `INSERT INTO audit_log (run_id, bot_id, status, reason, tool, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+
+  const approvalColumns = `id, run_id AS runId, bot_id AS botId, tool, digest, status, reason,
+    created_at AS createdAt, decided_at AS decidedAt`;
+  const selectApprovals = db.prepare(
+    `SELECT ${approvalColumns} FROM approvals ORDER BY rowid DESC LIMIT ${approvalsInState}`,
+  );
+  const insertApproval = db.prepare(
+    `INSERT INTO approvals (id, run_id, bot_id, tool, digest, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?) RETURNING ${approvalColumns}`,
+  );
+  const endApproval = db.prepare(
+    `UPDATE approvals SET status = ?, reason = ?, decided_at = ?
+     WHERE id = ? AND status = 'pending' RETURNING ${approvalColumns}`,
+  );
+  const expireApprovals = db.prepare(
+    `UPDATE approvals SET status = 'expired', reason = 'server_restarted', decided_at = ?
+     WHERE status = 'pending' RETURNING ${approvalColumns}`,
+  );
+  const selectGrant = db.prepare("SELECT 1 FROM bot_tool_grants WHERE bot_id = ? AND tool = ?");
+  const insertGrant = db.prepare("INSERT OR IGNORE INTO bot_tool_grants VALUES (?, ?)");
+  const selectSettings = db.prepare(
+    "SELECT notice_acknowledged_at AS noticeAcknowledgedAt FROM settings",
+  );
+  const acknowledge = db.prepare(
+    `UPDATE settings SET notice_acknowledged_at = ? WHERE notice_acknowledged_at IS NULL
+     RETURNING notice_acknowledged_at AS noticeAcknowledgedAt`,
   );
 
   const getBot = (id: string) => {
@@ -459,8 +529,16 @@ export function openEventStore(dataDir: string) {
   }
 
   function recordRun(run: RunRow) {
-    insertAudit.run(run.id, run.botId, run.status, run.reason, new Date().toISOString());
+    insertAudit.run(run.id, run.botId, run.status, run.reason, null, new Date().toISOString());
     emit({ type: "run.changed", run: Run.parse(run) });
+  }
+
+  // The tool name and the decision only: tool input can hold secrets.
+  function recordApproval(row: unknown) {
+    const approval = Approval.parse(row);
+    const { runId, botId, status, reason, tool } = approval;
+    insertAudit.run(runId, botId, status, reason, tool, new Date().toISOString());
+    emit({ type: "approval.changed", approval });
   }
 
   function addWake(scope: Scope, key: string, attended: boolean) {
@@ -503,6 +581,7 @@ export function openEventStore(dataDir: string) {
       message.roomId,
       message.author,
       message.body,
+      JSON.stringify(message.tools),
       seq,
       message.createdAt,
     );
@@ -534,24 +613,35 @@ export function openEventStore(dataDir: string) {
     state: (): ChatState => ({
       bots: z.array(Bot).parse(selectBots.all()),
       accounts: z.array(EngineAccount).parse(selectAccounts.all()),
-      messages: z.array(ChatMessage).parse(selectMessages.all()),
+      messages: z.array(MessageRow).parse(selectMessages.all()),
       runs: z.array(Run).parse(selectLatestRuns.all()),
+      approvals: z.array(Approval).parse(selectApprovals.all()).reverse(),
+      noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
     }),
 
-    createBot: (fields: Pick<Bot, "name" | "personality" | "engineAccountId">) =>
+    createBot: ({
+      name,
+      personality,
+      engineAccountId,
+      model = defaultBotModel,
+    }: Pick<Bot, "name" | "personality" | "engineAccountId"> & Partial<Pick<Bot, "model">>) =>
       transaction(() => {
         const [id, roomId] = [NodeCrypto.randomUUID(), NodeCrypto.randomUUID()];
         const now = new Date().toISOString();
-        insertBot.run(id, fields.name, fields.personality, fields.engineAccountId, now);
+        insertBot.run(id, name, personality, engineAccountId, model, now);
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
         const bot = Bot.parse(selectBot.get(id));
         emit({ type: "bot.changed", bot });
         return bot;
       }),
-    updateBot: (id: string, fields: Pick<Bot, "name" | "personality">) =>
+    // Without a model the bot keeps its own: an edit must not quietly switch it.
+    updateBot: (
+      id: string,
+      fields: Pick<Bot, "name" | "personality"> & Partial<Pick<Bot, "model">>,
+    ) =>
       transaction(() => {
-        updateBotFields.run(fields.name, fields.personality, id);
+        updateBotFields.run(fields.name, fields.personality, fields.model ?? null, id);
         const bot = getBot(id);
         if (bot) {
           emit({ type: "bot.changed", bot });
@@ -569,6 +659,15 @@ export function openEventStore(dataDir: string) {
           }
         }
       }),
+    clearEnginePauses: (engineAccountId: string) =>
+      transaction(() => {
+        for (const bot of z.array(Bot).parse(selectBots.all())) {
+          const paused = bot.pauseReason && enginePauses.includes(bot.pauseReason);
+          if (bot.engineAccountId === engineAccountId && paused) {
+            setPause(bot.id, null);
+          }
+        }
+      }),
 
     // The first message of a burst makes the wake and the rest coalesce into it, so input that
     // lands during a run already has its one durable follow-up, even if the server dies.
@@ -576,7 +675,7 @@ export function openEventStore(dataDir: string) {
       transaction(() => {
         const existing = selectMessage.get(input.id);
         if (existing) {
-          const { roomId, body } = ChatMessage.parse(existing);
+          const { roomId, body } = MessageRow.parse(existing);
           return roomId === input.roomId && body === input.body ? "duplicate" : "conflict";
         }
         const row = selectScopeForRoom.get(input.roomId);
@@ -589,6 +688,7 @@ export function openEventStore(dataDir: string) {
           roomId: input.roomId,
           author: "human",
           body: input.body,
+          tools: [],
           createdAt: new Date().toISOString(),
         });
         if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
@@ -676,13 +776,19 @@ export function openEventStore(dataDir: string) {
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
         recordRun(run);
-        const { name, personality } = Bot.parse(selectBot.get(run.botId));
+        const { name, personality, model } = Bot.parse(selectBot.get(run.botId));
         return {
           id,
           sessionId,
           resume: scope.sessionStarted,
           prompt: turnPrompt(scope, highSeq),
-          launch: { botId: run.botId, name, personality, engineAccountId: run.engineAccountId },
+          launch: {
+            botId: run.botId,
+            name,
+            personality,
+            engineAccountId: run.engineAccountId,
+            model,
+          },
         };
       }),
 
@@ -715,6 +821,7 @@ export function openEventStore(dataDir: string) {
             roomId: getScope(run.scopeId).roomId,
             author: "bot",
             body: finished.reply ?? "",
+            tools: finished.tools ?? [],
             createdAt: now,
           });
           advanceAck.run(run.inputHighSeq, run.scopeId);
@@ -759,6 +866,46 @@ export function openEventStore(dataDir: string) {
         return undefined;
       }),
 
+    openApproval: (fields: Pick<Approval, "runId" | "botId" | "tool" | "digest">) =>
+      transaction(() => {
+        const { runId, botId, tool, digest } = fields;
+        const id = NodeCrypto.randomUUID();
+        const now = new Date().toISOString();
+        const approval = Approval.parse(insertApproval.get(id, runId, botId, tool, digest, now));
+        emit({ type: "approval.changed", approval });
+        return approval;
+      }),
+    closeApproval: (id: string, status: Approval["status"], reason: Approval["reason"]) =>
+      transaction(() => {
+        const row = endApproval.get(status, reason, new Date().toISOString(), id);
+        if (row) {
+          recordApproval(row);
+        }
+      }),
+    // For calls settled without a card.
+    auditTool: (
+      runId: string,
+      botId: string,
+      tool: ApprovalTool,
+      status: "allowed" | "refused",
+      reason: "always" | null,
+    ) => {
+      insertAudit.run(runId, botId, status, reason, tool, new Date().toISOString());
+    },
+    toolGranted: (botId: string, tool: ApprovalTool) => selectGrant.get(botId, tool) !== undefined,
+    grantTool: (botId: string, tool: ApprovalTool) => {
+      insertGrant.run(botId, tool);
+    },
+
+    acknowledgeNotice: () =>
+      transaction(() => {
+        const row = acknowledge.get(new Date().toISOString());
+        if (row) {
+          const acknowledgedAt = z.string().parse(Settings.parse(row).noticeAcknowledgedAt);
+          emit({ type: "notice.acknowledged", acknowledgedAt });
+        }
+      }),
+
     // Restart never creates a wake, and Queued runs are left alone. An interrupted bot's pending
     // wakes are closed: firing one would resend the interrupted input with no human deciding.
     // That input stays unacked, so Continue or the next message carries all of it.
@@ -769,6 +916,8 @@ export function openEventStore(dataDir: string) {
           cancelPendingWakes.run(run.botId);
           recordRun(run);
         }
+        // Their tool calls died with the old process, so no decision can reach them.
+        expireApprovals.all(new Date().toISOString()).forEach(recordApproval);
       }),
 
     close: () => db.close(),

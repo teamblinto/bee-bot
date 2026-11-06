@@ -1,10 +1,12 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import { EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { childEnv, createClaudeRunTurn, probeClaude, turnArgs } from "./claude.ts";
+import { childEnv, createClaudeRunTurn, probeEngine, turnArgs, writeMcpConfig } from "./claude.ts";
 import type { BotLaunch } from "./engine.ts";
 
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
@@ -13,8 +15,10 @@ const launch: BotLaunch = {
   name: "Ada",
   personality: "Terse.",
   engineAccountId: "claude",
+  model: "opus",
 };
 const prompt = "the owner's private question";
+const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };
 
 let dataDir: string;
 let logPath: string;
@@ -39,7 +43,13 @@ function plantEnv(name: string, value: string) {
 
 const fakeCommand = (scenario: string) => [process.execPath, fakeCli, scenario, logPath];
 
-type LogEntry = { pid?: number; args?: string[]; env?: string[]; prompt?: string };
+type LogEntry = {
+  pid?: number;
+  args?: string[];
+  env?: string[];
+  prompt?: string;
+  mcpConfig?: string;
+};
 
 function cliLog(): LogEntry[] {
   return NodeFS.existsSync(logPath)
@@ -64,6 +74,7 @@ function isAlive(pid: number) {
 
 function turn(scenario: string, signal = new AbortController().signal, resume = false) {
   const deltas: string[] = [];
+  const tools: string[] = [];
   let delivered = 0;
   const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir })({
     prompt,
@@ -72,11 +83,13 @@ function turn(scenario: string, signal = new AbortController().signal, resume = 
     launch,
     signal,
     onDelta: (text) => deltas.push(text),
+    onTool: (name) => tools.push(name),
+    permissions,
     onDelivered: () => {
       delivered += 1;
     },
   });
-  return { outcome, deltas, delivered: () => delivered };
+  return { outcome, deltas, tools, delivered: () => delivered };
 }
 
 describe("a turn", () => {
@@ -103,29 +116,98 @@ describe("a turn", () => {
     const persona = NodeFS.readFileSync(personaPath, "utf8");
     expect(persona).toContain("Your name is Ada.");
     expect(persona).toContain("Terse.");
-    expect(persona).toContain("You have no tools");
+    expect(persona).not.toContain("no tools");
 
     NodeFS.writeFileSync(personaPath, "stale");
     await turn("success").outcome;
     expect(NodeFS.readFileSync(personaPath, "utf8")).toContain("Terse.");
   });
 
-  it("passes the prompt on stdin only, with tools off and no banned flag", async () => {
+  it("passes the prompt on stdin only, with no banned flag", async () => {
     await turn("success").outcome;
     const args = spawns()[0]?.args ?? [];
     expect(args.join(" ")).not.toContain(prompt);
     expect(args.join(" ")).not.toMatch(
       /--bare|--safe-mode|--dangerously|bypassPermissions|--permission-mode/,
     );
-    expect(args[args.indexOf("--tools") + 1]).toBe("");
     expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
     expect(args).toContain("--strict-mcp-config");
     expect(args[args.indexOf("--system-prompt-snapshot") + 1]).toBe("off");
   });
 
+  it("runs the bot's model with the six tools behind the permission tool", async () => {
+    await turn("success").outcome;
+    const args = spawns()[0]?.args ?? [];
+    const flag = (name: string) => args[args.indexOf(name) + 1];
+    expect(flag("--model")).toBe("opus");
+    expect(flag("--tools")).toBe("Read,Write,Edit,Glob,Grep,Bash");
+    expect(flag("--permission-prompt-tool")).toBe("mcp__bee__approve");
+    expect(JSON.parse(flag("--settings") ?? "")).toEqual({
+      permissions: { ask: ["Bash", "Read", "Glob", "Grep"] },
+    });
+  });
+
   it("starts a session by ID and continues it with --resume", () => {
-    expect(turnArgs("p", "s", false).slice(-2)).toEqual(["--session-id", "s"]);
-    expect(turnArgs("p", "s", true).slice(-2)).toEqual(["--resume", "s"]);
+    expect(turnArgs("p", "s", false, "sonnet", "c").slice(-2)).toEqual(["--session-id", "s"]);
+    expect(turnArgs("p", "s", true, "sonnet", "c").slice(-2)).toEqual(["--resume", "s"]);
+  });
+
+  it("reports tool starts by name, in order", async () => {
+    const { outcome, tools } = turn("tool-use");
+    expect(await outcome).toEqual({ kind: "completed", text: "noted" });
+    expect(tools).toEqual(["Bash", "Read"]);
+  });
+});
+
+describe("the run token", () => {
+  const consoleMethods = ["log", "info", "warn", "error", "debug"] as const;
+
+  it("reaches the CLI only through a config file that is gone after the turn", async () => {
+    const spies = consoleMethods.map((method) => vi.spyOn(console, method));
+    await turn("success").outcome;
+    const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    vi.restoreAllMocks();
+
+    expect(printed).not.toContain(permissions.token);
+    const { args = [], env = [] } = spawns()[0] ?? {};
+    expect(args.join(" ")).not.toContain(permissions.token);
+    expect(env.join(" ")).not.toContain(permissions.token);
+
+    const config = JSON.parse(cliLog().find(({ mcpConfig }) => mcpConfig)?.mcpConfig ?? "");
+    expect(config).toEqual({
+      mcpServers: {
+        bee: {
+          type: "http",
+          timeout: 900_000,
+          url: permissions.url,
+          headers: { Authorization: `Bearer ${permissions.token}` },
+        },
+      },
+    });
+    const configPath = args[args.indexOf("--mcp-config") + 1] ?? "";
+    expect(NodePath.dirname(configPath)).toBe(NodePath.join(dataDir, "runtime"));
+    expect(NodeFS.existsSync(configPath)).toBe(false);
+  });
+
+  it("fails the turn without starting the CLI when the config can't be written", async () => {
+    NodeFS.writeFileSync(NodePath.join(dataDir, "runtime"), "in the way");
+    await expect(turn("success").outcome).rejects.toThrow();
+    expect(spawns()).toEqual([]);
+  });
+
+  it("is written to a file only the owner can read", async () => {
+    const path = NodePath.join(dataDir, "runtime", "tight.json");
+    await writeMcpConfig(path, permissions.url, permissions.token);
+    if (process.platform === "win32") {
+      const acl = NodeChildProcess.execFileSync("icacls", [path], { encoding: "utf8" });
+      const entries = acl.split("\n").filter((line) => line.includes(":("));
+      expect(entries).toHaveLength(1);
+      expect(acl).toContain(NodeOS.userInfo().username);
+      expect(acl).not.toContain("(I)");
+    } else {
+      expect(NodeFS.statSync(path).mode & 0o777).toBe(0o600);
+      expect(NodeFS.statSync(NodePath.dirname(path)).mode & 0o777).toBe(0o700);
+    }
   });
 });
 
@@ -193,6 +275,8 @@ describe("the credential gate", () => {
       launch,
       signal: new AbortController().signal,
       onDelta: () => {},
+      onTool: () => {},
+      permissions,
       onDelivered: () => {},
     });
     expect(outcome).toEqual({ kind: "auth_failed", pauseReason: "cli_missing" });
@@ -295,25 +379,42 @@ describe("stopping", () => {
   }, 15_000);
 });
 
-describe("the startup probe", () => {
-  it("passes on the tested version and a subscription login", async () => {
-    expect(await probeClaude(fakeCommand("success"), dataDir)).toBeUndefined();
+describe("the engine probe", () => {
+  it("passes on the tested version and a subscription login, and drops the identity", async () => {
+    const status = await probeEngine(fakeCommand("success"), dataDir);
+    expect(status).toEqual({
+      cliFound: true,
+      versionOk: true,
+      loggedIn: true,
+      pauseReason: null,
+      testedVersion: "2.1.318",
+    });
+    expect(EngineStatus.parse(status)).toEqual(status);
   });
 
   it.each([
-    ["gate-version", "cli_version"],
-    ["logged-out-status", "auth_failed"],
-    ["api-key-status", "auth_failed"],
-  ])("%s pauses with %s", async (scenario, reason) => {
-    expect(await probeClaude(fakeCommand(scenario), dataDir)).toBe(reason);
+    ["gate-version", "cli_version", true, false],
+    ["logged-out-status", "auth_failed", true, true],
+    ["api-key-status", "auth_failed", true, true],
+  ])("%s pauses with %s", async (scenario, pauseReason, cliFound, versionOk) => {
+    expect(await probeEngine(fakeCommand(scenario), dataDir)).toMatchObject({
+      pauseReason,
+      cliFound,
+      versionOk,
+      loggedIn: false,
+    });
   });
 
   it("pauses on a missing CLI", async () => {
-    expect(await probeClaude(["beebot-no-such-cli"], dataDir)).toBe("cli_missing");
+    expect(await probeEngine(["beebot-no-such-cli"], dataDir)).toMatchObject({
+      pauseReason: "cli_missing",
+      cliFound: false,
+    });
   });
 
   it("names the cleared config dir", async () => {
     plantEnv("CLAUDE_CONFIG_DIR", "somewhere");
-    expect(await probeClaude(fakeCommand("logged-out-status"), dataDir)).toBe("config_dir");
+    const status = await probeEngine(fakeCommand("logged-out-status"), dataDir);
+    expect(status.pauseReason).toBe("config_dir");
   });
 });
