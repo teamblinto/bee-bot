@@ -202,8 +202,9 @@ describe("the run token", () => {
       const acl = NodeChildProcess.execFileSync("icacls", [path], { encoding: "utf8" });
       const entries = acl.split("\n").filter((line) => line.includes(":("));
       expect(entries).toHaveLength(1);
-      expect(acl).toContain(NodeOS.userInfo().username);
       expect(acl).not.toContain("(I)");
+      // The one entry is the owner's only if the owner can still read the file.
+      expect(NodeFS.readFileSync(path, "utf8")).toContain(permissions.token);
     } else {
       expect(NodeFS.statSync(path).mode & 0o777).toBe(0o600);
       expect(NodeFS.statSync(NodePath.dirname(path)).mode & 0o777).toBe(0o700);

@@ -37,11 +37,22 @@ function openStore(dataDir: string) {
   }
 }
 
+// A crash skips each turn's own cleanup, and these files hold tokens.
+function wipeRuntime(dataDir: string) {
+  try {
+    NodeFS.rmSync(NodePath.join(dataDir, "runtime"), { recursive: true, force: true });
+  } catch (error) {
+    // Only the code: the error's message and path name the owner's files.
+    console.error(
+      `beebotd: could not clear runtime files: ${(error as NodeJS.ErrnoException).code}`,
+    );
+  }
+}
+
 async function boot(bootstrap: Bootstrap) {
   const store = openStore(bootstrap.dataDir);
   const { claudeCommand = ["claude"], dataDir } = bootstrap;
-  // A crash skips each turn's own cleanup, and these files hold tokens.
-  NodeFS.rmSync(NodePath.join(dataDir, "runtime"), { recursive: true, force: true });
+  wipeRuntime(dataDir);
   const claude = createClaudeRunTurn({ command: claudeCommand, dataDir });
   const runTurn: RunTurn = (turn) =>
     turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);

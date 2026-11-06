@@ -475,6 +475,54 @@ describe("headless process", () => {
     expect(code).toBe(0);
   }, 20_000);
 
+  it.runIf(process.platform === "win32")(
+    "boots past a runtime directory it can't wipe, logging only the error code",
+    async () => {
+      const runtime = NodePath.join(dataDir, "runtime");
+      NodeFS.mkdirSync(runtime);
+      // Windows refuses to remove a directory that is another process's working directory.
+      const holder = NodeChildProcess.spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        {
+          cwd: runtime,
+          stdio: "ignore",
+        },
+      );
+      cleanups.push(async () => {
+        holder.kill();
+        await once(holder, "exit");
+      });
+      await once(holder, "spawn");
+
+      const port = await freePort();
+      const child = spawnServer();
+      const bootstrap = {
+        port,
+        token,
+        dataDir,
+        allowedOrigins: [],
+        claudeCommand: ["beebot-no-such-cli"],
+      };
+      child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
+
+      const stderr: string[] = [];
+      for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
+        stderr.push(line);
+        if (line.includes("listening")) {
+          break;
+        }
+      }
+      expect(stderr.join("\n")).toMatch(/could not clear runtime files: E[A-Z]+/);
+      expect(stderr.join("\n")).not.toContain(dataDir);
+
+      child.stdin.end();
+      const [code] = await once(child, "exit");
+      expect(code).toBe(0);
+    },
+    20_000,
+  );
+
   it("pauses Claude bots at startup when the probe fails, with the reason", async () => {
     const seeded = openEventStore(dataDir);
     seeded.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });

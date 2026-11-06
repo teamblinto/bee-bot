@@ -1,7 +1,6 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs/promises";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
@@ -398,12 +397,28 @@ function personaText({ name, personality }: BotLaunch) {
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
+// A bare username can resolve to the computer account when the hostname matches it, and
+// Git Bash can shadow `whoami`, hence the SID and the absolute path.
+async function currentUserSid() {
+  const whoami = NodePath.join(
+    process.env.SystemRoot ?? String.raw`C:\Windows`,
+    "System32",
+    "whoami.exe",
+  );
+  const { stdout } = await execFile(whoami, ["/user", "/fo", "csv", "/nh"], { windowsHide: true });
+  const sid = /"(S-1-[\d-]+)"\s*$/.exec(stdout)?.[1];
+  if (!sid) {
+    throw new Error("whoami did not report a SID");
+  }
+  return sid;
+}
+
 // Created empty and tightened before the content goes in, so the token never sits in a looser file.
 export async function writeMcpConfig(path: string, url: string, token: string) {
   await NodeFS.mkdir(NodePath.dirname(path), { recursive: true, mode: 0o700 });
   await (await NodeFS.open(path, "wx", 0o600)).close();
   if (process.platform === "win32") {
-    const grant = `${NodeOS.userInfo().username}:F`;
+    const grant = `*${await currentUserSid()}:F`;
     await execFile("icacls", [path, "/inheritance:r", "/grant:r", grant], { windowsHide: true });
   }
   const bee = {
