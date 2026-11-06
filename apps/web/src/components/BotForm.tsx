@@ -1,4 +1,5 @@
 import { Bot, defaultBotModel, EngineAccountId } from "@beebot/contracts";
+import { Dices } from "lucide-react";
 import {
   type FormEvent,
   type ReactNode,
@@ -9,7 +10,11 @@ import {
 } from "react";
 
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
+import { Avatar } from "./Avatar";
 import { ModelPicker } from "./ModelPicker";
+import { iconProps } from "./ui";
+
+const randomSeed = () => crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
 
@@ -30,6 +35,7 @@ export function BotForm({
   const [model, setModel] = useState(bot?.model ?? defaultBotModel);
   const [engine, setEngine] = useState<"claude" | "fake">("claude");
   const catalog = useSyncExternalStore(subscribeToConnection, () => getConnectionState().models);
+  const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const saving = useRef(false);
@@ -42,7 +48,7 @@ export function BotForm({
     saving.current = true;
     setBusy(true);
     setError(undefined);
-    const fields = { name, personality, model };
+    const fields = { name, personality, model, avatarSeed };
     const result = await postCommand(
       bot
         ? { type: "update-bot", botId: bot.id, ...fields }
@@ -60,6 +66,19 @@ export function BotForm({
 
   return (
     <form className="flex flex-col gap-3" onSubmit={(event) => void submit(event)}>
+      <div className="flex items-center gap-3">
+        {/* Keyed so each new face replays the pop. */}
+        <Avatar key={avatarSeed} seed={avatarSeed} className="avatar-pop size-20" />
+        <button
+          type="button"
+          aria-label="Shuffle avatar"
+          className="button button-outline"
+          onClick={() => setAvatarSeed(randomSeed())}
+        >
+          <Dices {...iconProps} />
+          Shuffle
+        </button>
+      </div>
       <label className={labelClass}>
         Name
         <input

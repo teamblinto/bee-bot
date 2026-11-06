@@ -10,6 +10,7 @@ import {
   type Bot,
   type ChatState,
   type EngineStatus,
+  maxAvatarSeed,
   protocolVersion,
   ServerMessage,
 } from "@beebot/contracts";
@@ -18,7 +19,7 @@ import { WebSocket } from "ws";
 
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
-import { migrations, openEventStore } from "./store.ts";
+import { migrations, openEventStore, seedFromId } from "./store.ts";
 
 const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
@@ -552,6 +553,58 @@ describe("bot engine settings", () => {
   });
 });
 
+describe("bot avatars", () => {
+  it("picks a seed at creation, and keeps it when an edit doesn't send one", async () => {
+    const { base, store } = await start();
+    await createBot(base);
+    await createBot(base);
+    const [first, second] = store.state().bots;
+    expect(first?.avatarSeed).not.toBe(second?.avatarSeed);
+
+    const edit = { type: "update-bot", botId: first?.id, name: "Ada", personality: "" };
+    await command(base, edit);
+    expect(store.state().bots[0]?.avatarSeed).toBe(first?.avatarSeed);
+    await command(base, { ...edit, avatarSeed: 42 });
+    expect(store.state().bots[0]?.avatarSeed).toBe(42);
+  });
+
+  it("keeps the face the form previewed when creating", async () => {
+    const { base, store } = await start();
+    await command(base, { type: "create-bot", name: "Ada", personality: "", avatarSeed: 9 });
+    expect(store.state().bots[0]?.avatarSeed).toBe(9);
+  });
+
+  it.each([-1, 1.5, 2 ** 32, "7"])("refuses the seed %j", async (avatarSeed) => {
+    const { base, store } = await start();
+    await createBot(base);
+    const botId = store.state().bots[0]?.id;
+    const edit = { type: "update-bot", botId, name: "Ada", personality: "", avatarSeed };
+    expect((await command(base, edit)).status).toBe(400);
+    expect(store.state().bots[0]?.avatarSeed).not.toBe(avatarSeed);
+  });
+
+  it("gives an existing bot a fixed seed from its ID", async () => {
+    const first = await start();
+    await createBot(first.base);
+    const { id } = first.store.state().bots[0] as Bot;
+    await first.stop();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_avatars';
+      ALTER TABLE bots DROP COLUMN avatar_seed;`);
+    db.close();
+
+    const second = await start();
+    expect(second.store.state().bots[0]?.avatarSeed).toBe(seedFromId(id));
+    await second.stop();
+    const third = await start();
+    expect(third.store.state().bots[0]?.avatarSeed).toBe(seedFromId(id));
+    expect(seedFromId(id)).toBeGreaterThanOrEqual(0);
+    expect(seedFromId(id)).toBeLessThanOrEqual(maxAvatarSeed);
+  });
+});
+
 describe("storage failure", () => {
   it("answers 500 and keeps serving when a write fails", async () => {
     const store = openEventStore(dataDir);
@@ -602,7 +655,9 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_engine';
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_avatars';
+      ALTER TABLE bots DROP COLUMN avatar_seed;
+      DELETE FROM migrations WHERE name = 'bot_engine';
       ALTER TABLE bots DROP COLUMN effort; ALTER TABLE bots DROP COLUMN mode;
       ALTER TABLE bots DROP COLUMN access;
       DELETE FROM migrations WHERE name = 'usage_limits';

@@ -147,8 +147,23 @@
 
 @layer components {
   .avatar {
-    background-color: oklch(var(--avatar-background) var(--hue));
     color: oklch(var(--avatar-ink) var(--hue));
+  }
+
+  .avatar-body {
+    fill: oklch(var(--avatar-background) var(--hue));
+  }
+
+  .avatar-accent {
+    fill: oklch(var(--avatar-ink) calc(var(--hue) + 150));
+  }
+
+  .avatar-accent-line {
+    stroke: oklch(var(--avatar-ink) calc(var(--hue) + 150));
+  }
+
+  .avatar-pop {
+    animation: avatar-pop 180ms var(--ease-bee);
   }
 
   .button {
@@ -565,6 +580,13 @@
   .live-activity-focus-counter {
     animation: none;
     will-change: auto;
+  }
+}
+
+@keyframes avatar-pop {
+  from {
+    opacity: 0.4;
+    transform: scale(0.86) rotate(-6deg);
   }
 }
 

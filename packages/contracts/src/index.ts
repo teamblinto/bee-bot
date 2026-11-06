@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 8;
+export const protocolVersion = 9;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -56,6 +56,9 @@ export type ModelCatalog = z.infer<typeof ModelCatalog>;
 
 export const EngineAccountId = z.enum(["claude", "fake"]);
 
+export const maxAvatarSeed = 0xffffffff;
+export const AvatarSeed = z.number().int().min(0).max(maxAvatarSeed);
+
 export const Bot = z.object({
   id: z.string(),
   name: z.string(),
@@ -69,6 +72,7 @@ export const Bot = z.object({
   effort: Effort.nullable(),
   mode: BotMode,
   access: BotAccess,
+  avatarSeed: AvatarSeed,
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -337,6 +341,8 @@ const botFields = {
   name: z.string().trim().min(1).max(80),
   personality: z.string().trim().max(4000),
   model: BotModel.optional(),
+  // Sent so a saved bot keeps the face its form previewed. The server picks one when it's missing.
+  avatarSeed: AvatarSeed.optional(),
 };
 
 export const Command = z.discriminatedUnion("type", [

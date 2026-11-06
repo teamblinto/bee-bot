@@ -256,14 +256,21 @@ export async function startServer({
     const attended = subscribers.size > 0;
     switch (command.type) {
       case "create-bot": {
-        const { name, personality, engineAccountId = "claude", model = defaultBotModel } = command;
+        const { name, personality, engineAccountId = "claude" } = command;
+        const { model = defaultBotModel, avatarSeed } = command;
         if (engineAccountId === "fake" && !fakeEngine) {
           return { status: 403, body: { code: "engine_not_allowed" } };
         }
         if (!modelsOf(engineAccountId).some(({ id }) => id === model)) {
           return { status: 400, body: { code: "unknown_model" } };
         }
-        const bot = store.createBot({ name, personality, engineAccountId, model });
+        const bot = store.createBot({
+          name,
+          personality,
+          engineAccountId,
+          model,
+          ...(avatarSeed !== undefined && { avatarSeed }),
+        });
         return { status: 200, body: bot };
       }
       case "update-bot": {
@@ -277,7 +284,9 @@ export async function startServer({
           return choice.refused;
         }
         const { model, effort } = choice;
-        return { status: 200, body: store.updateBot(botId, { name, personality, model, effort }) };
+        const { avatarSeed = current.avatarSeed } = command;
+        const fields = { name, personality, model, effort, avatarSeed };
+        return { status: 200, body: store.updateBot(botId, fields) };
       }
       case "set-bot-engine": {
         const current = store.getBot(command.botId);

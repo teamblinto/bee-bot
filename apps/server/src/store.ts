@@ -13,6 +13,7 @@ import {
   defaultBotModel,
   EngineAccount,
   type EventBody,
+  maxAvatarSeed,
   MemoryItem,
   memoryRequest,
   type PauseReason,
@@ -35,7 +36,25 @@ import {
   writeMemoryFile,
 } from "./memory.ts";
 
-export const migrations = [
+const fnvPrime = 16777619;
+const fnvOffset = 2166136261;
+
+// FNV-1a, so a bot from before avatars gets the same face on every install of this migration.
+export function seedFromId(id: string) {
+  let hash = fnvOffset;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = Math.imul(hash ^ id.charCodeAt(index), fnvPrime);
+  }
+  return hash >>> 0;
+}
+
+const IdRow = z.object({ id: z.string() });
+
+export const migrations: Array<{
+  name: string;
+  sql: string;
+  backfill?: (db: DatabaseSync) => void;
+}> = [
   {
     name: "create_events",
     sql: `CREATE TABLE events (
@@ -235,6 +254,18 @@ export const migrations = [
     ALTER TABLE bots ADD COLUMN access TEXT NOT NULL DEFAULT 'supervised'
       CHECK (access IN ('supervised', 'auto-edits', 'full'));`,
   },
+  {
+    name: "bot_avatars",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN avatar_seed INTEGER NOT NULL DEFAULT 0;`,
+    backfill: (db: DatabaseSync) => {
+      const update = db.prepare("UPDATE bots SET avatar_seed = ? WHERE id = ?");
+      for (const { id } of z.array(IdRow).parse(db.prepare("SELECT id FROM bots").all())) {
+        update.run(seedFromId(id), id);
+      }
+    },
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -261,7 +292,6 @@ const RowId = z.object({ rowid: z.number() });
 const Tainted = z.object({ tainted: z.number().transform(Boolean) });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
 const Count = z.object({ count: z.number() });
-const IdRow = z.object({ id: z.string() });
 const QueuedRun = z.object({ id: z.string(), botId: z.string(), engineAccountId: z.string() });
 const UsageCheck = z.object({
   accountId: z.string(),
@@ -357,6 +387,7 @@ function migrate(db: DatabaseSync) {
     const record = db.prepare("INSERT INTO migrations (id, name, applied_at) VALUES (?, ?, ?)");
     migrations.slice(applied.length).forEach((migration, index) => {
       db.exec(migration.sql);
+      migration.backfill?.(db);
       record.run(applied.length + index + 1, migration.name, new Date().toISOString());
     });
     db.exec("COMMIT");
@@ -429,7 +460,8 @@ export function openEventStore(dataDir: string) {
   }
 
   const botColumns = `b.id, b.name, b.personality, b.status, b.pause_reason AS pauseReason,
-    r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access`;
+    r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
+    b.avatar_seed AS avatarSeed`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id ORDER BY b.rowid`,
   );
@@ -437,15 +469,16 @@ export function openEventStore(dataDir: string) {
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id WHERE b.id = ?`,
   );
   const insertBot = db.prepare(
-    `INSERT INTO bots (id, name, personality, status, engine_account_id, model, created_at)
-     VALUES (?, ?, ?, 'ready', ?, ?, ?)`,
+    `INSERT INTO bots
+     (id, name, personality, status, engine_account_id, model, avatar_seed, created_at)
+     VALUES (?, ?, ?, 'ready', ?, ?, ?, ?)`,
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",
   );
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
   const updateBotFields = db.prepare(
-    "UPDATE bots SET name = ?, personality = ?, model = ?, effort = ? WHERE id = ?",
+    "UPDATE bots SET name = ?, personality = ?, model = ?, effort = ?, avatar_seed = ? WHERE id = ?",
   );
   const updateBotEngine = db.prepare(
     "UPDATE bots SET model = ?, effort = ?, mode = ?, access = ? WHERE id = ?",
@@ -925,11 +958,13 @@ export function openEventStore(dataDir: string) {
       personality,
       engineAccountId,
       model = defaultBotModel,
-    }: Pick<Bot, "name" | "personality" | "engineAccountId"> & Partial<Pick<Bot, "model">>) =>
+      avatarSeed = NodeCrypto.randomInt(maxAvatarSeed + 1),
+    }: Pick<Bot, "name" | "personality" | "engineAccountId"> &
+      Partial<Pick<Bot, "model" | "avatarSeed">>) =>
       transaction(() => {
         const [id, roomId] = [NodeCrypto.randomUUID(), NodeCrypto.randomUUID()];
         const now = new Date().toISOString();
-        insertBot.run(id, name, personality, engineAccountId, model, now);
+        insertBot.run(id, name, personality, engineAccountId, model, avatarSeed, now);
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
         const bot = Bot.parse(selectBot.get(id));
@@ -937,10 +972,13 @@ export function openEventStore(dataDir: string) {
         return bot;
       }),
     getBot,
-    updateBot: (id: string, fields: Pick<Bot, "name" | "personality" | "model" | "effort">) =>
+    updateBot: (
+      id: string,
+      fields: Pick<Bot, "name" | "personality" | "model" | "effort" | "avatarSeed">,
+    ) =>
       transaction(() => {
-        const { name, personality, model, effort } = fields;
-        updateBotFields.run(name, personality, model, effort, id);
+        const { name, personality, model, effort, avatarSeed } = fields;
+        updateBotFields.run(name, personality, model, effort, avatarSeed, id);
         const bot = getBot(id);
         if (bot) {
           emit({ type: "bot.changed", bot });

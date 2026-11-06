@@ -54,7 +54,7 @@ function BotRow({
       className="flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised"
       onClick={onSelect}
     >
-      <Avatar bot={bot} />
+      <Avatar seed={bot.avatarSeed} />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2">
           <span className="truncate text-name font-medium">{bot.name}</span>
