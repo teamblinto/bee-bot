@@ -93,6 +93,7 @@ const emptyChat: ChatState = {
   runs: [],
   approvals: [],
   memories: [],
+  usageLimits: [],
   noticeAcknowledgedAt: null,
 };
 
@@ -159,6 +160,7 @@ it("reaches the same state by replay as by snapshot", () => {
     runs: [run("Interrupted")],
     approvals: [],
     memories: [],
+    usageLimits: [],
     noticeAcknowledgedAt: null,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });

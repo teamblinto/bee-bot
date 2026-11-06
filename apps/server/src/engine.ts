@@ -5,6 +5,8 @@ import * as NodeTimers from "node:timers/promises";
 import type { BotModel, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
+import type { WindowUpdate } from "./usage.ts";
+
 export type TurnOutcome =
   | { kind: "completed"; text: string }
   | { kind: "failed" }
@@ -40,6 +42,7 @@ export type RunTurn = (turn: {
   onToolStart: (tool: ToolStart) => void;
   onToolEnd: (id: string, failed: boolean) => void;
   onThinking: (state: ThinkingState) => void;
+  onRateLimit: (updates: WindowUpdate[]) => void;
   // Where this run asks for tool approval. The token is a secret: never log it or put it on argv.
   permissions: { url: string; token: string };
   // Call once the prompt reached the engine: from then on it must never be sent again.

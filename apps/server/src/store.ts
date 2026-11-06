@@ -18,10 +18,13 @@ import {
   Run,
   type RunReason,
   ServerEvent,
+  UsageLimits,
+  UsageWindow,
 } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { BotLaunch } from "./engine.ts";
+import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import {
   buildMemory,
   ftsQuery,
@@ -202,6 +205,25 @@ export const migrations = [
     sql: `DELETE FROM events;
     ALTER TABLE messages ADD COLUMN worked_ms INTEGER;`,
   },
+  {
+    name: "usage_limits",
+    sql: `CREATE TABLE usage_checks (
+      account_id TEXT PRIMARY KEY REFERENCES engine_accounts (id),
+      checked_at TEXT NOT NULL,
+      unavailable TEXT
+    );
+    CREATE TABLE usage_windows (
+      account_id TEXT NOT NULL REFERENCES engine_accounts (id),
+      window_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      label TEXT NOT NULL,
+      window_duration_mins INTEGER,
+      used_percent REAL,
+      resets_at TEXT,
+      status TEXT,
+      PRIMARY KEY (account_id, window_id)
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -228,7 +250,17 @@ const RowId = z.object({ rowid: z.number() });
 const Tainted = z.object({ tainted: z.number().transform(Boolean) });
 const Count = z.object({ count: z.number() });
 const IdRow = z.object({ id: z.string() });
-const QueuedRun = z.object({ id: z.string(), botId: z.string() });
+const QueuedRun = z.object({ id: z.string(), botId: z.string(), engineAccountId: z.string() });
+const UsageCheck = z.object({
+  accountId: z.string(),
+  checkedAt: z.string(),
+  unavailable: z
+    .string()
+    .nullable()
+    .transform((text) =>
+      text === null ? null : UsageLimits.shape.unavailable.parse(JSON.parse(text)),
+    ),
+});
 const RunRow = Run.extend({
   scopeId: z.string(),
   wakeId: z.string(),
@@ -490,7 +522,8 @@ export function openEventStore(dataDir: string) {
     "SELECT id FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1",
   );
   const selectQueuedRuns = db.prepare(
-    "SELECT id, bot_id AS botId FROM runs WHERE status = 'Queued' ORDER BY rowid",
+    `SELECT id, bot_id AS botId, engine_account_id AS engineAccountId FROM runs
+     WHERE status = 'Queued' ORDER BY rowid`,
   );
   const selectActiveRun = db.prepare(
     `SELECT ${runColumns} FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
@@ -595,6 +628,65 @@ export function openEventStore(dataDir: string) {
      WHERE messages_fts MATCH ? AND m.room_id IN (SELECT room_id FROM scopes WHERE bot_id = ?)
      ORDER BY f.rank LIMIT ${searchRows}`,
   );
+
+  const selectAccountRunning = db.prepare(
+    "SELECT 1 FROM runs WHERE engine_account_id = ? AND status = 'Running'",
+  );
+  const selectUsageChecks = db.prepare(
+    `SELECT account_id AS accountId, checked_at AS checkedAt, unavailable FROM usage_checks
+     ORDER BY account_id`,
+  );
+  const selectUsageCheck = db.prepare(
+    `SELECT account_id AS accountId, checked_at AS checkedAt, unavailable FROM usage_checks
+     WHERE account_id = ?`,
+  );
+  const selectUsageWindows = db.prepare(
+    `SELECT window_id AS id, kind, label, window_duration_mins AS windowDurationMins,
+       used_percent AS usedPercent, resets_at AS resetsAt, status
+     FROM usage_windows WHERE account_id = ? ORDER BY rowid`,
+  );
+  const upsertUsageCheck = db.prepare(
+    `INSERT INTO usage_checks (account_id, checked_at, unavailable) VALUES (?, ?, ?)
+     ON CONFLICT (account_id) DO UPDATE SET checked_at = excluded.checked_at,
+       unavailable = excluded.unavailable`,
+  );
+  const deleteUsageWindows = db.prepare("DELETE FROM usage_windows WHERE account_id = ?");
+  const insertUsageWindow = db.prepare(
+    `INSERT INTO usage_windows (account_id, window_id, kind, label, window_duration_mins,
+       used_percent, resets_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  const usageWindows = (accountId: string) =>
+    z.array(UsageWindow).parse(selectUsageWindows.all(accountId));
+
+  function usageLimits(accountId: string): UsageLimits {
+    const check = selectUsageCheck.get(accountId);
+    const { checkedAt = null, unavailable = null } = check ? UsageCheck.parse(check) : {};
+    return { accountId, checkedAt, unavailable, windows: usageWindows(accountId) };
+  }
+
+  function writeUsage(
+    accountId: string,
+    windows: UsageWindow[],
+    unavailable: UsageLimits["unavailable"],
+  ) {
+    const stored = unavailable === null ? null : JSON.stringify(unavailable);
+    upsertUsageCheck.run(accountId, new Date().toISOString(), stored);
+    deleteUsageWindows.run(accountId);
+    for (const { id, kind, label, windowDurationMins, usedPercent, resetsAt, status } of windows) {
+      insertUsageWindow.run(
+        accountId,
+        id,
+        kind,
+        label,
+        windowDurationMins,
+        usedPercent,
+        resetsAt,
+        status,
+      );
+    }
+    emit({ type: "usage.changed", limits: usageLimits(accountId) });
+  }
 
   const getBot = (id: string) => {
     const row = selectBot.get(id);
@@ -804,6 +896,10 @@ export function openEventStore(dataDir: string) {
       runs: z.array(Run).parse(selectLatestRuns.all()),
       approvals: z.array(Approval).parse(selectApprovals.all()).reverse(),
       memories: z.array(MemoryItem).parse(selectStateMemory.all()),
+      usageLimits: z
+        .array(UsageCheck)
+        .parse(selectUsageChecks.all())
+        .map(({ accountId }) => usageLimits(accountId)),
       noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
     }),
 
@@ -1205,6 +1301,22 @@ export function openEventStore(dataDir: string) {
         }
         saveMemory({ ...item, status: "forgotten" });
         return true;
+      }),
+
+    accountRunning: (accountId: string) => selectAccountRunning.get(accountId) !== undefined,
+    // A failed check keeps the last good rows: the stream may still move them, and the client shows
+    // the notice in their place.
+    saveUsage: (accountId: string, { windows, unavailable }: UsageProbe) =>
+      transaction(() =>
+        writeUsage(accountId, unavailable ? usageWindows(accountId) : windows, unavailable),
+      ),
+    mergeUsage: (accountId: string, updates: WindowUpdate[]) =>
+      transaction(() => {
+        const current = usageLimits(accountId);
+        const merged = mergeWindows(current.windows, updates);
+        if (JSON.stringify(merged) !== JSON.stringify(current.windows)) {
+          writeUsage(accountId, merged, current.unavailable);
+        }
       }),
 
     acknowledgeNotice: () =>

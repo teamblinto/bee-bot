@@ -1,5 +1,5 @@
 import type { Bot } from "@beebot/contracts";
-import { Hexagon, Plus } from "lucide-react";
+import { Gauge, Hexagon, Plus } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
@@ -82,15 +82,19 @@ function BotRow({
 export function Sidebar({
   connection,
   selectedId,
+  usageOpen,
   open,
   onSelect,
+  onUsage,
   onNewBot,
   onClose,
 }: {
   connection: ConnectionState;
   selectedId: string | undefined;
+  usageOpen: boolean;
   open: boolean;
   onSelect: (botId: string) => void;
+  onUsage: () => void;
   onNewBot: () => void;
   onClose: () => void;
 }) {
@@ -151,6 +155,15 @@ export function Sidebar({
             ))}
           </ul>
         </nav>
+        <button
+          type="button"
+          aria-current={usageOpen}
+          className="mb-1 flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-small text-ink-secondary transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:text-ink"
+          onClick={onUsage}
+        >
+          <Gauge {...iconProps} />
+          Usage
+        </button>
         <p
           role="status"
           data-status={connection.status}

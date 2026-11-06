@@ -8,6 +8,7 @@ import { ChatView } from "../components/ChatView";
 import { Onboarding } from "../components/Onboarding";
 import { Sidebar } from "../components/Sidebar";
 import { iconProps } from "../components/ui";
+import { UsagePage } from "../components/UsagePage";
 import { connectionLines } from "../labels";
 import { getConnectionState, subscribeToConnection } from "../serverConnection";
 
@@ -18,6 +19,7 @@ function Home() {
   const [notNow, setNotNow] = useState(false);
   const [dialog, setDialog] = useState<"new" | Bot>();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
   const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
@@ -58,10 +60,16 @@ function Home() {
     <div className="flex h-dvh bg-background text-ink">
       <Sidebar
         connection={connection}
-        selectedId={selected?.id}
+        selectedId={usageOpen ? undefined : selected?.id}
+        usageOpen={usageOpen}
         open={drawerOpen}
         onSelect={(botId) => {
           setSelectedId(botId);
+          setUsageOpen(false);
+          setDrawerOpen(false);
+        }}
+        onUsage={() => {
+          setUsageOpen(true);
           setDrawerOpen(false);
         }}
         onNewBot={() => {
@@ -71,7 +79,9 @@ function Home() {
         onClose={() => setDrawerOpen(false)}
       />
       <main className="flex min-w-0 flex-1">
-        {selected ? (
+        {usageOpen ? (
+          <UsagePage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
+        ) : selected ? (
           <ChatView
             key={selected.id}
             bot={selected}

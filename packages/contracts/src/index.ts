@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 6;
+export const protocolVersion = 7;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -159,6 +159,75 @@ export function memoryRequest({ status, sourceRef }: Pick<MemoryItem, "status" |
   return (kind === "supersede" || kind === "forget") && targetId ? { kind, targetId } : undefined;
 }
 
+// Rows for the owner's limit bars. `usedPercent` is null when only a status or reset time is known:
+// nothing may turn that into 0.
+export const UsageWindow = z.object({
+  id: z.string(),
+  kind: z.enum(["session", "weekly", "monthly", "other"]),
+  label: z.string(),
+  windowDurationMins: z.number().nullable(),
+  usedPercent: z.number().min(0).max(100).nullable(),
+  resetsAt: z.string().nullable(),
+  status: z.string().nullable(),
+});
+export type UsageWindow = z.infer<typeof UsageWindow>;
+
+export const UsageLimits = z.object({
+  accountId: z.string(),
+  checkedAt: z.string().nullable(),
+  windows: z.array(UsageWindow),
+  unavailable: z
+    .object({ reason: z.enum(["unsupported", "probeFailed"]), message: z.string().nullable() })
+    .nullable(),
+});
+export type UsageLimits = z.infer<typeof UsageLimits>;
+
+export const UsageRefreshResult = z.object({
+  outcome: z.enum(["refreshed", "busy", "throttled", "unavailable"]),
+});
+export type UsageRefreshResult = z.infer<typeof UsageRefreshResult>;
+
+const usageTokens = {
+  input: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  output: z.number(),
+};
+export const UsageTokens = z.object(usageTokens);
+export type UsageTokens = z.infer<typeof UsageTokens>;
+
+// `costUsd` is an API-equivalent estimate, never spend. It leaves out `unpricedTokens`.
+export const UsageRow = z.object({
+  ...usageTokens,
+  costUsd: z.number(),
+  unpricedTokens: z.number(),
+});
+export type UsageRow = z.infer<typeof UsageRow>;
+
+export const usageDays = [1, 7, 30, 90] as const;
+
+export const UsageSummary = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unavailable") }),
+  z.object({
+    status: z.literal("ok"),
+    days: z.number(),
+    generatedAt: z.string(),
+    // The oldest record on disk: transcripts older than this are gone.
+    oldestAt: z.string().nullable(),
+    files: z.number(),
+    skippedLines: z.number(),
+    unreadableFiles: z.number(),
+    duplicatesDropped: z.number(),
+    totals: UsageRow.extend({ sessions: z.number() }),
+    models: z.array(UsageRow.extend({ model: z.string() })),
+    // A null bot is work done outside Bee.
+    bots: z.array(UsageRow.extend({ botId: z.string().nullable() })),
+    // Local days, or ISO hours for a one-day window. Empty buckets included.
+    series: z.array(UsageRow.extend({ start: z.string() })),
+  }),
+]);
+export type UsageSummary = z.infer<typeof UsageSummary>;
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
@@ -168,6 +237,7 @@ export const ChatState = z.object({
   approvals: z.array(Approval),
   // Active and pending only, for every bot.
   memories: z.array(MemoryItem),
+  usageLimits: z.array(UsageLimits),
   noticeAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
@@ -179,6 +249,7 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run.changed"), run: Run }),
   z.object({ type: z.literal("approval.changed"), approval: Approval }),
   z.object({ type: z.literal("memory.changed"), memory: MemoryItem }),
+  z.object({ type: z.literal("usage.changed"), limits: UsageLimits }),
   z.object({ type: z.literal("notice.acknowledged"), acknowledgedAt: z.string() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;

@@ -4,6 +4,7 @@ import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
 import type { RunTurn, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
+import type { WindowUpdate } from "./usage.ts";
 
 const defaultTurnTimeoutMs = 10 * 60_000;
 const tickMs = 1000;
@@ -20,6 +21,10 @@ type Options = {
   onToolStart: (runId: string, tool: ToolStart) => void;
   onToolEnd: (runId: string, id: string, failed: boolean) => void;
   onThinking: (runId: string, state: ThinkingState) => void;
+  onRateLimit?: ((accountId: string, updates: WindowUpdate[]) => void) | undefined;
+  onTurnEnded?: ((accountId: string) => void) | undefined;
+  // A usage check can race a turn's token refresh, so a turn waits for it.
+  accountHeld?: ((accountId: string) => boolean) | undefined;
   turnTimeoutMs?: number | undefined;
 };
 
@@ -83,6 +88,9 @@ export function createSupervisor({
   onToolStart,
   onToolEnd,
   onThinking,
+  onRateLimit,
+  onTurnEnded,
+  accountHeld,
   turnTimeoutMs = defaultTurnTimeoutMs,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
@@ -173,6 +181,14 @@ export function createSupervisor({
           deltas.flush();
           onThinking(run.id, state);
         },
+        onRateLimit: (updates) => {
+          try {
+            onRateLimit?.(run.launch.engineAccountId, updates);
+          } catch (error) {
+            // Usage is a side view: it must never cost the turn.
+            console.error(`beebotd: usage of run ${run.id} was not recorded`, error);
+          }
+        },
         permissions: { url: permissionsUrl(), token },
         onDelivered: () => {
           try {
@@ -211,15 +227,19 @@ export function createSupervisor({
             store.finishRun(run.id, bootId, { status: "Failed", reason: "engine_failed" });
           }
           pump();
+          onTurnEnded?.(run.launch.engineAccountId);
         }
       })
       .catch((error: unknown) => console.error(error));
     turns.set(run.id, { controller, ended, pauseClock, resumeClock });
   }
 
-  function startRun(runId: string, botId: string, now: string) {
+  function startRun(runId: string, botId: string, accountId: string, now: string) {
     if (store.botStatus(botId) === "paused") {
       store.refuseQueuedRun(runId, "bot_paused");
+      return;
+    }
+    if (accountHeld?.(accountId)) {
       return;
     }
     const claimed = store.claimRun(runId, bootId, now);
@@ -245,7 +265,7 @@ export function createSupervisor({
       }
       for (const run of store.queuedRuns()) {
         try {
-          startRun(run.id, run.botId, now);
+          startRun(run.id, run.botId, run.engineAccountId, now);
         } catch (error) {
           console.error(`beebotd: run ${run.id} failed`, error);
         }

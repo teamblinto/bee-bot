@@ -6,8 +6,16 @@ import * as NodePath from "node:path";
 import { EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { childEnv, createClaudeRunTurn, probeEngine, turnArgs, writeMcpConfig } from "./claude.ts";
+import {
+  childEnv,
+  createClaudeRunTurn,
+  probeEngine,
+  probeUsage,
+  turnArgs,
+  writeMcpConfig,
+} from "./claude.ts";
 import { type BotLaunch, type ThinkingState, toolDetail, type ToolStart } from "./engine.ts";
+import type { WindowUpdate } from "./usage.ts";
 
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
 const launch: BotLaunch = {
@@ -50,6 +58,7 @@ type LogEntry = {
   env?: string[];
   prompt?: string;
   mcpConfig?: string;
+  control?: string;
 };
 
 function cliLog(): LogEntry[] {
@@ -85,6 +94,7 @@ function turn(
   const starts: ToolStart[] = [];
   const ends: Array<{ id: string; failed: boolean }> = [];
   const thinking: ThinkingState[] = [];
+  const rateLimits: WindowUpdate[] = [];
   let delivered = 0;
   const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir })({
     prompt,
@@ -102,13 +112,93 @@ function turn(
     },
     onToolEnd: (id, failed) => ends.push({ id, failed }),
     onThinking: (state) => thinking.push(state),
+    onRateLimit: (updates) => rateLimits.push(...updates),
     permissions,
     onDelivered: () => {
       delivered += 1;
     },
   });
-  return { outcome, deltas, tools, starts, ends, thinking, delivered: () => delivered };
+  return { outcome, deltas, tools, starts, ends, thinking, rateLimits, delivered: () => delivered };
 }
+
+describe("probeUsage", () => {
+  const probe = (scenario: string) => probeUsage(fakeCommand(scenario), dataDir);
+
+  it("maps a real reply to rows and drops everything else", async () => {
+    const result = await probe("usage");
+    expect(result).toEqual({
+      unavailable: null,
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          windowDurationMins: 300,
+          usedPercent: 43,
+          resetsAt: "2026-11-06T06:40:00.580Z",
+          status: null,
+        },
+        {
+          id: "seven_day",
+          kind: "weekly",
+          label: "Weekly",
+          windowDurationMins: 10_080,
+          usedPercent: 72,
+          resetsAt: "2026-11-08T08:00:00.580Z",
+          status: null,
+        },
+        {
+          id: "seven_day_fable",
+          kind: "weekly",
+          label: "Weekly · Fable",
+          windowDurationMins: 10_080,
+          usedPercent: 0,
+          resetsAt: "2026-11-08T08:00:00.000Z",
+          status: null,
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/behaviors|subscription|example-agent|breakdown/);
+  });
+
+  it("never writes a user message, and uses the turn's flags with no tools", async () => {
+    await probe("usage");
+    expect(prompts()).toEqual([]);
+    expect(cliLog().flatMap((entry) => entry.control ?? [])).toEqual(["initialize", "get_usage"]);
+    const args = spawns()[0]?.args ?? [];
+    expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
+    expect(args[args.indexOf("--tools") + 1]).toBe("");
+    expect(args).toContain("--strict-mcp-config");
+  });
+
+  it("is unavailable on a changed shape, an error or a reply with no limits", async () => {
+    expect(await probe("usage-shape")).toMatchObject({ unavailable: { reason: "probeFailed" } });
+    expect(await probe("usage-error")).toMatchObject({ unavailable: { reason: "probeFailed" } });
+    expect(await probe("usage-none")).toMatchObject({ unavailable: { reason: "unsupported" } });
+  });
+
+  it("applies the turn's gate before asking", async () => {
+    expect(await probe("gate-version")).toMatchObject({ unavailable: { reason: "probeFailed" } });
+    expect(await probe("gate-api-key")).toMatchObject({ unavailable: { reason: "unsupported" } });
+    expect(cliLog().flatMap((entry) => entry.control ?? [])).not.toContain("get_usage");
+  });
+
+  it("gives up and kills the CLI by PID on a timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = probe("usage-silent");
+      await vi.waitFor(() =>
+        expect(cliLog().flatMap((e) => e.control ?? [])).toContain("get_usage"),
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(await pending).toMatchObject({ unavailable: { reason: "probeFailed" } });
+    } finally {
+      vi.useRealTimers();
+    }
+    const pid = spawns()[0]?.pid ?? 0;
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false));
+  });
+});
 
 describe("toolDetail", () => {
   const cwd = NodePath.join("data", "workspace");
@@ -169,6 +259,25 @@ describe("a turn", () => {
     expect(ends).toEqual([
       { id: "toolu_1", failed: true },
       { id: "toolu_2", failed: false },
+    ]);
+  });
+
+  it("reads limit rows from the stream's 0-1 values, and keeps status without one", async () => {
+    const { outcome, rateLimits } = turn("thinking");
+    await outcome;
+    expect(rateLimits).toEqual([
+      {
+        id: "five_hour",
+        usedPercent: null,
+        resetsAt: "2026-11-05T21:30:00.000Z",
+        status: "allowed",
+      },
+    ]);
+    const unified = turn("rate-unified");
+    await unified.outcome;
+    expect(unified.rateLimits.map(({ id, usedPercent }) => [id, usedPercent])).toEqual([
+      ["five_hour", 43],
+      ["seven_day", 71],
     ]);
   });
 
@@ -368,6 +477,7 @@ describe("the credential gate", () => {
       onToolStart: () => {},
       onToolEnd: () => {},
       onThinking: () => {},
+      onRateLimit: () => {},
       permissions,
       onDelivered: () => {},
     });

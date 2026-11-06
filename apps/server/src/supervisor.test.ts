@@ -1188,6 +1188,7 @@ describe("fake engine", () => {
       onToolStart: () => {},
       onToolEnd: () => {},
       onThinking: () => {},
+      onRateLimit: () => {},
       permissions: { url: "http://127.0.0.1:9/mcp", token: "unused" },
       onDelivered: () => {},
     });

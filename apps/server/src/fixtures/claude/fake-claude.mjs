@@ -23,6 +23,12 @@ function withAccount(account, version = passingInit.response.response.claude_cod
   return { ...passingInit, response: { ...passingInit.response, response } };
 }
 
+const usageReply = fixture("usage.ndjson")[0];
+const withUsage = (response) => ({
+  type: "control_response",
+  response: { subtype: "success", request_id: "usage-1", response },
+});
+
 const subscriber = passingInit.response.response.account;
 const loggedIn = {
   loggedIn: true,
@@ -72,6 +78,32 @@ const scenarios = {
       ...replay("success.ndjson"),
     ],
   },
+  "rate-unified": {
+    frames: () => [
+      rateLimit({
+        status: "allowed",
+        resetsAt: 1793947200,
+        rateLimitType: "five_hour",
+        unifiedWindows: {
+          five_hour: { utilization: 0.43, resetsAt: 1793947200, status: "allowed" },
+          seven_day: { utilization: 0.71, resetsAt: 1794124800, status: "allowed" },
+        },
+      }),
+      ...replay("success.ndjson").filter(({ type }) => type !== "rate_limit_event"),
+    ],
+  },
+  usage: { usage: () => usageReply },
+  "usage-shape": {
+    usage: () => withUsage({ rate_limits_available: true, rate_limits: { five_hour: "soon" } }),
+  },
+  "usage-error": {
+    usage: () => ({
+      type: "control_response",
+      response: { subtype: "error", request_id: "usage-1", error: "nope" },
+    }),
+  },
+  "usage-none": { usage: () => withUsage({ rate_limits_available: false, rate_limits: null }) },
+  "usage-silent": { usage: () => undefined, hang: true },
   "thought-text": { frames: () => [...thoughtBlock("Weighing it"), ...replay("success.ndjson")] },
   "login-lost": { frames: () => fixture("logged-out.ndjson").slice(1), exit: 1 },
   "status-401": { frames: () => [resultFrame({ api_error_status: 401 })], exit: 1 },
@@ -184,9 +216,15 @@ if (early === "no_conversation") {
   NodeReadline.createInterface({ input: process.stdin }).on("line", (line) => {
     const frame = JSON.parse(line);
     if (frame.type === "control_request") {
-      const init = scenario.init ? scenario.init() : passingInit;
-      if (init) {
-        process.stdout.write(`${JSON.stringify(init)}\n`);
+      log({ control: frame.request.subtype });
+      const reply =
+        frame.request.subtype === "get_usage"
+          ? scenario.usage?.()
+          : scenario.init
+            ? scenario.init()
+            : passingInit;
+      if (reply) {
+        process.stdout.write(`${JSON.stringify(reply)}\n`);
       }
     } else if (frame.type === "user") {
       log({ prompt: frame.message.content[0].text });

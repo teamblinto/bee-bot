@@ -12,5 +12,8 @@ files:
     to: server
   - from: ../web/dist
     to: web
+extraResources:
+  - from: ../../THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
 win:
   target: nsis

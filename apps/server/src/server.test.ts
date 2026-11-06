@@ -485,7 +485,9 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'run_timing';
+    db.exec(`DELETE FROM migrations WHERE name = 'usage_limits';
+      DROP TABLE usage_checks; DROP TABLE usage_windows;
+      DELETE FROM migrations WHERE name = 'run_timing';
       ALTER TABLE messages DROP COLUMN worked_ms;
       DELETE FROM migrations WHERE name = 'bot_memory';
       DROP TRIGGER messages_fts_insert; DROP TRIGGER messages_fts_delete;

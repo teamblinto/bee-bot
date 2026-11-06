@@ -16,6 +16,14 @@ import {
   type TurnOutcome,
   workspacePath,
 } from "./engine.ts";
+import {
+  claudeRateLimitEventToUpdate,
+  claudeUsageResponseToLimits,
+  unavailableProbe,
+  type UsageProbe,
+  UsageReply,
+  type WindowUpdate,
+} from "./usage.ts";
 
 export const testedClaudeVersion = "2.1.318";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
@@ -42,11 +50,18 @@ const closeGraceMs = 1000;
 const maxApiRetries = 5;
 const defaultLimitMs = 5 * 60_000;
 const stderrTailChars = 4096;
+const usageTimeoutMs = 15_000;
 
 const initializeLine = `${JSON.stringify({
   type: "control_request",
   request_id: "init-1",
   request: { subtype: "initialize" },
+})}\n`;
+
+const usageLine = `${JSON.stringify({
+  type: "control_request",
+  request_id: "usage-1",
+  request: { subtype: "get_usage" },
 })}\n`;
 
 const clearedEnv =
@@ -142,6 +157,9 @@ const Frame = z.object({
       resetsAt: loose,
       overageStatus: loose,
       isUsingOverage: loose,
+      rateLimitType: loose,
+      utilization: loose,
+      unifiedWindows: loose,
     })
     .optional(),
   response: z
@@ -253,6 +271,7 @@ type Attempt = {
   onToolStart: (tool: ToolStart) => void;
   onToolEnd: (id: string, failed: boolean) => void;
   onThinking: (state: ThinkingState) => void;
+  onRateLimit: (updates: WindowUpdate[]) => void;
   onDelivered: () => void;
 };
 
@@ -266,6 +285,7 @@ function runProcess({
   onToolStart,
   onToolEnd,
   onThinking,
+  onRateLimit,
   onDelivered,
 }: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
@@ -408,6 +428,9 @@ function runProcess({
       }
       seen.apiStatus = frame.api_error_status ?? seen.apiStatus;
       seen.rateLimit = frame.rate_limit_info ?? seen.rateLimit;
+      if (frame.rate_limit_info) {
+        onRateLimit(claudeRateLimitEventToUpdate(frame.rate_limit_info));
+      }
       if (frame.type === "control_response") {
         const ended = stopping || seen.result !== undefined;
         if (gate === "pending" && !ended && frame.response?.request_id === "init-1") {
@@ -528,6 +551,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     onToolStart,
     onToolEnd,
     onThinking,
+    onRateLimit,
     onDelivered,
     permissions,
   }) => {
@@ -549,6 +573,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
         onToolStart,
         onToolEnd,
         onThinking,
+        onRateLimit,
         onDelivered,
       });
     if (signal.aborted) {
@@ -564,6 +589,111 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
       await NodeFS.rm(configPath, { force: true }).catch(() => {});
     }
   };
+}
+
+const usageArgs = [
+  "-p",
+  "--output-format",
+  "stream-json",
+  "--input-format",
+  "stream-json",
+  "--verbose",
+  "--setting-sources",
+  settingSources,
+  "--strict-mcp-config",
+  "--tools",
+  "",
+];
+
+const UsageFrame = z.object({
+  type: z.literal("control_response"),
+  response: z.object({
+    request_id: z.literal("usage-1"),
+    subtype: z.literal("success"),
+    response: UsageReply,
+  }),
+});
+
+function parseUsageFrame(line: string) {
+  try {
+    return UsageFrame.safeParse(JSON.parse(line)).data;
+  } catch {
+    return undefined;
+  }
+}
+
+// Undocumented, so it runs behind ruling R29's guards. The CLI makes the call under its own login:
+// this asks it and nothing else, and it never sends a user message, so no session is opened.
+export function probeUsage(command: readonly string[], cwd: string) {
+  return new Promise<UsageProbe>((resolve) => {
+    const [file = "", ...prefix] = command;
+    const child = NodeChildProcess.spawn(file, [...prefix, ...usageArgs], {
+      cwd,
+      env: childEnv(),
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+    let stdout = "";
+    let result: UsageProbe | undefined;
+    let grace: NodeJS.Timeout | undefined;
+
+    function settle() {
+      clearTimeout(timeout);
+      clearTimeout(grace);
+      resolve(result ?? unavailableProbe("probeFailed"));
+    }
+
+    // Resolves only once the process is gone: until then it can still refresh the login, and the
+    // supervisor holds the account's next turn for as long as this is pending.
+    function finish(reply: UsageProbe) {
+      if (result) {
+        return;
+      }
+      result = reply;
+      clearTimeout(timeout);
+      child.stdin.end();
+      grace = setTimeout(() => {
+        if (child.pid !== undefined) {
+          killTree(child.pid);
+        }
+        settle();
+      }, closeGraceMs);
+    }
+
+    const timeout = setTimeout(() => finish(unavailableProbe("probeFailed")), usageTimeoutMs);
+
+    function onLine(line: string) {
+      const frame = line.trim() ? parseFrame(line) : undefined;
+      if (frame?.type !== "control_response") {
+        return;
+      }
+      if (frame.response?.request_id === "init-1") {
+        const rejection = gateRejection(frame);
+        if (rejection === "cli_version") {
+          finish(unavailableProbe("probeFailed", "This Claude Code version is untested."));
+        } else if (rejection) {
+          finish(unavailableProbe("unsupported"));
+        } else {
+          child.stdin.write(usageLine);
+        }
+      } else if (frame.response?.request_id === "usage-1") {
+        const reply = parseUsageFrame(line)?.response.response;
+        finish(reply ? claudeUsageResponseToLimits(reply) : unavailableProbe("probeFailed"));
+      }
+    }
+
+    child.once("error", settle);
+    child.once("exit", settle);
+    child.stdin.on("error", () => {});
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      const lines = (stdout + chunk).split("\n");
+      stdout = lines.pop() ?? "";
+      lines.forEach(onLine);
+    });
+    child.stdin.write(initializeLine);
+  });
 }
 
 const AuthStatus = z.object({

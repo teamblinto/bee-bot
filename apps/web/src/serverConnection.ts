@@ -8,6 +8,8 @@ import {
   type Run,
   type ServerEvent,
   ServerMessage,
+  UsageRefreshResult,
+  UsageSummary,
 } from "@beebot/contracts";
 
 const reconnectDelayMs = 1000;
@@ -104,6 +106,11 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
           ? upsert(chat.memories, memory)
           : chat.memories.filter(({ id }) => id !== memory.id);
       return { ...state, chat: { ...chat, memories } };
+    }
+    case "usage.changed": {
+      const { limits } = event;
+      const others = chat.usageLimits.filter(({ accountId }) => accountId !== limits.accountId);
+      return { ...state, chat: { ...chat, usageLimits: [...others, limits] } };
     }
     case "notice.acknowledged":
       return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
@@ -212,6 +219,7 @@ let state: ConnectionState = {
     runs: [],
     approvals: [],
     memories: [],
+    usageLimits: [],
     noticeAcknowledgedAt: null,
   },
   drafts: {},
@@ -271,6 +279,38 @@ async function fetchEngine() {
     return response.ok ? EngineStatus.safeParse(await response.json()).data : undefined;
   } catch {
     return undefined;
+  }
+}
+
+export async function fetchUsage(days: number): Promise<UsageSummary> {
+  try {
+    const url = endpoint("/usage");
+    url.searchParams.set("days", String(days));
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    return UsageSummary.safeParse(await response.json()).data ?? { status: "unavailable" };
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+const refreshNotes = {
+  refreshed: undefined,
+  busy: "A bot is running, so these update from its turn.",
+  throttled: "Checked less than a minute ago.",
+  unavailable: undefined,
+};
+
+// The rows themselves arrive as an event. What comes back is only why nothing may have changed.
+export async function refreshLimits() {
+  try {
+    const response = await fetch(endpoint("/usage/limits"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const result = UsageRefreshResult.safeParse(await response.json()).data;
+    return result ? refreshNotes[result.outcome] : "Could not read limits.";
+  } catch {
+    return "Can't reach the Bee Bot server. Try again in a moment.";
   }
 }
 

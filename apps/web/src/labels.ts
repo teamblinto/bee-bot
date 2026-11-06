@@ -9,6 +9,8 @@ import {
   type MemoryType,
   type Run,
   type RunReason,
+  type UsageLimits,
+  type UsageRow,
 } from "@beebot/contracts";
 
 import type { LiveTool } from "./serverConnection";
@@ -202,6 +204,70 @@ export function liveStatusLine(thinking: boolean, tools: LiveTool[], replying: b
     return "Thinking";
   }
   return replying ? "Writing a reply" : "";
+}
+
+// Null when bars can be shown. The rows behind a failed check stay stored, but they are stale.
+export function limitsNotice({ unavailable, windows }: UsageLimits) {
+  if (unavailable?.message) {
+    return unavailable.message;
+  }
+  if (unavailable?.reason === "unsupported") {
+    return "This account has no subscription limits.";
+  }
+  if (unavailable?.reason === "probeFailed") {
+    return "Could not read limits.";
+  }
+  return windows.length === 0 ? "No limits reported." : null;
+}
+
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+
+export const formatUsd = (value: number) => usd.format(value);
+export const formatCount = (value: number) => integer.format(Math.round(value));
+
+function trimmed(value: number) {
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return value.toFixed(digits).replace(/\.0+$/, "");
+}
+
+export function formatTokens(value: number) {
+  if (value >= 1e9) {
+    return `${trimmed(value / 1e9)}B`;
+  }
+  if (value >= 1e6) {
+    return `${trimmed(value / 1e6)}M`;
+  }
+  return value >= 1e3 ? `${trimmed(value / 1e3)}K` : formatCount(value);
+}
+
+export function formatPercent(share: number, digits = 1) {
+  const percent = share * 100;
+  const smallest = 10 ** -digits;
+  return percent > 0 && percent < smallest
+    ? `<${smallest.toFixed(digits)}%`
+    : `${percent.toFixed(digits)}%`;
+}
+
+export const totalTokens = (row: UsageRow) =>
+  row.input + row.cacheRead + row.cacheWrite + row.output;
+
+export const usageRowValue = (row: UsageRow, metric: "tokens" | "cost") =>
+  metric === "tokens" ? totalTokens(row) : row.costUsd;
+
+// Null without input. Cache writes count as misses: that input was fully processed.
+export function cacheHitRate(row: UsageRow) {
+  const input = row.input + row.cacheRead + row.cacheWrite;
+  return input === 0 ? null : row.cacheRead / input;
+}
+
+// A local day, or an ISO hour for the one-day window.
+export function seriesLabel(start: string) {
+  if (start.includes("T")) {
+    return new Date(start).toLocaleTimeString([], { hour: "numeric" });
+  }
+  const [year = 0, month = 1, day = 1] = start.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 export const memoryNotice =

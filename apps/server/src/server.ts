@@ -1,6 +1,8 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import type { Duplex } from "node:stream";
 
 import {
@@ -12,15 +14,23 @@ import {
   type ProtocolNotice,
   protocolVersion,
   type ServerMessage,
+  usageDays,
+  type UsageRefreshResult,
 } from "@beebot/contracts";
 import { type WebSocket, WebSocketServer } from "ws";
 
 import { createApprovals } from "./approvals.ts";
-import { fakeRunTurn, type RunTurn } from "./engine.ts";
+import { fakeRunTurn, type RunTurn, workspacePath } from "./engine.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import type { EventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
+import {
+  createLimitRefresher,
+  createUsageHistory,
+  projectFolder,
+  type UsageProbe,
+} from "./usage.ts";
 
 const maxBodyBytes = 256 * 1024;
 // A `Write` call carries the whole file.
@@ -30,6 +40,10 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   store: EventStore;
   probeEngine: () => Promise<EngineStatus>;
   runTurn?: RunTurn;
+  probeUsage?: (() => Promise<UsageProbe>) | undefined;
+  // Where Claude Code keeps its transcripts.
+  projectsDir?: string | undefined;
+  usageRefreshGapMs?: number | undefined;
   turnTimeoutMs?: number | undefined;
   approvalTimeoutMs?: number | undefined;
   mcpKeepaliveMs?: number | undefined;
@@ -79,6 +93,10 @@ function parseCommand(text: string | undefined) {
   }
 }
 
+function logUsageFailure(error: unknown) {
+  console.error(`beebotd: usage check failed: ${(error as Error)?.name}`);
+}
+
 export async function startServer({
   port,
   token,
@@ -88,6 +106,9 @@ export async function startServer({
   store,
   probeEngine,
   runTurn = fakeRunTurn,
+  probeUsage,
+  projectsDir = NodePath.join(NodeOS.homedir(), ".claude", "projects"),
+  usageRefreshGapMs,
   turnTimeoutMs,
   approvalTimeoutMs,
   mcpKeepaliveMs,
@@ -125,7 +146,17 @@ export async function startServer({
       broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
     onToolEnd: (runId, toolId, failed) => broadcast({ type: "tool-end", runId, toolId, failed }),
     onThinking: (runId, { active, text }) => broadcast({ type: "thinking", runId, active, text }),
+    onRateLimit: (accountId, updates) => store.mergeUsage(accountId, updates),
+    onTurnEnded: (accountId) => void limits.refresh(accountId).catch(logUsageFailure),
+    accountHeld: (accountId) => limits.isProbing(accountId),
   });
+  const limits = createLimitRefresher({
+    store,
+    probe: probeUsage,
+    minGapMs: usageRefreshGapMs,
+    onSettled: () => supervisor.pump(),
+  });
+  const history = createUsageHistory(projectsDir);
 
   // Non-browser clients send no Origin; they still need the token.
   const originAllowed = (origin: string | undefined) =>
@@ -296,6 +327,23 @@ export async function startServer({
     }
   }
 
+  async function handleUsage(url: URL, response: NodeHttp.ServerResponse) {
+    const days = Number(url.searchParams.get("days"));
+    if (!usageDays.some((allowed) => allowed === days)) {
+      sendJson(response, 400, { code: "bad_request" });
+      return;
+    }
+    const folders = store
+      .botIds()
+      .map((id): [string, string] => [projectFolder(workspacePath(dataDir, id)), id]);
+    sendJson(response, 200, await history.summary(days, new Map(folders)));
+  }
+
+  async function handleRefreshLimits(response: NodeHttp.ServerResponse) {
+    const outcome = await limits.refresh("claude");
+    sendJson(response, 200, { outcome } satisfies UsageRefreshResult);
+  }
+
   const server = NodeHttp.createServer((request, response) => {
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
     if (!url) {
@@ -338,6 +386,13 @@ export async function startServer({
       }
     } else if (request.method === "GET" && url.pathname === "/engine") {
       void handleEngine(response);
+    } else if (request.method === "GET" && url.pathname === "/usage") {
+      handleUsage(url, response).catch(() => sendJson(response, 200, { status: "unavailable" }));
+    } else if (request.method === "POST" && url.pathname === "/usage/limits") {
+      handleRefreshLimits(response).catch((error: unknown) => {
+        logUsageFailure(error);
+        sendJson(response, 500, { code: "storage_failed" });
+      });
     } else if (request.method === "POST" && url.pathname === "/commands") {
       handleCommand(request, response).catch(() => response.destroy());
     } else {

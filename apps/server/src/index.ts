@@ -4,7 +4,7 @@ import * as NodeReadline from "node:readline";
 
 import { Bootstrap, noRestartExitCodes } from "@beebot/contracts";
 
-import { createClaudeRunTurn, probeEngine } from "./claude.ts";
+import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -57,7 +57,13 @@ async function boot(bootstrap: Bootstrap) {
   const runTurn: RunTurn = (turn) =>
     turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
   const probe = () => probeEngine(claudeCommand, dataDir);
-  const server = await startServer({ ...bootstrap, store, runTurn, probeEngine: probe });
+  const server = await startServer({
+    ...bootstrap,
+    store,
+    runTurn,
+    probeEngine: probe,
+    probeUsage: () => probeUsage(claudeCommand, dataDir),
+  });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe();
   if (pauseReason) {
