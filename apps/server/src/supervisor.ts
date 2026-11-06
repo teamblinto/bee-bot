@@ -135,6 +135,7 @@ export function createSupervisor({
     const { attended, launch } = run;
     const plan = launch.mode === "plan";
     const token = approvals.openRun(run.id, launch.botId, { attended, plan });
+    const gate = approvals.authenticate(token);
     const tools: string[] = [];
     const seenTools = new Set<string>();
     const deltas = batchDeltas((text) => onDelta(run.id, text));
@@ -202,6 +203,11 @@ export function createSupervisor({
             console.error(`beebotd: delivery of run ${run.id} was not recorded`, error);
           }
         },
+        onSessionId: (sessionId) => store.setSessionId(run.id, sessionId),
+        approve: (tool, input) =>
+          gate
+            ? approvals.approve(gate, { tool_name: tool, input }, controller.signal)
+            : Promise.resolve({ behavior: "deny", message: "Refused: this run has ended." }),
       });
     const turn = (async () => {
       const outcome = await attempt(run.prompt, run.sessionId, run.resume);

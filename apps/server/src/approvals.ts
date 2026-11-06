@@ -48,10 +48,13 @@ export const inputDigest = (tool: ApprovalTool, input: Record<string, unknown>) 
 // Exactly what the model sent: the owner is approving this text.
 function detailText(
   tool: ApprovalTool,
-  { command, file_path, pattern, path, glob }: Record<string, unknown>,
+  { command, file_path, pattern, path, glob, paths }: Record<string, unknown>,
 ) {
   if (tool === "Bash") {
     return typeof command === "string" ? command : undefined;
+  }
+  if (tool === "Patch") {
+    return Array.isArray(paths) ? paths.join(", ") : undefined;
   }
   if (tool === "Glob" || tool === "Grep") {
     if (typeof pattern !== "string") {
@@ -64,13 +67,13 @@ function detailText(
 }
 
 // A cut at a line end must leave something to read, or the card would look like an empty write.
-function capped(text: string) {
-  if (text.length <= maxPreviewChars) {
+function capped(text: string, maxChars = maxPreviewChars) {
+  if (text.length <= maxChars) {
     return text;
   }
-  const lineEnd = Math.max(text.lastIndexOf("\n", maxPreviewChars), 0);
+  const lineEnd = Math.max(text.lastIndexOf("\n", maxChars), 0);
   const lines = text.slice(0, lineEnd).replace(/\r$/, "");
-  return lines.trim() ? lines : text.slice(0, maxPreviewChars).replace(/[\ud800-\udbff]$/, "");
+  return lines.trim() ? lines : text.slice(0, maxChars).replace(/[\ud800-\udbff]$/, "");
 }
 
 function preview(
@@ -91,11 +94,58 @@ function preview(
   };
 }
 
+export const patchFileHeader = "=== ";
+
+// `diff` is one header line per file, then that file's lines, each starting with +, - or context.
+function patchPreview(paths: unknown, diff: unknown): ApprovalChange | undefined {
+  if (typeof diff !== "string" || !Array.isArray(paths)) {
+    return undefined;
+  }
+  const parsed: Array<{ path: string; removed: string[]; added: string[] }> = [];
+  for (const line of diff.split("\n")) {
+    if (line.startsWith(patchFileHeader)) {
+      parsed.push({ path: line.slice(patchFileHeader.length), removed: [], added: [] });
+    } else if (line.startsWith("-")) {
+      parsed.at(-1)?.removed.push(line.slice(1));
+    } else if (line.startsWith("+")) {
+      parsed.at(-1)?.added.push(line.slice(1));
+    }
+  }
+  if (parsed.length === 0) {
+    return undefined;
+  }
+  let room = maxPreviewChars;
+  let hiddenChars = 0;
+  const take = (lines: string[]) => {
+    const text = lines.join("\n");
+    const shown = capped(text, room);
+    room -= shown.length;
+    hiddenChars += text.length - shown.length;
+    return shown;
+  };
+  const files = parsed.map(({ path, removed, added }) => ({
+    path,
+    removed: take(removed),
+    added: take(added),
+  }));
+  return {
+    action: "patch",
+    removed: null,
+    added: "",
+    hiddenChars,
+    replaceAll: false,
+    files,
+  } as const;
+}
+
 // Undefined when the call can't be shown, so it can't be approved. Null for a tool with no change.
 function proposedChange(
   tool: ApprovalTool,
-  { content, old_string, new_string, replace_all = false }: Record<string, unknown>,
+  { content, old_string, new_string, replace_all = false, paths, diff }: Record<string, unknown>,
 ) {
+  if (tool === "Patch") {
+    return patchPreview(paths, diff);
+  }
   if (tool === "Write") {
     return typeof content === "string" ? preview("write", null, content, false) : undefined;
   }
@@ -133,7 +183,9 @@ function accessAllows(access: BotAccess, tool: ApprovalTool, inside: boolean, ru
   if (access === "full") {
     return run.attended;
   }
-  return access === "auto-edits" && inside && (tool === "Write" || tool === "Edit");
+  return (
+    access === "auto-edits" && inside && (tool === "Write" || tool === "Edit" || tool === "Patch")
+  );
 }
 
 type HeldCall = PendingApproval & {

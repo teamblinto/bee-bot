@@ -129,7 +129,7 @@ export function ChatView({
   const empty = items.length === 0 && !active && !systemLine;
   const notices = [
     status !== "connected" && connectionLines[status],
-    bot.pauseReason && pauseLine(bot.pauseReason, engine),
+    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, engine),
     commandError,
   ].filter((line) => typeof line === "string");
 

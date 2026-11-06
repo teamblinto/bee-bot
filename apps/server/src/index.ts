@@ -5,6 +5,7 @@ import * as NodeReadline from "node:readline";
 import { Bootstrap, noRestartExitCodes } from "@beebot/contracts";
 
 import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
+import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -51,17 +52,23 @@ function wipeRuntime(dataDir: string) {
 
 async function boot(bootstrap: Bootstrap) {
   const store = openStore(bootstrap.dataDir);
-  const { claudeCommand = ["claude"], dataDir } = bootstrap;
+  const { claudeCommand = ["claude"], codexCommand = ["codex"], dataDir } = bootstrap;
   wipeRuntime(dataDir);
   const claude = createClaudeRunTurn({ command: claudeCommand, dataDir });
-  const runTurn: RunTurn = (turn) =>
-    turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
+  const codex = createCodexRunTurn({ command: codexCommand, dataDir });
+  const runTurn: RunTurn = (turn) => {
+    if (turn.launch.engineAccountId === "codex") {
+      return codex(turn);
+    }
+    return turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
+  };
   const probe = () => probeEngine(claudeCommand, dataDir);
   const server = await startServer({
     ...bootstrap,
     store,
     runTurn,
     probeEngine: probe,
+    probeCodex: (onModels) => probeCodex(codexCommand, dataDir, onModels),
     probeUsage: (onModels) => probeUsage(claudeCommand, dataDir, onModels),
   });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
@@ -71,6 +78,7 @@ async function boot(bootstrap: Bootstrap) {
     store.pauseReadyBots("claude", pauseReason);
   }
   server.refreshLimits();
+  await server.checkCodex();
   return async () => {
     await server.close();
     store.close();

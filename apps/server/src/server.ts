@@ -25,6 +25,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 
 import { createApprovals } from "./approvals.ts";
 import { staticClaudeModels } from "./claude.ts";
+import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
@@ -45,6 +46,7 @@ const maxMcpBodyBytes = 16 * 1024 * 1024;
 type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
   probeEngine: () => Promise<EngineStatus>;
+  probeCodex?: ((onModels: (models: EngineModel[]) => void) => Promise<EngineStatus>) | undefined;
   runTurn?: RunTurn;
   probeUsage?: ((onModels: (models: EngineModel[]) => void) => Promise<UsageProbe>) | undefined;
   // Where Claude Code keeps its transcripts.
@@ -111,6 +113,7 @@ export async function startServer({
   fakeEngine = false,
   store,
   probeEngine,
+  probeCodex,
   runTurn = fakeRunTurn,
   probeUsage,
   projectsDir = NodePath.join(NodeOS.homedir(), ".claude", "projects"),
@@ -122,17 +125,31 @@ export async function startServer({
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
   let claudeModels = staticClaudeModels;
+  let codexModels = staticCodexModels;
+  let codexProbing = false;
 
   const catalog = (): ModelCatalog => ({
     claude: claudeModels,
+    codex: codexModels,
     ...(fakeEngine && { fake: staticClaudeModels }),
   });
-  const modelsOf = (accountId: string) =>
-    accountId === "claude" ? claudeModels : staticClaudeModels;
+  function modelsOf(accountId: string) {
+    if (accountId === "codex") {
+      return codexModels;
+    }
+    return accountId === "claude" ? claudeModels : staticClaudeModels;
+  }
 
   function setClaudeModels(models: EngineModel[]) {
     if (JSON.stringify(models) !== JSON.stringify(claudeModels)) {
       claudeModels = models;
+      broadcast({ type: "model-catalog", models: catalog() });
+    }
+  }
+
+  function setCodexModels(models: EngineModel[]) {
+    if (JSON.stringify(models) !== JSON.stringify(codexModels)) {
+      codexModels = models;
       broadcast({ type: "model-catalog", models: catalog() });
     }
   }
@@ -210,7 +227,8 @@ export async function startServer({
     onThinking: (runId, { active, text }) => broadcast({ type: "thinking", runId, active, text }),
     onRateLimit: (accountId, updates) => store.mergeUsage(accountId, updates),
     onTurnEnded: (accountId) => void limits.refresh(accountId).catch(logUsageFailure),
-    accountHeld: (accountId) => limits.isProbing(accountId),
+    accountHeld: (accountId) =>
+      limits.isProbing(accountId) || (accountId === "codex" && codexProbing),
   });
   const limits = createLimitRefresher({
     store,
@@ -421,9 +439,32 @@ export async function startServer({
     );
   }
 
+  // Skipped during a turn: the login is shared, and R5 allows one app-server per account.
+  async function checkCodex() {
+    const hasBot = store.botIds().some((id) => store.getBot(id)?.engineAccountId === "codex");
+    if (!probeCodex || !hasBot || codexProbing || store.accountRunning("codex")) {
+      return;
+    }
+    codexProbing = true;
+    try {
+      const { pauseReason } = EngineStatus.parse(await probeCodex(setCodexModels));
+      if (pauseReason) {
+        console.error(`beebotd: Codex bots paused: ${pauseReason}`);
+        store.pauseReadyBots("codex", pauseReason);
+      } else {
+        store.clearEnginePauses("codex");
+      }
+    } catch (error) {
+      console.error(`beebotd: Codex check failed: ${(error as Error)?.name}`);
+    } finally {
+      codexProbing = false;
+      supervisor.pump();
+    }
+  }
+
   async function handleEngine(response: NodeHttp.ServerResponse) {
     try {
-      const status = EngineStatus.parse(await probeEngine());
+      const [status] = await Promise.all([probeEngine().then(EngineStatus.parse), checkCodex()]);
       if (status.pauseReason) {
         store.pauseReadyBots("claude", status.pauseReason);
       } else {
@@ -562,6 +603,7 @@ export async function startServer({
     port: (server.address() as AddressInfo).port,
     // Fills the model catalog too, so the first picker shows what the CLI offers.
     refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
+    checkCodex,
     close: async () => {
       approvals.close();
       await supervisor.close();

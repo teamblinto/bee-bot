@@ -8,8 +8,9 @@ import { Effort, type EngineModel, type EngineStatus, type PauseReason } from "@
 import { z } from "zod";
 
 import {
-  type BotLaunch,
   type EngineChoice,
+  killTree,
+  personaText,
   type RunTurn,
   type ThinkingState,
   toolDetail,
@@ -286,21 +287,6 @@ function mapResult({ result, assistantError, apiStatus, rateLimit }: Seen): Turn
   return { kind: "failed" };
 }
 
-function killTree(pid: number) {
-  if (process.platform === "win32") {
-    NodeChildProcess.spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    }).on("error", () => {});
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch {
-    // Already gone.
-  }
-}
-
 type Attempt = {
   command: readonly string[];
   args: string[];
@@ -537,15 +523,6 @@ function runProcess({
     signal.addEventListener("abort", stop, { once: true });
     child.stdin.write(initializeLine);
   });
-}
-
-const planNote =
-  "This turn is in Plan mode. The owner can't see your plan file, so put the whole plan in your reply.";
-
-function personaText({ name, personality, memory, mode }: BotLaunch) {
-  return [`Your name is ${name}.`, personality, memory, mode === "plan" ? planNote : ""]
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);

@@ -23,6 +23,7 @@ const toolIcons = new Map<string, LucideIcon>([
   ["Read", Eye],
   ["Write", SquarePen],
   ["Edit", SquarePen],
+  ["Patch", SquarePen],
   ["Glob", Search],
   ["Grep", Search],
 ]);

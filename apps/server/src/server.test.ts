@@ -17,6 +17,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
 import { migrations, openEventStore, seedFromId } from "./store.ts";
@@ -591,7 +592,9 @@ describe("bot avatars", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+      DELETE FROM engine_accounts WHERE id = 'codex';
+      DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;
       DELETE FROM migrations WHERE name = 'bot_avatars';
       ALTER TABLE bots DROP COLUMN avatar_seed;`);
@@ -657,7 +660,9 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+      DELETE FROM engine_accounts WHERE id = 'codex';
+      DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;
       DELETE FROM migrations WHERE name = 'bot_avatars';
       ALTER TABLE bots DROP COLUMN avatar_seed;
@@ -919,6 +924,102 @@ describe("headless process", () => {
   }, 20_000);
 });
 
+describe("the Codex account", () => {
+  const codexStatus = (pauseReason: EngineStatus["pauseReason"]): EngineStatus => ({
+    ...healthy,
+    loggedIn: pauseReason === null,
+    pauseReason,
+  });
+
+  async function boot(probeCodex: () => Promise<EngineStatus>, runTurn?: RunTurn) {
+    const store = openEventStore(dataDir);
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [appOrigin],
+      store,
+      probeEngine,
+      probeCodex,
+      ...(runTurn && { runTurn }),
+    });
+    cleanups.push(async () => {
+      await server.close();
+      store.close();
+    });
+    return { server, store, base: `http://127.0.0.1:${server.port}` };
+  }
+
+  const createCodexBot = async (base: string, name: string) =>
+    (await command(base, {
+      type: "create-bot",
+      name,
+      personality: "",
+      engineAccountId: "codex",
+      model: "gpt-5.6-luna",
+    }).then((response) => response.json())) as Bot;
+
+  it("probes only once a Codex bot exists", async () => {
+    const probe = vi.fn(async () => codexStatus(null));
+    const { server, base } = await boot(probe);
+    await server.checkCodex();
+    expect(probe).not.toHaveBeenCalled();
+    await createCodexBot(base, "Ada");
+    await server.checkCodex();
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses only Codex bots and clears them when the login is back", async () => {
+    let status = codexStatus("auth_failed");
+    const { server, store, base } = await boot(async () => status);
+    const codex = await createCodexBot(base, "Ada");
+    await command(base, { type: "create-bot", name: "Ben", personality: "" });
+    await server.checkCodex();
+    const reasons = () => store.state().bots.map(({ pauseReason }) => pauseReason);
+    expect(store.getBot(codex.id)?.pauseReason).toBe("auth_failed");
+    expect(reasons()).toContain(null);
+    status = codexStatus(null);
+    await server.checkCodex();
+    expect(store.getBot(codex.id)?.pauseReason).toBeNull();
+  });
+
+  it("makes a second Codex bot wait, and holds the probe while a turn runs", async () => {
+    const running: Array<(outcome: TurnOutcome) => void> = [];
+    const runTurn: RunTurn = () => new Promise((resolve) => running.push(resolve));
+    const probe = vi.fn(async () => codexStatus(null));
+    const { server, store, base } = await boot(probe, runTurn);
+    const ada = await createCodexBot(base, "Ada");
+    const ben = await createCodexBot(base, "Ben");
+    await subscribe(server.port, 0);
+    await vi.waitFor(async () => {
+      const pending = await command(base, {
+        type: "send-message",
+        messageId: crypto.randomUUID(),
+        roomId: ada.roomId,
+        body: "hi",
+      });
+      expect(pending.status).toBe(200);
+      expect(running).toHaveLength(1);
+    });
+    for (const bot of [ben]) {
+      await command(base, {
+        type: "send-message",
+        messageId: crypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "hi",
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(running).toHaveLength(1);
+    await server.checkCodex();
+    expect(probe).not.toHaveBeenCalled();
+    running[0]?.({ kind: "completed", text: "done" });
+    await vi.waitFor(() => expect(running).toHaveLength(2));
+    running[1]?.({ kind: "completed", text: "done" });
+    await vi.waitFor(() => expect(store.accountRunning("codex")).toBe(false));
+  });
+});
+
 describe("project folders", () => {
   let project: string;
 
@@ -1038,7 +1139,9 @@ describe("project folders", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+    db.exec(`DELETE FROM migrations WHERE name = 'codex_account';
+      DELETE FROM engine_accounts WHERE id = 'codex';
+      DELETE FROM migrations WHERE name = 'bot_project_path';
       ALTER TABLE bots DROP COLUMN project_path;
       UPDATE events SET payload = json_remove(payload, '$.bot.projectPath');`);
     db.close();

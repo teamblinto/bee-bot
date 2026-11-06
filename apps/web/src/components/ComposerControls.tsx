@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useId, useState } from "react";
 
+import { codexRulesWarning } from "../labels";
 import { effortLabels, EffortGlyph, resolveEffortGlyph } from "./EffortGlyph";
 import { findModel, ModelPicker } from "./ModelPicker";
 import { Tooltip } from "./Tooltip";
@@ -164,10 +165,12 @@ function ReasoningMenu({
 
 function AccessMenu({
   access,
+  accountId,
   disabled,
   onChange,
 }: {
   access: BotAccess;
+  accountId: string;
   disabled: boolean;
   onChange: (access: BotAccess) => void;
 }) {
@@ -176,10 +179,12 @@ function AccessMenu({
   const descriptionId = useId();
   const { label, description, Icon } = accessOptions[access];
   const shown = accessOptions[preview ?? access];
+  const warning = accountId === "codex" ? codexRulesWarning : undefined;
+  const warningId = `${descriptionId}-rules`;
   return (
     <Menu
       label={`Permissions: ${label}`}
-      tooltip={`Permissions: ${label}. ${description}`}
+      tooltip={`Permissions: ${label}. ${description}${warning ? ` ${warning}` : ""}`}
       disabled={disabled}
       trigger={
         <>
@@ -205,7 +210,7 @@ function AccessMenu({
                 role="menuitemradio"
                 aria-checked={level === access}
                 aria-label={option.label}
-                aria-describedby={`${descriptionId}-${level}`}
+                aria-describedby={`${descriptionId}-${level}${warning ? ` ${warningId}` : ""}`}
                 className="flex h-6 flex-1 items-center justify-center rounded-field text-ink-secondary outline-none transition-colors hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 aria-checked:bg-card aria-checked:text-ink aria-checked:shadow-composer"
                 onPointerEnter={() => setPreview(level)}
                 onPointerLeave={() => setPreview(undefined)}
@@ -237,6 +242,11 @@ function AccessMenu({
           {/* Two lines reserved so the menu doesn't shift during a preview. */}
           <span className="min-h-8 text-label text-ink-secondary">{shown.description}</span>
         </div>
+        {warning && (
+          <p id={warningId} className="text-label text-ink-secondary">
+            {warning}
+          </p>
+        )}
       </div>
     </Menu>
   );
@@ -341,6 +351,7 @@ export function ComposerControls({
       </Tooltip>
       <AccessMenu
         access={bot.access}
+        accountId={bot.engineAccountId}
         disabled={!connected}
         onChange={(access) => onChange({ access })}
       />

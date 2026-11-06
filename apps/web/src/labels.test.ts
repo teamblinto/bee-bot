@@ -1,4 +1,4 @@
-import type { MemoryItem } from "@beebot/contracts";
+import type { EngineStatus, MemoryItem, Run } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
 import {
@@ -8,7 +8,10 @@ import {
   liveStatusLine,
   liveThoughtLine,
   memoryReview,
+  pauseLine,
   projectPathValue,
+  runLine,
+  testedCodexVersion,
   toolRowLabel,
   visibleDetail,
   workedLine,
@@ -69,6 +72,32 @@ it("announces status changes and takes the newest thought line", () => {
   expect(liveStatusLine(false, [{ ...tool, status: "running" }], false)).toBe("Running ls");
   expect(liveStatusLine(false, [], true)).toBe("Writing a reply");
   expect(liveThoughtLine("first\n  second \n")).toBe("second");
+});
+
+it("sends a paused Codex bot to Codex's own fix, and a Claude bot to Claude's", () => {
+  const claude = { testedVersion: "2.0.0" } as EngineStatus;
+  expect(pauseLine("auth_failed", "claude")).toContain("claude auth login");
+  expect(pauseLine("cli_version", "claude", claude)).toContain("version 2.0.0");
+
+  expect(pauseLine("auth_failed", "codex")).toContain("codex login");
+  expect(pauseLine("cli_missing", "codex")).toContain("Codex CLI");
+  expect(pauseLine("cli_version", "codex", claude)).toBe(
+    `This Codex version is untested. Install version ${testedCodexVersion}, then Resume.`,
+  );
+  expect(pauseLine("owner", "codex")).toBe(pauseLine("owner", "claude"));
+});
+
+it("doesn't blame Claude when a Codex bot's login fails mid-run", () => {
+  const run: Run = {
+    id: "run",
+    botId: "bot",
+    status: "Refused",
+    reason: "auth_failed",
+    createdAt: "2026-11-06T00:00:00.000Z",
+    startedAt: null,
+    endedAt: null,
+  };
+  expect(runLine(run, undefined)).not.toContain("Claude");
 });
 
 const memory = (id: string, fields: Partial<MemoryItem>): MemoryItem => ({

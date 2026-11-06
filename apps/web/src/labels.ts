@@ -42,9 +42,13 @@ export function changeNote({ action, replaceAll }: ApprovalChange) {
     create: "New file",
     replace: "Replaces an existing file",
     write: "Creates or replaces this file",
+    patch: undefined,
   };
   return notes[action];
 }
+
+export const codexRulesWarning =
+  "Commands you've pre-approved in Codex's own rules (~/.codex/rules) run without a card.";
 
 export const hiddenCharsLine = (count: number) =>
   `${formatCount(count)} more ${count === 1 ? "character" : "characters"} not shown. Allowing applies the whole change.`;
@@ -99,7 +103,21 @@ export function engineFix(engine: EngineStatus) {
   return undefined;
 }
 
-export function pauseLine(reason: NonNullable<Bot["pauseReason"]>, engine?: EngineStatus) {
+export const testedCodexVersion = "0.167.0";
+
+// config_dir is Claude's alone.
+const codexPauseLines: Partial<Record<NonNullable<Bot["pauseReason"]>, string>> = {
+  auth_failed:
+    "Codex login couldn't be verified. Run codex login in your own terminal, then Resume.",
+  cli_missing: "Codex CLI wasn't found. Install it, then Resume.",
+  cli_version: `This Codex version is untested. Install version ${testedCodexVersion}, then Resume.`,
+};
+
+export function pauseLine(
+  reason: NonNullable<Bot["pauseReason"]>,
+  accountId: string,
+  engine?: EngineStatus,
+) {
   const version = engine ? `version ${engine.testedVersion}` : "the tested version";
   const lines = {
     owner: "Paused. Resume to send messages.",
@@ -109,7 +127,7 @@ export function pauseLine(reason: NonNullable<Bot["pauseReason"]>, engine?: Engi
     config_dir:
       "CLAUDE_CONFIG_DIR is set and Bee Bot ignores it, so Claude looks logged out. Run claude auth login, then Resume.",
   };
-  return lines[reason];
+  return (accountId === "codex" ? codexPauseLines[reason] : undefined) ?? lines[reason];
 }
 
 const reasonLines: Record<RunReason, string> = {
@@ -118,7 +136,7 @@ const reasonLines: Record<RunReason, string> = {
   daily_cap: "Refused. This bot reached its daily run cap.",
   engine_failed: "The engine couldn't finish this turn. Send again to retry.",
   limited: "Limited. This retries when the limit clears, unless stopped.",
-  auth_failed: "Claude couldn't be verified, so this bot was paused.",
+  auth_failed: "This bot's login couldn't be verified, so it was paused.",
   timeout: "This turn ran past its time limit. Send again to retry.",
   stopped: "Stopped.",
   server_restarted: "Interrupted. The server restarted during this turn. Nothing was repeated.",
@@ -153,6 +171,7 @@ const approvalVerbs: Record<ApprovalTool, string> = {
   Grep: "read a file",
   Write: "edit a file",
   Edit: "edit a file",
+  Patch: "edit files",
 };
 
 export const approvalTitle = (name: string, tool: ApprovalTool) =>
@@ -207,6 +226,7 @@ const toolVerbs = new Map([
   ["Read", { running: "Reading", done: "Read", bare: "Read a file" }],
   ["Write", { running: "Writing", done: "Wrote", bare: "Wrote a file" }],
   ["Edit", { running: "Editing", done: "Edited", bare: "Edited a file" }],
+  ["Patch", { running: "Editing", done: "Edited", bare: "Edited files" }],
   ["Glob", { running: "Finding", done: "Found", bare: "Found files" }],
   ["Grep", { running: "Searching for", done: "Searched for", bare: "Searched files" }],
   ["mcp__bee__memory_search", { running: "Searching memory", done: "", bare: "Searched memory" }],

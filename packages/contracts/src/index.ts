@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 11;
+export const protocolVersion = 12;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -17,6 +17,8 @@ export const Bootstrap = z.object({
   fakeEngine: z.boolean().optional(),
   // Tests only: replaces the `claude` binary, so they never touch the real CLI.
   claudeCommand: z.array(z.string().min(1)).min(1).optional(),
+  // Tests only: replaces the `codex` binary, so they never touch the real CLI.
+  codexCommand: z.array(z.string().min(1)).min(1).optional(),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
@@ -54,7 +56,7 @@ export type EngineModel = z.infer<typeof EngineModel>;
 export const ModelCatalog = z.record(z.string(), z.array(EngineModel));
 export type ModelCatalog = z.infer<typeof ModelCatalog>;
 
-export const EngineAccountId = z.enum(["claude", "fake"]);
+export const EngineAccountId = z.enum(["claude", "codex", "fake"]);
 
 export const maxAvatarSeed = 0xffffffff;
 export const AvatarSeed = z.number().int().min(0).max(maxAvatarSeed);
@@ -134,7 +136,7 @@ export const EngineAccount = z.object({
 });
 export type EngineAccount = z.infer<typeof EngineAccount>;
 
-export const ApprovalTool = z.enum(["Read", "Write", "Edit", "Glob", "Grep", "Bash"]);
+export const ApprovalTool = z.enum(["Read", "Write", "Edit", "Patch", "Glob", "Grep", "Bash"]);
 export type ApprovalTool = z.infer<typeof ApprovalTool>;
 
 // Durable, so it must never carry tool input: that can hold secrets.
@@ -152,11 +154,13 @@ export const Approval = z.object({
 export type Approval = z.infer<typeof Approval>;
 
 export const ApprovalChange = z.object({
-  action: z.enum(["create", "replace", "write", "edit"]),
+  action: z.enum(["create", "replace", "write", "edit", "patch"]),
   removed: z.string().nullable(),
   added: z.string(),
   hiddenChars: z.number(),
   replaceAll: z.boolean(),
+  // Only a patch has these. It can touch many files, so `removed` and `added` stay empty.
+  files: z.array(z.object({ path: z.string(), removed: z.string(), added: z.string() })).optional(),
 });
 export type ApprovalChange = z.infer<typeof ApprovalChange>;
 

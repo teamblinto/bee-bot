@@ -111,6 +111,7 @@ function turn(
   const rateLimits: WindowUpdate[] = [];
   let delivered = 0;
   const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir })({
+    approve: async () => ({ behavior: "deny", message: "unused" }),
     prompt,
     sessionId: "00000000-0000-4000-8000-000000000009",
     resume,
@@ -201,8 +202,9 @@ describe("probeUsage", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const pending = probe("usage-silent");
-      await vi.waitFor(() =>
-        expect(cliLog().flatMap((e) => e.control ?? [])).toContain("get_usage"),
+      await vi.waitFor(
+        () => expect(cliLog().flatMap((e) => e.control ?? [])).toContain("get_usage"),
+        { timeout: 10_000 },
       );
       await vi.advanceTimersByTimeAsync(16_000);
       expect(await pending).toMatchObject({ unavailable: { reason: "probeFailed" } });
@@ -552,6 +554,7 @@ describe("the credential gate", () => {
       onThinking: () => {},
       onRateLimit: () => {},
       permissions,
+      approve: async () => ({ behavior: "deny", message: "unused" }),
       onDelivered: () => {},
     });
     expect(outcome).toEqual({ kind: "auth_failed", pauseReason: "cli_missing" });

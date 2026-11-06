@@ -178,14 +178,38 @@ it("walks between the rail and the search box", () => {
   expect(document.activeElement).toBe(search());
 });
 
-it("shows Codex as disabled, reachable and doing nothing", () => {
-  renderPicker();
+const withCodex: ModelCatalog = {
+  ...catalog,
+  codex: [{ id: "gpt-5.5", label: "GPT-5.5", efforts: allEfforts }],
+};
+
+it.each([
+  ["missing", catalog],
+  ["empty", { ...catalog, codex: [] }],
+  ["not loaded", undefined],
+])("shows Codex as disabled, reachable and doing nothing while it's %s", (_, models) => {
+  renderPicker({ catalog: models });
   const codex = rail("Codex");
-  expect(codex?.getAttribute("aria-label")).toBe("Codex: not available yet");
+  expect(codex?.getAttribute("aria-label")).not.toBe("Codex");
   expect(codex?.getAttribute("aria-disabled")).toBe("true");
   expect(codex?.disabled).toBe(false);
   act(() => codex?.click());
   expect(codex?.getAttribute("aria-pressed")).toBe("false");
+});
+
+it("offers Codex's models once the catalog has them, named as Codex's", () => {
+  const { onPick } = renderPicker({ catalog: withCodex });
+  expect(rail("Codex")?.getAttribute("aria-disabled")).toBe("false");
+  act(() => rail("Codex")?.click());
+  expect(rows()).toEqual(["GPT-5.5, Codex"]);
+  press(search(), "Enter");
+  expect(onPick).toHaveBeenCalledWith("codex", "gpt-5.5");
+});
+
+it("keeps a Codex bot on Codex", () => {
+  renderPicker({ catalog: withCodex, accountId: "codex", model: "gpt-5.5", locked: true });
+  expect(rows()).toEqual(["GPT-5.5, Codex"]);
+  expect(rail("Claude")?.getAttribute("aria-disabled")).toBe("true");
 });
 
 it("locks other providers once the bot exists", () => {
@@ -263,6 +287,18 @@ it("clears the level, flips Build and Plan, and names every access level", () =>
   act(() => item("Auto-accept edits")?.click());
   expect(onChange).toHaveBeenLastCalledWith({ access: "auto-edits" });
   expect(item("Auto")).toBeUndefined();
+});
+
+it("warns about Codex's own allow list in the access menu, for Codex bots only", () => {
+  const warning = "~/.codex/rules";
+  renderControls(bot("opus"));
+  expect(host.textContent).not.toContain(warning);
+
+  renderControls({ ...bot("gpt-5.5"), engineAccountId: "codex" });
+  const level = host.querySelector('[aria-label="Permissions"] [role="menuitemradio"]');
+  const described = level?.getAttribute("aria-describedby")?.split(" ") ?? [];
+  const lines = described.map((id) => document.getElementById(id)?.textContent);
+  expect(lines.some((line) => line?.includes(warning))).toBe(true);
 });
 
 it("draws one bar per ordinary level, with Max as the full scale", () => {

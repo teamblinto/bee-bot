@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { projectPathValue } from "../labels";
+import { codexRulesWarning, projectPathValue } from "../labels";
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { ModelPicker } from "./ModelPicker";
@@ -35,12 +35,13 @@ export function BotForm({
   const [personality, setPersonality] = useState(bot?.personality ?? "");
   const [model, setModel] = useState(bot?.model ?? defaultBotModel);
   const [projectPath, setProjectPath] = useState(bot?.projectPath ?? "");
-  const [engine, setEngine] = useState<"claude" | "fake">("claude");
+  const [engine, setEngine] = useState<keyof typeof EngineAccountId.enum>("claude");
   const catalog = useSyncExternalStore(subscribeToConnection, () => getConnectionState().models);
   const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const saving = useRef(false);
+  const accountId = bot?.engineAccountId ?? engine;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -111,7 +112,7 @@ export function BotForm({
       <div className={labelClass}>
         Model
         <ModelPicker
-          accountId={bot?.engineAccountId ?? engine}
+          accountId={accountId}
           model={model}
           catalog={catalog}
           // A session belongs to one vendor.
@@ -122,6 +123,7 @@ export function BotForm({
             setEngine(EngineAccountId.parse(accountId));
           }}
         />
+        {accountId === "codex" && <p className="text-small">{codexRulesWarning}</p>}
       </div>
       <label className={labelClass}>
         Project folder (optional)

@@ -1172,6 +1172,7 @@ describe("tool activity", () => {
 describe("fake engine", () => {
   const turn = (prompt: string, signal = new AbortController().signal) =>
     fakeRunTurn({
+      approve: async () => ({ behavior: "deny", message: "unused" }),
       prompt,
       sessionId: "s",
       resume: false,

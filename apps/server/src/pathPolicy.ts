@@ -109,6 +109,11 @@ function targetsOf(tool: ApprovalTool, input: Record<string, unknown>, win: bool
   if (tool === "Read" || tool === "Write" || tool === "Edit") {
     return typeof input.file_path === "string" ? [input.file_path] : undefined;
   }
+  if (tool === "Patch") {
+    const { paths } = input;
+    const listed = Array.isArray(paths) && paths.length > 0;
+    return listed && paths.every((path) => typeof path === "string") ? paths : undefined;
+  }
   const base = input.path ?? ".";
   if (typeof base !== "string") {
     return undefined;

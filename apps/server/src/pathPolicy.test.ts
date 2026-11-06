@@ -428,3 +428,25 @@ describe("a proposed project folder", () => {
     expect(propose(NodePath.join(root, "keys"))).toBe("folder_protected");
   });
 });
+
+describe("a patch", () => {
+  const patch = (...paths: string[]) => check("Patch", { paths, diff: "" });
+  const inWorkspace = () => NodePath.join(workspace, "a.txt");
+
+  it("is inside only if every path is", () => {
+    expect(patch(inWorkspace(), NodePath.join(workspace, "b.txt"))).toMatchObject(inside);
+    expect(patch(inWorkspace(), NodePath.join(home, "public", "notes.txt"))).toMatchObject({
+      allowed: true,
+      inside: false,
+    });
+  });
+
+  it("is refused whole when any one path is", () => {
+    expect(patch(inWorkspace(), NodePath.join(home, ".ssh", "id_rsa"))).toEqual(refused);
+  });
+
+  it("is refused when it names no paths or a path that isn't text", () => {
+    expect(patch()).toEqual(refused);
+    expect(check("Patch", { paths: [7], diff: "" })).toEqual(refused);
+  });
+});

@@ -1,10 +1,12 @@
+import * as NodeChildProcess from "node:child_process";
 import { once } from "node:events";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers/promises";
 
-import type { Bot, PauseReason } from "@beebot/contracts";
+import type { ApprovalTool, Bot, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
+import type { Decision } from "./approvals.ts";
 import type { WindowUpdate } from "./usage.ts";
 
 export type TurnOutcome =
@@ -33,6 +35,30 @@ export const workspacePath = (dataDir: string, botId: string) =>
 export const workingFolder = (dataDir: string, botId: string, projectPath: string | null) =>
   projectPath ?? workspacePath(dataDir, botId);
 
+const planNote =
+  "This turn is in Plan mode. The owner can't see your plan file, so put the whole plan in your reply.";
+
+export function personaText({ name, personality, memory, mode }: BotLaunch) {
+  return [`Your name is ${name}.`, personality, memory, mode === "plan" ? planNote : ""]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function killTree(pid: number) {
+  if (process.platform === "win32") {
+    NodeChildProcess.spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    }).on("error", () => {});
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
 export type ToolStart = { id: string; name: string; detail: string | null };
 export type ThinkingState = { active: boolean; text: string };
 
@@ -53,6 +79,11 @@ export type RunTurn = (turn: {
   permissions: { url: string; token: string };
   // Call once the prompt reached the engine: from then on it must never be sent again.
   onDelivered: () => void;
+  // The same gate a Claude call reaches over MCP, for engines that ask in-process.
+  approve: (tool: ApprovalTool, input: Record<string, unknown>) => Promise<Decision>;
+  // For engines that assign their own session ID. It throws if the ID wasn't stored, and a turn
+  // must not send its prompt without one, or the next turn can't resume.
+  onSessionId?: (sessionId: string) => void;
 }) => Promise<TurnOutcome>;
 
 const wordDelayMs = 40;
@@ -86,6 +117,7 @@ const inputKeys = new Map([
   ["Read", "file_path"],
   ["Write", "file_path"],
   ["Edit", "file_path"],
+  ["Patch", "file_path"],
   ["Glob", "pattern"],
   ["Grep", "pattern"],
 ]);

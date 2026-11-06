@@ -27,21 +27,24 @@ type Provider = {
 
 const claude: Provider = { id: "claude", label: "Claude", Logo: ClaudeLogo };
 const testEngine: Provider = { id: "fake", label: "Test engine", Logo: FlaskConical };
-const codex: Provider = {
-  id: "codex",
-  label: "Codex",
-  Logo: OpenAILogo,
-  disabledReason: "Codex: not available yet",
-};
+const codex: Provider = { id: "codex", label: "Codex", Logo: OpenAILogo };
 
 const lockedReason = (label: string) =>
   `${label} is unavailable here. A bot keeps the provider it was created with.`;
 
-export const providerLabel = (accountId: string) =>
-  accountId === testEngine.id ? testEngine.label : claude.label;
+const providerOf = (accountId: string) =>
+  [testEngine, codex].find(({ id }) => id === accountId) ?? claude;
+
+export const providerLabel = (accountId: string) => providerOf(accountId).label;
 
 function providersFor(catalog: ModelCatalog | undefined) {
-  return [claude, ...(import.meta.env.DEV && catalog?.fake ? [testEngine] : []), codex];
+  return [
+    claude,
+    ...(import.meta.env.DEV && catalog?.fake ? [testEngine] : []),
+    catalog?.codex?.length
+      ? codex
+      : { ...codex, disabledReason: "Codex isn't available on this computer" },
+  ];
 }
 
 export const findModel = (
@@ -184,7 +187,7 @@ function ModelRow({
   onHover: () => void;
 }) {
   const { label, accountId, unavailable } = row;
-  const Logo = accountId === testEngine.id ? testEngine.Logo : claude.Logo;
+  const { Logo } = providerOf(accountId);
   const starLabel = `${favorite ? "Remove" : "Add"} ${label} ${favorite ? "from" : "to"} favorites`;
   return (
     <div
@@ -484,7 +487,7 @@ export function ModelPicker({
   const anchor = `--picker-${id.replace(/[^\w-]/g, "")}`;
   const unavailable = isUnavailable(catalog, accountId, model);
   const label = findModel(catalog, accountId, model)?.label ?? model;
-  const Logo = accountId === testEngine.id ? testEngine.Logo : claude.Logo;
+  const { Logo } = providerOf(accountId);
 
   useEffect(() => () => wheelLock.current?.abort(), []);
 

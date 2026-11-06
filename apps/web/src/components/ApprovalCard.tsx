@@ -4,17 +4,27 @@ import { useEffect, useRef, useState } from "react";
 import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
 import { postCommand } from "../serverConnection";
 
+function ChangeLines({ removed, added }: { removed: string; added: string }) {
+  const removedLines = changeLines("- ", removed);
+  const addedLines = changeLines("+ ", added);
+  return (
+    <>
+      {removedLines && <span className="block text-danger">{removedLines}</span>}
+      {addedLines && <span className="block text-honey">{addedLines}</span>}
+    </>
+  );
+}
+
 function ProposedChange({ change }: { change: ApprovalChange }) {
   const note = changeNote(change);
-  const removed = changeLines("- ", change.removed ?? "");
-  const added = changeLines("+ ", change.added);
+  const { action, removed, added, files = [] } = change;
   return (
     <>
       {note && <p className="text-small text-ink-secondary">{note}</p>}
-      {!removed && !added && change.removed === null && (
+      {action !== "patch" && !added && removed === null && (
         <p className="text-small text-ink-secondary">Empty file</p>
       )}
-      {(removed || added) && (
+      {(files.length > 0 || removed || added) && (
         <pre
           role="region"
           tabIndex={0}
@@ -23,8 +33,18 @@ function ProposedChange({ change }: { change: ApprovalChange }) {
           // On the transcript, a wheel up raises Jump to latest over this card's buttons.
           onWheel={(event) => event.stopPropagation()}
         >
-          {removed && <span className="block text-danger">{removed}</span>}
-          {added && <span className="block text-honey">{added}</span>}
+          {files.map((file) => (
+            <span
+              key={file.path}
+              role="group"
+              aria-label={visibleDetail(file.path)}
+              className="block not-first:mt-2"
+            >
+              <span className="block text-ink-secondary">{visibleDetail(file.path)}</span>
+              <ChangeLines removed={file.removed} added={file.added} />
+            </span>
+          ))}
+          <ChangeLines removed={removed ?? ""} added={added} />
         </pre>
       )}
     </>

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { Approval, PendingApproval } from "@beebot/contracts";
+import type { Approval, ApprovalChange, PendingApproval } from "@beebot/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -75,6 +75,48 @@ it("says a write is empty rather than showing a blank preview", () => {
   expect(preview()).toBeNull();
   expect(host.textContent).toContain("New file");
   expect(host.textContent).toContain("Empty file");
+});
+
+const patch = (files: NonNullable<ApprovalChange["files"]>, hiddenChars = 0): ApprovalChange => ({
+  action: "patch",
+  removed: null,
+  added: "",
+  hiddenChars,
+  replaceAll: false,
+  files,
+});
+
+const groups = () => [...host.querySelectorAll('[role="group"]')];
+
+it("labels each file of a patch inside one scrolling preview", () => {
+  show(
+    patch([
+      { path: "a.ts", removed: "old", added: "new" },
+      { path: "b.ts", removed: "", added: "more" },
+    ]),
+  );
+  expect(host.querySelectorAll('[aria-label="Proposed change"]')).toHaveLength(1);
+  expect(groups().map((group) => group.getAttribute("aria-label"))).toEqual(["a.ts", "b.ts"]);
+  expect(groups().map((group) => group.textContent)).toEqual(["a.ts- old+ new", "b.ts+ more"]);
+  expect(groups()[0]?.querySelector(".text-danger")?.textContent).toBe("- old");
+  expect(groups()[0]?.querySelector(".text-honey")?.textContent).toBe("+ new");
+});
+
+it("still names a patched file with no lines, and never calls a patch an empty file", () => {
+  show(patch([{ path: "empty.txt", removed: "", added: "" }]));
+  expect(preview()?.textContent).toBe("empty.txt");
+  expect(host.textContent).not.toContain("Empty file");
+});
+
+it("makes characters hidden in a patched path or line visible", () => {
+  show(patch([{ path: "safe\u202Etxt.exe", removed: "", added: "zero\u200Bwidth" }]));
+  expect(groups()[0]?.getAttribute("aria-label")).toBe("safe[U+202E]txt.exe");
+  expect(preview()?.textContent).toBe("safe[U+202E]txt.exe+ zero[U+200B]width");
+});
+
+it("says what a patch's preview leaves out", () => {
+  show(patch([{ path: "a.ts", removed: "", added: "new" }], 1));
+  expect(host.textContent).toContain("1 more character not shown.");
 });
 
 it("says what is hidden right above the buttons, and Allow stays enabled", () => {

@@ -272,6 +272,10 @@ export const migrations: Array<{
     sql: `DELETE FROM events;
     ALTER TABLE bots ADD COLUMN project_path TEXT;`,
   },
+  {
+    name: "codex_account",
+    sql: "INSERT INTO engine_accounts (id, label) VALUES ('codex', 'Codex');",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -534,6 +538,9 @@ export function openEventStore(dataDir: string) {
   );
   const saveSession = db.prepare(
     "UPDATE scopes SET session_id = ?, session_started = 0, tainted = 0 WHERE id = ?",
+  );
+  const updateSessionId = db.prepare(
+    "UPDATE scopes SET session_id = ? WHERE id = (SELECT scope_id FROM runs WHERE id = ?)",
   );
   const markScopeTainted = db.prepare(
     "UPDATE scopes SET tainted = 1 WHERE id = (SELECT scope_id FROM runs WHERE id = ?)",
@@ -1169,6 +1176,11 @@ export function openEventStore(dataDir: string) {
           },
         };
       }),
+
+    // Only the ID: a Codex thread replaces the placeholder, and the scope's taint still stands.
+    setSessionId: (runId: string, sessionId: string) => {
+      updateSessionId.run(sessionId, runId);
+    },
 
     markDelivered: (id: string) => {
       const { inputHighSeq, scopeId } = RunRow.parse(selectRun.get(id));
