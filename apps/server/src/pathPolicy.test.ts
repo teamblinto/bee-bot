@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import type { ApprovalTool } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { pathPolicy } from "./pathPolicy.ts";
+import { checkProjectFolder, pathPolicy } from "./pathPolicy.ts";
 
 const win = process.platform === "win32";
 
@@ -263,5 +263,168 @@ describe("fails closed", () => {
 
   it("but never judges Bash, whose card shows the exact command", () => {
     expect(check("Bash", { command: "cat ~/.ssh/id_rsa" })).toEqual(outside);
+  });
+});
+
+describe("targets in a project folder", () => {
+  let project: string;
+
+  beforeEach(() => {
+    project = NodePath.join(root, "work", "app");
+    NodeFS.mkdirSync(project, { recursive: true });
+  });
+
+  const inProject = (tool: ApprovalTool, input: Record<string, unknown>) =>
+    pathPolicy(tool, input, project, { home, dataDir, platform: process.platform });
+
+  it("are inside when nothing protected is named", () => {
+    expect(inProject("Read", { file_path: "src/a.ts" })).toEqual(inside);
+    expect(inProject("Grep", { pattern: "x", path: "src" })).toEqual(inside);
+    expect(inProject("Glob", { pattern: "**/*.ts" })).toEqual(inside);
+  });
+
+  it.each([".npmrc", ".docker/config.json", "sub/.ssh/key", ".AWS/credentials"])(
+    "always ask for %s, and don't refuse it",
+    (file_path) => {
+      expect(inProject("Read", { file_path })).toEqual(outside);
+      expect(inProject("Write", { file_path })).toEqual(outside);
+      expect(inProject("Read", { file_path: NodePath.join(project, file_path) })).toEqual(outside);
+    },
+  );
+
+  it.runIf(win)("always ask however Win32 spells the name", () => {
+    expect(inProject("Read", { file_path: ".npmrc::$DATA" })).toEqual(outside);
+    expect(inProject("Read", { file_path: ".docker. \\config.json" })).toEqual(outside);
+  });
+
+  it("always ask for a link named like a credential folder", () => {
+    NodeFS.mkdirSync(NodePath.join(project, "plain"));
+    link(NodePath.join(project, "plain"), NodePath.join(project, ".aws"));
+    expect(inProject("Read", { file_path: ".aws/credentials" })).toEqual(outside);
+  });
+
+  it("always ask for a search aimed at a protected name", () => {
+    expect(inProject("Grep", { pattern: "x", path: ".docker" })).toEqual(outside);
+    expect(inProject("Grep", { pattern: "x", glob: ".npmrc" })).toEqual(outside);
+    expect(inProject("Glob", { pattern: "**/.npmrc" })).toEqual(outside);
+  });
+
+  it("still refuse what is protected outside the folder", () => {
+    expect(inProject("Read", { file_path: NodePath.join(home, ".ssh", "id_rsa") })).toEqual(
+      refused,
+    );
+    expect(inProject("Read", { file_path: NodePath.join(dataDir, "beebot.db") })).toEqual(refused);
+  });
+
+  it("refuse a link out to something protected, whatever its name", () => {
+    link(NodePath.join(home, ".ssh"), NodePath.join(project, "keys"));
+    expect(inProject("Read", { file_path: "keys/id_rsa" })).toEqual(refused);
+  });
+});
+
+describe("a proposed project folder", () => {
+  const propose = (path: string, context = { home, dataDir, platform: process.platform }) =>
+    checkProjectFolder(path, context).refused;
+  const folder = (...segments: string[]) => {
+    const path = NodePath.join(root, ...segments);
+    NodeFS.mkdirSync(path, { recursive: true });
+    return path;
+  };
+
+  it("gives back the real path", () => {
+    const app = folder("work", "app");
+    const context = { home, dataDir, platform: process.platform };
+    expect(checkProjectFolder(app, context)).toEqual({ real: app, refused: undefined });
+    expect(checkProjectFolder(`${app}${NodePath.sep}`, context).real).toBe(app);
+    link(app, NodePath.join(root, "shortcut"));
+    expect(checkProjectFolder(NodePath.join(root, "shortcut"), context).real).toBe(app);
+  });
+
+  it("accepts a folder inside home", () => {
+    expect(propose(NodePath.join(home, "public"))).toBeUndefined();
+  });
+
+  it.each(["work/app", "./app", "~/app", "..", "a\0b"])("refuses %j as not absolute", (path) => {
+    expect(propose(path)).toBe("folder_not_absolute");
+  });
+
+  it("refuses a NUL in an absolute path", () => {
+    expect(propose(`${folder("work")}\0`)).toBe("folder_not_absolute");
+  });
+
+  it.runIf(win)("refuses paths that only look absolute on Windows", () => {
+    for (const path of ["\\work", "/c/work", "C:work"]) {
+      expect(propose(path)).toBe("folder_not_absolute");
+    }
+  });
+
+  it.runIf(win)("refuses UNC and device paths", () => {
+    for (const path of [
+      "\\\\server\\share\\app",
+      "//server/share/app",
+      "\\/server/share",
+      `\\\\?\\${folder("work")}`,
+      `\\\\.\\${folder("work")}`,
+    ]) {
+      expect(propose(path)).toBe("folder_network");
+    }
+  });
+
+  it("refuses what doesn't exist, a dangling link and a file", () => {
+    expect(propose(NodePath.join(root, "nowhere"))).toBe("folder_not_found");
+    const gone = folder("gone");
+    link(gone, NodePath.join(root, "dangling"));
+    NodeFS.rmSync(gone, { recursive: true });
+    expect(propose(NodePath.join(root, "dangling"))).toBe("folder_not_found");
+    expect(propose(NodePath.join(home, "public", "notes.txt"))).toBe("folder_not_directory");
+  });
+
+  it("refuses a filesystem or drive root", () => {
+    expect(propose(NodePath.parse(root).root)).toBe("folder_root");
+  });
+
+  it("refuses home and anything above it, spelled directly or through a link", () => {
+    expect(propose(home)).toBe("folder_home");
+    expect(propose(root)).toBe("folder_home");
+    expect(propose(NodePath.dirname(root))).toBe("folder_home");
+    link(home, NodePath.join(root, "to-home"));
+    expect(propose(NodePath.join(root, "to-home"))).toBe("folder_home");
+    expect(propose(NodePath.join(folder("work"), "..", "home"))).toBe("folder_home");
+  });
+
+  it("refuses the data dir, anything in it and anything above it", () => {
+    expect(propose(dataDir)).toBe("folder_bee_data");
+    expect(propose(workspace)).toBe("folder_bee_data");
+    const data = folder("apps", "bee", "data");
+    const context = { home, dataDir: data, platform: process.platform };
+    expect(propose(data, context)).toBe("folder_bee_data");
+    expect(propose(NodePath.dirname(data), context)).toBe("folder_bee_data");
+    link(data, NodePath.join(root, "to-data"));
+    expect(propose(NodePath.join(root, "to-data"), context)).toBe("folder_bee_data");
+  });
+
+  it("refuses a protected root, anything in it and anything above it", () => {
+    const [parent, store] = win
+      ? ["AppData", "Local/Google/Chrome"]
+      : process.platform === "darwin"
+        ? ["Library", "Application Support/Firefox"]
+        : [".config", "google-chrome"];
+    const inside = NodePath.join(home, parent, store, "Default");
+    NodeFS.mkdirSync(inside, { recursive: true });
+    expect(propose(inside)).toBe("folder_protected");
+    expect(propose(NodePath.join(home, parent))).toBe("folder_protected");
+  });
+
+  it("refuses a credential segment anywhere, even on a link's name", () => {
+    expect(propose(NodePath.join(home, ".ssh"))).toBe("folder_protected");
+    expect(propose(folder("work", ".aws", "app"))).toBe("folder_protected");
+    expect(propose(folder("work", ".DOCKER"))).toBe("folder_protected");
+    link(folder("plain"), NodePath.join(folder("elsewhere"), ".kube"));
+    expect(propose(NodePath.join(root, "elsewhere", ".kube"))).toBe("folder_protected");
+  });
+
+  it("refuses a link to a credential folder under any name", () => {
+    link(NodePath.join(home, ".ssh"), NodePath.join(root, "keys"));
+    expect(propose(NodePath.join(root, "keys"))).toBe("folder_protected");
   });
 });

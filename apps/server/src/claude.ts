@@ -15,6 +15,7 @@ import {
   toolDetail,
   type ToolStart,
   type TurnOutcome,
+  workingFolder,
   workspacePath,
 } from "./engine.ts";
 import {
@@ -582,6 +583,12 @@ export async function writeMcpConfig(path: string, url: string, token: string) {
   await NodeFS.writeFile(path, JSON.stringify({ mcpServers: { bee } }));
 }
 
+const isFolder = (path: string) =>
+  NodeFS.stat(path).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
+
 type Options = { command: readonly string[]; dataDir: string };
 
 export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
@@ -599,9 +606,14 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     onDelivered,
     permissions,
   }) => {
-    const cwd = workspacePath(dataDir, launch.botId);
-    const personaPath = NodePath.join(NodePath.dirname(cwd), "persona.md");
-    await NodeFS.mkdir(cwd, { recursive: true });
+    const { projectPath } = launch;
+    if (projectPath && !(await isFolder(projectPath))) {
+      return { kind: "folder_missing" };
+    }
+    const cwd = workingFolder(dataDir, launch.botId, projectPath);
+    const privateFolder = workspacePath(dataDir, launch.botId);
+    const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");
+    await NodeFS.mkdir(privateFolder, { recursive: true });
     await NodeFS.writeFile(personaPath, personaText(launch));
 
     const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;

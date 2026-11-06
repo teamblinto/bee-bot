@@ -98,6 +98,8 @@ const reasonLines: Record<RunReason, string> = {
   timeout: "This turn ran past its time limit. Send again to retry.",
   stopped: "Stopped.",
   server_restarted: "Interrupted. The server restarted during this turn. Nothing was repeated.",
+  folder_missing:
+    "This bot's project folder is missing. Reconnect it or change it, then send again.",
 };
 
 const statusLines: Partial<Record<Run["status"], string>> = {
@@ -142,6 +144,18 @@ export function answeredLine({ status, reason }: Approval) {
   }
   return reason === "stopped" ? `${answer} · Stopped` : answer;
 }
+
+// Windows' "Copy as path" wraps the path in quotes.
+export function projectPathValue(text: string) {
+  return (
+    text
+      .trim()
+      .replace(/^(["'])(.*)\1$/, "$2")
+      .trim() || null
+  );
+}
+
+export const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
 export function formatElapsed(ms: number) {
   const seconds = Math.max(0, Math.floor(ms / 1000));

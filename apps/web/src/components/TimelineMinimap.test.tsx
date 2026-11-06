@@ -253,6 +253,7 @@ const bot: Bot = {
   mode: "build",
   access: "supervised",
   avatarSeed: 7,
+  projectPath: null,
 };
 
 function renderTranscript(items: TranscriptItem[]) {

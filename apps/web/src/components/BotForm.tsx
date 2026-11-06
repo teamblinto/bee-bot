@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
+import { projectPathValue } from "../labels";
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { ModelPicker } from "./ModelPicker";
@@ -33,6 +34,7 @@ export function BotForm({
   const [name, setName] = useState(bot?.name ?? "");
   const [personality, setPersonality] = useState(bot?.personality ?? "");
   const [model, setModel] = useState(bot?.model ?? defaultBotModel);
+  const [projectPath, setProjectPath] = useState(bot?.projectPath ?? "");
   const [engine, setEngine] = useState<"claude" | "fake">("claude");
   const catalog = useSyncExternalStore(subscribeToConnection, () => getConnectionState().models);
   const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
@@ -48,7 +50,13 @@ export function BotForm({
     saving.current = true;
     setBusy(true);
     setError(undefined);
-    const fields = { name, personality, model, avatarSeed };
+    const fields = {
+      name,
+      personality,
+      model,
+      avatarSeed,
+      projectPath: projectPathValue(projectPath),
+    };
     const result = await postCommand(
       bot
         ? { type: "update-bot", botId: bot.id, ...fields }
@@ -115,6 +123,21 @@ export function BotForm({
           }}
         />
       </div>
+      <label className={labelClass}>
+        Project folder (optional)
+        <input
+          className="field text-ink"
+          aria-describedby="project-folder-help"
+          maxLength={1024}
+          spellCheck={false}
+          value={projectPath}
+          onChange={(event) => setProjectPath(event.target.value)}
+        />
+      </label>
+      <p id="project-folder-help" className="text-small text-ink-secondary">
+        Bots can read and change files here. Changing the folder starts a new session, resets access
+        to Supervised and clears Always allow.
+      </p>
       {error && (
         <p role="alert" className="text-small text-ink-secondary">
           {error}

@@ -591,7 +591,9 @@ describe("bot avatars", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_avatars';
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+      ALTER TABLE bots DROP COLUMN project_path;
+      DELETE FROM migrations WHERE name = 'bot_avatars';
       ALTER TABLE bots DROP COLUMN avatar_seed;`);
     db.close();
 
@@ -655,7 +657,9 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DELETE FROM migrations WHERE name = 'bot_avatars';
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+      ALTER TABLE bots DROP COLUMN project_path;
+      DELETE FROM migrations WHERE name = 'bot_avatars';
       ALTER TABLE bots DROP COLUMN avatar_seed;
       DELETE FROM migrations WHERE name = 'bot_engine';
       ALTER TABLE bots DROP COLUMN effort; ALTER TABLE bots DROP COLUMN mode;
@@ -913,4 +917,139 @@ describe("headless process", () => {
     expect(code).toBe(78);
     expect(stderr).not.toContain(token);
   }, 20_000);
+});
+
+describe("project folders", () => {
+  let project: string;
+
+  const makeFolder = () => {
+    const path = NodeFS.realpathSync.native(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-project-")),
+    );
+    cleanups.push(() => NodeFS.rmSync(path, { recursive: true, force: true }));
+    return path;
+  };
+
+  beforeEach(() => {
+    project = makeFolder();
+  });
+
+  const update = (base: string, botId: string, fields: Record<string, unknown>) =>
+    command(base, { type: "update-bot", botId, name: "Ada", personality: "", ...fields });
+
+  async function withBot() {
+    const server = await start();
+    const { id } = (await (await createBot(server.base)).json()) as Bot;
+    return { ...server, id };
+  }
+
+  it("stores the real path on create, and none when none was given", async () => {
+    const { base, store } = await start();
+    const link = NodePath.join(makeFolder(), "shortcut");
+    NodeFS.symlinkSync(project, link, "junction");
+    const created = { type: "create-bot", name: "Ada", personality: "", projectPath: link };
+    expect(await (await command(base, created)).json()).toMatchObject({ projectPath: project });
+    expect(await (await createBot(base)).json()).toMatchObject({ projectPath: null });
+    expect(store.state().bots.map(({ projectPath }) => projectPath)).toEqual([project, null]);
+  });
+
+  it("refuses a bad folder with its own code, on create and on update", async () => {
+    const { base, store, id } = await withBot();
+    const cases = [
+      ["relative/path", "folder_not_absolute"],
+      [NodePath.join(project, "gone"), "folder_not_found"],
+      [NodeOS.homedir(), "folder_home"],
+      [dataDir, "folder_bee_data"],
+    ];
+    for (const [projectPath, code] of cases) {
+      const created = { type: "create-bot", name: "Ben", personality: "", projectPath };
+      const refused = await command(base, created);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ code });
+      const updated = await update(base, id, { projectPath });
+      expect(updated.status).toBe(400);
+      expect(await updated.json()).toEqual({ code });
+    }
+    expect(store.state().bots).toHaveLength(1);
+    expect(store.getBot(id)?.projectPath).toBeNull();
+  });
+
+  it("keeps the folder when the field is missing, and clears it on null", async () => {
+    const { base, store, id } = await withBot();
+    await update(base, id, { projectPath: project });
+    await update(base, id, { name: "Ada Two" });
+    expect(store.getBot(id)).toMatchObject({ name: "Ada Two", projectPath: project });
+    await update(base, id, { projectPath: null });
+    expect(store.getBot(id)?.projectPath).toBeNull();
+  });
+
+  it("changing it clears grants and resets access in one event", async () => {
+    const { base, store, id } = await withBot();
+    store.grantTool(id, "Read");
+    store.setBotEngine(id, { model: "sonnet", effort: null, mode: "build", access: "full" });
+    const seq = store.bounds().latest;
+
+    await update(base, id, { projectPath: project });
+
+    expect(store.getBot(id)).toMatchObject({ access: "supervised", projectPath: project });
+    expect(store.toolGranted(id, "Read")).toBe(false);
+    expect(store.eventsAfter(seq)).toMatchObject([
+      { type: "bot.changed", bot: { access: "supervised", projectPath: project } },
+    ]);
+  });
+
+  it("re-saving the same folder resets nothing, however it is spelled", async () => {
+    const { base, store, id } = await withBot();
+    await update(base, id, { projectPath: project });
+    store.grantTool(id, "Read");
+    store.setBotEngine(id, { model: "sonnet", effort: null, mode: "build", access: "auto-edits" });
+
+    await update(base, id, { projectPath: project });
+    await update(base, id, { projectPath: `${project}${NodePath.sep}` });
+
+    expect(store.getBot(id)).toMatchObject({ access: "auto-edits", projectPath: project });
+    expect(store.toolGranted(id, "Read")).toBe(true);
+  });
+
+  it("a saved folder that has gone doesn't stop the owner editing the bot", async () => {
+    const { base, store, id } = await withBot();
+    await update(base, id, { projectPath: project });
+    NodeFS.rmSync(project, { recursive: true });
+    const response = await update(base, id, { name: "Renamed", projectPath: project });
+    expect(response.status).toBe(200);
+    expect(store.getBot(id)).toMatchObject({ name: "Renamed", projectPath: project });
+  });
+
+  it("a bot with no folder keeps its access and grants through an edit", async () => {
+    const { base, store, id } = await withBot();
+    store.grantTool(id, "Read");
+    store.setBotEngine(id, { model: "sonnet", effort: null, mode: "build", access: "full" });
+    await update(base, id, { name: "Renamed" });
+    await update(base, id, { name: "Renamed", projectPath: null });
+    expect(store.getBot(id)).toMatchObject({ access: "full", projectPath: null });
+    expect(store.toolGranted(id, "Read")).toBe(true);
+  });
+
+  it("migrates a bot from before folders, with no folder and no old events", async () => {
+    const first = await start();
+    await createBot(first.base);
+    const { id } = first.store.state().bots[0] as Bot;
+    await first.stop();
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec(`DELETE FROM migrations WHERE name = 'bot_project_path';
+      ALTER TABLE bots DROP COLUMN project_path;
+      UPDATE events SET payload = json_remove(payload, '$.bot.projectPath');`);
+    db.close();
+
+    const { store, port } = await start();
+    expect(store.state().bots[0]).toMatchObject({ id, projectPath: null });
+    expect(store.eventsAfter(0)).toEqual([]);
+    const client = await subscribe(port, 1);
+    expect(await client.next()).toMatchObject({
+      type: "snapshot",
+      state: { bots: [{ projectPath: null }] },
+    });
+  });
 });

@@ -10,7 +10,7 @@ import {
 } from "@beebot/contracts";
 import { z } from "zod";
 
-import { workspacePath } from "./engine.ts";
+import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
 import type { EventStore } from "./store.ts";
 
@@ -191,8 +191,9 @@ export function createApprovals({
       if (detail === undefined) {
         return malformed;
       }
+      const projectPath = store.getBot(run.botId)?.projectPath ?? null;
       const checkPath = () =>
-        pathPolicy(tool, input, workspacePath(dataDir, run.botId), {
+        pathPolicy(tool, input, workingFolder(dataDir, run.botId, projectPath), {
           home: NodeOS.homedir(),
           dataDir,
           platform: process.platform,

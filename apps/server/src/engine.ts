@@ -13,11 +13,13 @@ export type TurnOutcome =
   | { kind: "limited"; retryAfterMs: number }
   | { kind: "auth_failed"; pauseReason?: PauseReason }
   // The engine no longer has this session: the supervisor restarts from the room digest.
-  | { kind: "session_lost" };
+  | { kind: "session_lost" }
+  | { kind: "folder_missing" };
 
 export type EngineChoice = Pick<Bot, "model" | "effort" | "mode">;
 
 export type BotLaunch = EngineChoice & {
+  projectPath: string | null;
   botId: string;
   name: string;
   personality: string;
@@ -27,6 +29,9 @@ export type BotLaunch = EngineChoice & {
 
 export const workspacePath = (dataDir: string, botId: string) =>
   NodePath.join(dataDir, "bots", botId, "workspace");
+
+export const workingFolder = (dataDir: string, botId: string, projectPath: string | null) =>
+  projectPath ?? workspacePath(dataDir, botId);
 
 export type ToolStart = { id: string; name: string; detail: string | null };
 export type ThinkingState = { active: boolean; text: string };

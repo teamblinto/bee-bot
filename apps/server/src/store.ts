@@ -266,6 +266,12 @@ export const migrations: Array<{
       }
     },
   },
+  {
+    name: "bot_project_path",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN project_path TEXT;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -461,7 +467,7 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.avatar_seed AS avatarSeed`;
+    b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id ORDER BY b.rowid`,
   );
@@ -470,15 +476,22 @@ export function openEventStore(dataDir: string) {
   );
   const insertBot = db.prepare(
     `INSERT INTO bots
-     (id, name, personality, status, engine_account_id, model, avatar_seed, created_at)
-     VALUES (?, ?, ?, 'ready', ?, ?, ?, ?)`,
+     (id, name, personality, status, engine_account_id, model, avatar_seed, project_path, created_at)
+     VALUES (?, ?, ?, 'ready', ?, ?, ?, ?, ?)`,
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",
   );
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
   const updateBotFields = db.prepare(
-    "UPDATE bots SET name = ?, personality = ?, model = ?, effort = ?, avatar_seed = ? WHERE id = ?",
+    `UPDATE bots SET name = ?, personality = ?, model = ?, effort = ?, avatar_seed = ?,
+       project_path = ? WHERE id = ?`,
+  );
+  const resetBotAccess = db.prepare("UPDATE bots SET access = 'supervised' WHERE id = ?");
+  const deleteGrants = db.prepare("DELETE FROM bot_tool_grants WHERE bot_id = ?");
+  // delivered_event_seq stays: it splits the new session's digest from its input.
+  const forgetSessions = db.prepare(
+    "UPDATE scopes SET session_id = NULL, session_started = 0 WHERE bot_id = ?",
   );
   const updateBotEngine = db.prepare(
     "UPDATE bots SET model = ?, effort = ?, mode = ?, access = ? WHERE id = ?",
@@ -959,12 +972,13 @@ export function openEventStore(dataDir: string) {
       engineAccountId,
       model = defaultBotModel,
       avatarSeed = NodeCrypto.randomInt(maxAvatarSeed + 1),
+      projectPath = null,
     }: Pick<Bot, "name" | "personality" | "engineAccountId"> &
-      Partial<Pick<Bot, "model" | "avatarSeed">>) =>
+      Partial<Pick<Bot, "model" | "avatarSeed" | "projectPath">>) =>
       transaction(() => {
         const [id, roomId] = [NodeCrypto.randomUUID(), NodeCrypto.randomUUID()];
         const now = new Date().toISOString();
-        insertBot.run(id, name, personality, engineAccountId, model, avatarSeed, now);
+        insertBot.run(id, name, personality, engineAccountId, model, avatarSeed, projectPath, now);
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
         const bot = Bot.parse(selectBot.get(id));
@@ -974,11 +988,18 @@ export function openEventStore(dataDir: string) {
     getBot,
     updateBot: (
       id: string,
-      fields: Pick<Bot, "name" | "personality" | "model" | "effort" | "avatarSeed">,
+      fields: Pick<Bot, "name" | "personality" | "model" | "effort" | "avatarSeed" | "projectPath">,
     ) =>
       transaction(() => {
-        const { name, personality, model, effort, avatarSeed } = fields;
-        updateBotFields.run(name, personality, model, effort, avatarSeed, id);
+        const { name, personality, model, effort, avatarSeed, projectPath } = fields;
+        const moved = getBot(id)?.projectPath !== projectPath;
+        updateBotFields.run(name, personality, model, effort, avatarSeed, projectPath, id);
+        // What the owner allowed was allowed for the old folder, and a session can't change folder.
+        if (moved) {
+          deleteGrants.run(id);
+          resetBotAccess.run(id);
+          forgetSessions.run(id);
+        }
         const bot = getBot(id);
         if (bot) {
           emit({ type: "bot.changed", bot });
@@ -996,6 +1017,7 @@ export function openEventStore(dataDir: string) {
         return bot;
       }),
     botAccess: (id: string) => getBot(id)?.access,
+    botBusy: (id: string) => selectActiveRun.get(id) !== undefined,
     setBotPause: (id: string, reason: Bot["pauseReason"]) =>
       transaction(() => setPause(id, reason)),
     // An owner's pause is left alone: its reason says what the owner has to undo.
@@ -1125,7 +1147,9 @@ export function openEventStore(dataDir: string) {
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
         recordRun(run);
-        const { name, personality, model, effort, mode } = Bot.parse(selectBot.get(run.botId));
+        const { name, personality, model, effort, mode, projectPath } = Bot.parse(
+          selectBot.get(run.botId),
+        );
         return {
           id,
           attended: Attended.parse(selectWakeAttended.get(run.wakeId)).attended,
@@ -1140,6 +1164,7 @@ export function openEventStore(dataDir: string) {
             model,
             effort,
             mode,
+            projectPath,
             memory: buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
           },
         };

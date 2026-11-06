@@ -78,6 +78,7 @@ const bot = {
   mode: "build",
   access: "supervised",
   avatarSeed: 5,
+  projectPath: null,
 } as const;
 
 const preview = () => host.querySelector("svg.size-20")?.outerHTML;

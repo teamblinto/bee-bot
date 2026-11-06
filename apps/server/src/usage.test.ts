@@ -2,7 +2,13 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { ChatState, protocolVersion, ServerMessage, type UsageWindow } from "@beebot/contracts";
+import {
+  ChatState,
+  protocolVersion,
+  ServerMessage,
+  UsageSummary,
+  type UsageWindow,
+} from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
@@ -345,6 +351,39 @@ describe("the usage routes", () => {
     expect((await fetch(`${base}/usage?days=8&${query}`, { headers: auth })).status).toBe(400);
     const response = await fetch(`${base}/usage?days=7&${query}`, { headers: auth });
     expect(await response.json()).toEqual({ status: "unavailable" });
+  });
+
+  it("counts a bot's private and project folders to it, and nothing else", async () => {
+    const { base, store } = await boot();
+    const project = NodePath.join(dir, "app");
+    NodeFS.mkdirSync(project);
+    const bot = store.createBot({
+      name: "Ada",
+      personality: "",
+      engineAccountId: "claude",
+      projectPath: project,
+    });
+    const folders = [
+      projectFolder(workspacePath(dir, bot.id)),
+      projectFolder(project),
+      "D--somewhere-else",
+    ];
+    folders.forEach((folder, index) => {
+      const path = NodePath.join(dir, "projects", folder);
+      NodeFS.mkdirSync(path, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(path, "a.jsonl"),
+        `${line(String(index), at(Date.now() - 60_000), { requestId: `r${index}` })}\n`,
+      );
+    });
+    const response = await fetch(`${base}/usage?days=7&${query}`, { headers: auth });
+    const summary = UsageSummary.parse(await response.json());
+    if (summary.status !== "ok") {
+      throw new Error("expected a summary");
+    }
+    const inputs = Object.fromEntries(summary.bots.map((row) => [row.botId, row.input]));
+    expect(inputs[bot.id]).toBe(usage.input_tokens * 2);
+    expect(inputs["null"]).toBe(usage.input_tokens);
   });
 
   it("stores a failed check as unavailable, without pausing any bot", async () => {

@@ -121,9 +121,12 @@ async function boot(options: BootOptions = {}) {
       body: JSON.stringify(body),
     });
 
-  async function startTurn(engineAccountId: "claude" | "fake" = "claude") {
+  async function startTurn(
+    engineAccountId: "claude" | "fake" = "claude",
+    projectPath: string | null = null,
+  ) {
     const bot = (await (
-      await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId })
+      await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId, projectPath })
     ).json()) as Bot;
     const before = turns.length;
     await post({
@@ -992,5 +995,80 @@ describe("access levels", () => {
     expect(approvals.pending()).toHaveLength(1);
     closed.abort();
     expect(await decision).toMatchObject({ behavior: "deny" });
+  });
+});
+
+describe("a bot with a project folder", () => {
+  let project: string;
+
+  beforeEach(() => {
+    project = NodeFS.realpathSync.native(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-project-")),
+    );
+    cleanups.push(() => NodeFS.rmSync(project, { recursive: true, force: true }));
+  });
+
+  async function atLevel(access: "supervised" | "auto-edits" | "full") {
+    const server = await boot();
+    const { bot, turn } = await server.startTurn("claude", project);
+    await server.post({ type: "set-bot-engine", botId: bot.id, access });
+    return { ...server, bot, turn };
+  }
+
+  const write = (file_path: string) => toolCall("Write", { file_path, content: "x" });
+
+  it("auto-accepts edits in the folder, and asks about the same edit outside it", async () => {
+    const { turn, decide, nextCard, client } = await atLevel("auto-edits");
+    const file = NodePath.join(project, "src", "a.ts");
+    expect(await decisionOf(await mcp(turn.permissions, write(file)))).toMatchObject({
+      behavior: "allow",
+    });
+    expect(client.cards() ?? []).toEqual([]);
+
+    const call = mcp(turn.permissions, write(NodePath.join(dataDir, "..", "out", "a.ts")));
+    await decide(await nextCard(), "deny");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("refuses the bot's old private workspace: it is Bee's data now", async () => {
+    const { bot, turn } = await atLevel("auto-edits");
+    const file = NodePath.join(workspacePath(dataDir, bot.id), "a.ts");
+    const answer = await decisionOf(await mcp(turn.permissions, write(file)));
+    expect(answer.message).toMatch(/off limits/);
+  });
+
+  it.each([".npmrc", NodePath.join(".docker", "config.json")])(
+    "asks about %s even at Auto-accept edits",
+    async (name) => {
+      const { turn, decide, nextCard } = await atLevel("auto-edits");
+      const call = mcp(turn.permissions, write(NodePath.join(project, name)));
+      const card = await nextCard();
+      expect(card.canAlwaysAllow).toBe(false);
+      await decide(card, "allow");
+      expect(await decisionOf(await call)).toMatchObject({ behavior: "allow" });
+    },
+  );
+
+  it("offers no Always allow for a credential path, and a grant doesn't reach it", async () => {
+    const { turn, bot, store, decide, nextCard } = await atLevel("supervised");
+    store.grantTool(bot.id, "Read");
+    const file_path = NodePath.join(project, ".npmrc");
+    const call = mcp(turn.permissions, toolCall("Read", { file_path }));
+    const card = await nextCard();
+    expect(card.canAlwaysAllow).toBe(false);
+    expect((await decide(card, "always")).status).toBe(403);
+    await decide(card, "deny");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+
+    const plain = toolCall("Read", { file_path: NodePath.join(project, "notes.txt") });
+    expect(await decisionOf(await mcp(turn.permissions, plain))).toMatchObject({
+      behavior: "allow",
+    });
+  });
+
+  it("keeps Full access as it was: a credential path in the folder doesn't ask", async () => {
+    const { turn } = await atLevel("full");
+    const answer = await mcp(turn.permissions, write(NodePath.join(project, ".npmrc")));
+    expect(await decisionOf(answer)).toMatchObject({ behavior: "allow" });
   });
 });

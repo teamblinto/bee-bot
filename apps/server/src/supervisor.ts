@@ -49,6 +49,9 @@ function finishedRun(outcome: TurnOutcome, abortReason: unknown, tools: string[]
   if (outcome.kind === "completed") {
     return { status: "Completed", reason: null, reply: outcome.text, tools };
   }
+  if (outcome.kind === "folder_missing") {
+    return { status: "Failed", reason: "folder_missing" };
+  }
   if (abortReason === "stop") {
     return { status: "Cancelled", reason: "stopped" };
   }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 9;
+export const protocolVersion = 10;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -73,6 +73,8 @@ export const Bot = z.object({
   mode: BotMode,
   access: BotAccess,
   avatarSeed: AvatarSeed,
+  // The real path of the owner's folder. Null keeps the bot in its private workspace.
+  projectPath: z.string().nullable(),
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -110,6 +112,7 @@ export const RunReason = z.enum([
   "timeout",
   "stopped",
   "server_restarted",
+  "folder_missing",
 ]);
 export type RunReason = z.infer<typeof RunReason>;
 
@@ -343,6 +346,8 @@ const botFields = {
   model: BotModel.optional(),
   // Sent so a saved bot keeps the face its form previewed. The server picks one when it's missing.
   avatarSeed: AvatarSeed.optional(),
+  // Missing keeps the value, and null clears it.
+  projectPath: z.string().trim().min(1).max(1024).nullable().optional(),
 };
 
 export const Command = z.discriminatedUnion("type", [

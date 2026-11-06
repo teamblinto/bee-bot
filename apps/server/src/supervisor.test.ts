@@ -1183,6 +1183,7 @@ describe("fake engine", () => {
         model: "sonnet",
         effort: null,
         mode: "build",
+        projectPath: null,
         memory: "",
       },
       signal,
@@ -1207,5 +1208,108 @@ describe("fake engine", () => {
     const hanging = turn("/hang", controller.signal);
     controller.abort();
     expect(await hanging).toEqual({ kind: "failed" });
+  });
+});
+
+describe("a project folder", () => {
+  let project: string;
+
+  beforeEach(() => {
+    project = NodeFS.realpathSync.native(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-project-")),
+    );
+    cleanups.push(() => NodeFS.rmSync(project, { recursive: true, force: true }));
+  });
+
+  type Booted = Awaited<ReturnType<typeof boot>>;
+  const setFolder = ({ command }: Booted, bot: Bot, projectPath: string | null) =>
+    command({ type: "update-bot", botId: bot.id, name: bot.name, personality: "", projectPath });
+  const sessionRow = () =>
+    query("SELECT delivered_event_seq AS delivered, session_started AS started FROM scopes")[0];
+
+  async function afterOneTurn(projectPath: string | null = null) {
+    const engine = scriptedEngine();
+    const server = await boot(engine.runTurn);
+    const bot = await server.createBot();
+    await setFolder(server, bot, projectPath);
+    await server.send(bot, "my name is Ada");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.deliver();
+    engine.turns[0]?.finish(reply);
+    await expectStatus(server.store, bot, "Completed");
+    return { engine, server, bot };
+  }
+
+  it("changing it starts a new session seeded with the room, keeping what was delivered", async () => {
+    const { engine, server, bot } = await afterOneTurn();
+    const delivered = sessionRow()?.delivered;
+    await setFolder(server, bot, project);
+    expect(sessionRow()).toEqual({ delivered, started: 0 });
+
+    await server.send(bot, "what is my name?");
+    await expectTurns(engine, 2);
+    const turn = engine.turns[1];
+    expect(turn?.resume).toBe(false);
+    expect(turn?.sessionId).not.toBe(engine.turns[0]?.sessionId);
+    expect(turn?.prompt).toContain("Owner: my name is Ada");
+    expect(turn?.prompt).toContain("Bot: done");
+    expect(turn?.prompt.endsWith("what is my name?")).toBe(true);
+    expect(turn?.prompt.match(/what is my name/g)).toHaveLength(1);
+  });
+
+  it("re-saving it keeps the session", async () => {
+    const { engine, server, bot } = await afterOneTurn(project);
+    await setFolder(server, bot, project);
+    await server.send(bot, "next");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]).toMatchObject({
+      resume: true,
+      sessionId: engine.turns[0]?.sessionId,
+      prompt: "next",
+    });
+  });
+
+  it("can't change during a run, queued or running, but the other fields can", async () => {
+    const engine = scriptedEngine();
+    const server = await boot(engine.runTurn);
+    const bot = await server.createBot();
+    await server.send(bot, "hello");
+    await expectTurns(engine, 1);
+
+    const refused = await setFolder(server, bot, project);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ code: "bot_busy" });
+    expect(server.store.getBot(bot.id)?.projectPath).toBeNull();
+
+    const renamed = await server.command({
+      type: "update-bot",
+      botId: bot.id,
+      name: "Renamed",
+      personality: "",
+      projectPath: null,
+    });
+    expect(renamed.status).toBe(200);
+    expect(server.store.getBot(bot.id)?.name).toBe("Renamed");
+
+    engine.turns[0]?.finish(reply);
+    await expectStatus(server.store, bot, "Completed");
+    expect((await setFolder(server, bot, project)).status).toBe(200);
+  });
+
+  it("a missing one fails the turn without pausing, and the input is kept", async () => {
+    const engine = scriptedEngine();
+    const server = await boot(engine.runTurn);
+    const bot = await server.createBot();
+    await server.send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish({ kind: "folder_missing" });
+    await expectStatus(server.store, bot, "Failed");
+
+    expect(run(server.store, bot)?.reason).toBe("folder_missing");
+    expect(server.store.state().bots[0]).toMatchObject({ status: "ready", pauseReason: null });
+
+    await server.send(bot, "again");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]?.prompt).toBe("hello\n\nagain");
   });
 });

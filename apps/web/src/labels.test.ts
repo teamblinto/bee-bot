@@ -2,10 +2,12 @@ import type { MemoryItem } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
 import {
+  folderName,
   formatElapsed,
   liveStatusLine,
   liveThoughtLine,
   memoryReview,
+  projectPathValue,
   toolRowLabel,
   visibleDetail,
   workedLine,
@@ -13,6 +15,19 @@ import {
 
 it("shows characters that would hide or reorder a command, and leaves layout alone", () => {
   expect(visibleDetail("ls\n\tcat ‮gpj.exe\u0000")).toBe("ls\n\tcat [U+202E]gpj.exe[U+0000]");
+});
+
+it("takes a folder as Windows' Copy as path gives it, and empty as no folder", () => {
+  expect(projectPathValue('  "D:\\My Work\\app"  ')).toBe("D:\\My Work\\app");
+  expect(projectPathValue("'/home/ada/app'")).toBe("/home/ada/app");
+  expect(projectPathValue("D:\\app")).toBe("D:\\app");
+  expect(projectPathValue('  ""  ')).toBeNull();
+  expect(projectPathValue("   ")).toBeNull();
+});
+
+it("names a folder by its last segment", () => {
+  expect(folderName("D:\\work\\bee-bot")).toBe("bee-bot");
+  expect(folderName("/home/ada/app/")).toBe("app");
 });
 
 it("formats a turn's time the way the timer reads", () => {

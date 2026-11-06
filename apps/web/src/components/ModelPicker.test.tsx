@@ -221,6 +221,7 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   mode: "build",
   access: "supervised",
   avatarSeed: 7,
+  projectPath: null,
 });
 
 function renderControls(current: Bot) {

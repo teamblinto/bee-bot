@@ -120,12 +120,7 @@ function targetsOf(tool: ApprovalTool, input: Record<string, unknown>, win: bool
   return root === undefined ? undefined : [base, root];
 }
 
-function check(
-  tool: Exclude<ApprovalTool, "Bash">,
-  input: Record<string, unknown>,
-  workspace: string,
-  { home, dataDir, platform }: Context,
-) {
+function pathRules(platform: NodeJS.Platform) {
   const win = platform === "win32";
   const path = win ? NodePath.win32 : NodePath.posix;
   const fold = (text: string) => (win || platform === "darwin" ? text.toLowerCase() : text);
@@ -156,6 +151,23 @@ function check(
     }
     return { real, lexical: path.join(root, ...named) };
   }
+
+  const roots = (protectedRoots[platform] ?? linuxRoots).map((root) => path.normalize(root));
+  const browserRoots = roots.map((root) => fold(`${path.sep}${root}${path.sep}`));
+  const isProtected = (target: string) =>
+    target.split(/[\\/]+/).some((name) => credentialSegments.has(name.toLowerCase())) ||
+    browserRoots.some((root) => fold(`${target}${path.sep}`).includes(root));
+
+  return { win, path, within, walk, roots, isProtected };
+}
+
+function check(
+  tool: Exclude<ApprovalTool, "Bash">,
+  input: Record<string, unknown>,
+  workspace: string,
+  { home, dataDir, platform }: Context,
+) {
+  const { win, path, within, walk, roots, isProtected } = pathRules(platform);
 
   const realWorkspace = walk(path.resolve(workspace))?.real;
   const realHome = walk(path.resolve(home))?.real;
@@ -189,12 +201,6 @@ function check(
     return walk(path.isAbsolute(target) ? target : `${realWorkspace}/${target}`);
   };
 
-  const roots = (protectedRoots[platform] ?? linuxRoots).map((root) => path.normalize(root));
-  const browserRoots = roots.map((root) => fold(`${path.sep}${root}${path.sep}`));
-  const isProtected = (target: string) =>
-    target.split(/[\\/]+/).some((name) => credentialSegments.has(name.toLowerCase())) ||
-    browserRoots.some((root) => fold(`${target}${path.sep}`).includes(root));
-
   const targets = targetsOf(tool, input, win);
   if (!targets) {
     return refused;
@@ -213,6 +219,14 @@ function check(
     }
     const { real, lexical } = resolved;
     if (within(real, realWorkspace)) {
+      // A project holds the owner's real secrets. A private workspace, always under the data dir,
+      // holds only what the bot made there.
+      // shortcut: a search of the whole project names nothing protected, so Always allow still
+      // covers a Grep that reads `.npmrc`. Pass exclude globs to it if that ever matters.
+      const project = !within(realWorkspace, realData);
+      if (project && (isProtected(real) || isProtected(lexical) || (search && namesCredentials))) {
+        inside = false;
+      }
       continue;
     }
     inside = false;
@@ -249,5 +263,61 @@ export function pathPolicy(
     return check(tool, input, workspace, context);
   } catch {
     return refused;
+  }
+}
+
+// Returns the real path to store. A protected name counts anywhere in the path, as it does in
+// `check`, so nothing under a stored folder looks protected only because of where the folder is.
+export function checkProjectFolder(raw: string, { home, dataDir, platform }: Context) {
+  const { win, path, within, walk, roots, isProtected } = pathRules(platform);
+  const refuse = (refused: string) => ({ refused, real: undefined });
+  if (raw.includes("\0")) {
+    return refuse("folder_not_absolute");
+  }
+  // Checked before any fs call: touching a UNC path would reach out to that host.
+  if (win && /^[\\/]{2}/.test(raw)) {
+    return refuse("folder_network");
+  }
+  if (win ? !/^[a-z]:[\\/]/i.test(raw) : !path.isAbsolute(raw)) {
+    return refuse("folder_not_absolute");
+  }
+  try {
+    // Not resolved first: POSIX follows a link before applying `..`.
+    const target = walk(raw);
+    const realHome = walk(path.resolve(home))?.real;
+    const realData = walk(path.resolve(dataDir))?.real;
+    if (!target || !realHome || !realData) {
+      return refuse("folder_not_found");
+    }
+    const { real, lexical } = target;
+    if (win && real.startsWith("\\\\")) {
+      return refuse("folder_network");
+    }
+    const stats = NodeFS.statSync(real, { throwIfNoEntry: false });
+    if (!stats) {
+      return refuse("folder_not_found");
+    }
+    if (!stats.isDirectory()) {
+      return refuse("folder_not_directory");
+    }
+    if (real === path.parse(real).root) {
+      return refuse("folder_root");
+    }
+    if (within(realHome, real)) {
+      return refuse("folder_home");
+    }
+    if (within(real, realData) || within(realData, real)) {
+      return refuse("folder_bee_data");
+    }
+    if (
+      isProtected(real) ||
+      isProtected(lexical) ||
+      roots.some((root) => within(path.join(realHome, root), real))
+    ) {
+      return refuse("folder_protected");
+    }
+    return { real, refused: undefined };
+  } catch {
+    return refuse("folder_not_found");
   }
 }

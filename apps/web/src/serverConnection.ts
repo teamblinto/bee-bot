@@ -376,9 +376,18 @@ export async function connect() {
 
 const errorSentences: Record<string, string> = {
   approval_closed: "This request is already closed.",
+  bot_busy: "This bot is working. Wait for it to finish or stop it, then change the folder.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   engine_not_allowed: "The test engine isn't available here.",
+  folder_bee_data: "That folder holds Bee Bot's own data, so bots can't work there.",
+  folder_home: "Bots can't work in your whole home folder. Choose a project folder inside it.",
+  folder_network: "Network folders aren't supported. Choose a folder on this computer.",
+  folder_not_absolute: "Enter the full path to the folder, starting from the drive.",
+  folder_not_directory: "That path is a file. Choose a folder.",
+  folder_not_found: "That folder doesn't exist.",
+  folder_protected: "That folder holds passwords or saved logins, so bots can't work there.",
+  folder_root: "Bots can't work in a whole drive. Choose a folder on it.",
   message_id_reused: "That message couldn't be sent. Send it again.",
   not_found: "That's no longer here.",
   protocol_mismatch: "This app and its server don't match. Update Bee Bot.",

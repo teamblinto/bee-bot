@@ -191,7 +191,7 @@ function send(frames, code) {
   });
 }
 
-log({ pid: process.pid, args, env: Object.keys(process.env) });
+log({ pid: process.pid, args, cwd: process.cwd(), env: Object.keys(process.env) });
 if (args.includes("--mcp-config")) {
   log({ mcpConfig: NodeFS.readFileSync(args[args.indexOf("--mcp-config") + 1], "utf8") });
 }

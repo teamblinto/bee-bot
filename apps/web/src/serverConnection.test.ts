@@ -27,6 +27,7 @@ const bot: Bot = {
   mode: "build",
   access: "supervised",
   avatarSeed: 7,
+  projectPath: null,
 };
 const message = (id: string): ChatMessage => ({
   id,

@@ -25,9 +25,10 @@ import { type WebSocket, WebSocketServer } from "ws";
 
 import { createApprovals } from "./approvals.ts";
 import { staticClaudeModels } from "./claude.ts";
-import { fakeRunTurn, type RunTurn, workspacePath } from "./engine.ts";
+import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
+import { checkProjectFolder } from "./pathPolicy.ts";
 import type { EventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
 import {
@@ -161,6 +162,21 @@ export async function startServer({
     return { model, effort: change.effort === undefined ? kept : change.effort };
   }
 
+  // Only a new value is checked: a saved folder that has gone must not stop the owner editing the bot.
+  function projectChoice(proposed: string | null | undefined, current: string | null) {
+    if (proposed === undefined || proposed === current) {
+      return { projectPath: current };
+    }
+    if (proposed === null) {
+      return { projectPath: null };
+    }
+    const context = { home: NodeOS.homedir(), dataDir, platform: process.platform };
+    const { real, refused } = checkProjectFolder(proposed, context);
+    return real === undefined
+      ? { refused: { status: 400, body: { code: refused } } }
+      : { projectPath: real };
+  }
+
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
   function broadcast(message: ServerMessage) {
@@ -264,11 +280,16 @@ export async function startServer({
         if (!modelsOf(engineAccountId).some(({ id }) => id === model)) {
           return { status: 400, body: { code: "unknown_model" } };
         }
+        const folder = projectChoice(command.projectPath, null);
+        if (folder.refused) {
+          return folder.refused;
+        }
         const bot = store.createBot({
           name,
           personality,
           engineAccountId,
           model,
+          projectPath: folder.projectPath,
           ...(avatarSeed !== undefined && { avatarSeed }),
         });
         return { status: 200, body: bot };
@@ -283,9 +304,17 @@ export async function startServer({
         if (choice.refused) {
           return choice.refused;
         }
+        const folder = projectChoice(command.projectPath, current.projectPath);
+        if (folder.refused) {
+          return folder.refused;
+        }
+        const { projectPath } = folder;
+        if (projectPath !== current.projectPath && store.botBusy(botId)) {
+          return { status: 409, body: { code: "bot_busy" } };
+        }
         const { model, effort } = choice;
         const { avatarSeed = current.avatarSeed } = command;
-        const fields = { name, personality, model, effort, avatarSeed };
+        const fields = { name, personality, model, effort, avatarSeed, projectPath };
         return { status: 200, body: store.updateBot(botId, fields) };
       }
       case "set-bot-engine": {
@@ -413,9 +442,12 @@ export async function startServer({
       sendJson(response, 400, { code: "bad_request" });
       return;
     }
-    const folders = store
-      .botIds()
-      .map((id): [string, string] => [projectFolder(workspacePath(dataDir, id)), id]);
+    // shortcut: the owner's own Claude sessions in a project folder count to its bot, and two bots
+    // sharing a folder resolve to the later one, until attribution is by session.
+    const folders = store.botIds().flatMap((id): Array<[string, string]> => {
+      const current = workingFolder(dataDir, id, store.getBot(id)?.projectPath ?? null);
+      return [workspacePath(dataDir, id), current].map((path) => [projectFolder(path), id]);
+    });
     sendJson(response, 200, await history.summary(days, new Map(folders)));
   }
 

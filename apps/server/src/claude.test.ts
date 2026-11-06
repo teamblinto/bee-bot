@@ -35,6 +35,7 @@ const launch: BotLaunch = {
   model: "opus",
   effort: null,
   mode: "build",
+  projectPath: null,
   memory: "",
 };
 const prompt = "the owner's private question";
@@ -66,6 +67,7 @@ const fakeCommand = (scenario: string) => [process.execPath, fakeCli, scenario, 
 type LogEntry = {
   pid?: number;
   args?: string[];
+  cwd?: string;
   env?: string[];
   prompt?: string;
   mcpConfig?: string;
@@ -98,6 +100,7 @@ function turn(
   signal = new AbortController().signal,
   resume = false,
   memory = "",
+  projectPath: string | null = null,
 ) {
   const deltas: string[] = [];
   const tools: string[] = [];
@@ -111,7 +114,7 @@ function turn(
     prompt,
     sessionId: "00000000-0000-4000-8000-000000000009",
     resume,
-    launch: { ...launch, memory },
+    launch: { ...launch, memory, projectPath },
     signal,
     onDelta: (text) => deltas.push(text),
     onToolStart: ({ id, name, detail }) => {
@@ -695,5 +698,46 @@ describe("the engine probe", () => {
     plantEnv("CLAUDE_CONFIG_DIR", "somewhere");
     const status = await probeEngine(fakeCommand("logged-out-status"), dataDir);
     expect(status.pauseReason).toBe("config_dir");
+  });
+});
+
+describe("a project folder", () => {
+  let project: string;
+  const noSignal = new AbortController().signal;
+  const inProject = (scenario: string) => turn(scenario, noSignal, false, "", project).outcome;
+
+  beforeEach(() => {
+    project = NodeFS.realpathSync.native(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-project-")),
+    );
+  });
+
+  afterEach(() => {
+    NodeFS.rmSync(project, { recursive: true, force: true });
+  });
+
+  it("is where the turn runs, with the persona kept in the bot's private folder", async () => {
+    expect(await inProject("success")).toEqual({ kind: "completed", text: "noted" });
+    const [spawn] = spawns();
+    expect(spawn?.cwd).toBe(project);
+    const args = spawn?.args ?? [];
+    const personaPath = args[args.indexOf("--append-system-prompt-file") + 1];
+    expect(personaPath).toBe(NodePath.join(dataDir, "bots", launch.botId, "persona.md"));
+    expect(NodeFS.readFileSync(personaPath ?? "", "utf8")).toContain("Terse.");
+    expect(NodeFS.readdirSync(project)).toEqual([]);
+    expect(NodeFS.readdirSync(NodePath.dirname(project))).not.toContain("persona.md");
+  });
+
+  it.each(["gone", "a-file"])("is missing when it is %s, and nothing is spawned", async (name) => {
+    const path = NodePath.join(project, name);
+    if (name === "a-file") {
+      NodeFS.writeFileSync(path, "");
+    }
+    const { outcome, delivered } = turn("success", noSignal, false, "", path);
+    expect(await outcome).toEqual({ kind: "folder_missing" });
+    expect(spawns()).toEqual([]);
+    expect(delivered()).toBe(0);
+    expect(NodeFS.readdirSync(project)).toEqual(name === "gone" ? [] : ["a-file"]);
+    expect(NodeFS.existsSync(NodePath.join(dataDir, "bots"))).toBe(false);
   });
 });
