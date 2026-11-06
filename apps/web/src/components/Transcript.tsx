@@ -4,11 +4,15 @@ import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "reac
 
 import { answeredLine, liveStatusLine, workedLine } from "../labels";
 import type { LiveTool } from "../serverConnection";
+import { deriveMinimapItems } from "../timelineMinimap";
 import type { TranscriptItem } from "../transcript";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
+import { TimelineMinimap } from "./TimelineMinimap";
 import { columnClass, iconProps } from "./ui";
 import { ThinkingRow, WorkGroup, WorkingLabel } from "./WorkLog";
+
+const jumpOffsetPx = 24;
 
 // The list only ever grows, so a position is a stable key.
 const namedTools = (names: string[]) =>
@@ -90,6 +94,9 @@ export function Transcript({
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  // After a jump the view stays put, even when the target sits at the very end, until the owner
+  // scrolls or sends.
+  const jumped = useRef(false);
   const sent = useRef(0);
   const last = useRef({ top: 0, height: 0, view: 0 });
   const [away, setAway] = useState(false);
@@ -112,8 +119,10 @@ export function Transcript({
     sent.current = sentCount();
     const observer = new ResizeObserver(() => {
       const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 2;
+      const newlySent = sentCount() > sent.current;
       // Sending always returns to the end, and at the end there's nothing left to jump to.
-      if (sentCount() > sent.current || atEnd) {
+      if (newlySent || (atEnd && !jumped.current)) {
+        jumped.current = false;
         following.current = true;
         setAway(false);
       }
@@ -133,21 +142,39 @@ export function Transcript({
     // Shrinking content or a taller window also lowers scrollTop; neither is the user moving up.
     if (box.scrollTop < top && box.scrollHeight >= height && box.clientHeight === view) {
       follow(false);
-    } else if (box.scrollTop > top && atEnd) {
+    } else if (box.scrollTop > top && atEnd && !jumped.current) {
       follow(true);
     }
     last.current = { top: box.scrollTop, height: box.scrollHeight, view: box.clientHeight };
   }
 
   function onWheel({ deltaY, currentTarget: box }: WheelEvent<HTMLDivElement>) {
+    jumped.current = false;
     if (deltaY < 0 && box.scrollHeight > box.clientHeight) {
       follow(false);
     }
   }
 
   function jumpToLatest() {
+    jumped.current = false;
     follow(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+  }
+
+  function jumpToMessage(id: string) {
+    const box = scroller.current;
+    const row = content.current?.querySelector(`[data-message-id="${id}"]`);
+    if (!box || !row) {
+      return;
+    }
+    jumped.current = true;
+    follow(false);
+    const offset = row.getBoundingClientRect().top - box.getBoundingClientRect().top;
+    const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    box.scrollTo({
+      top: box.scrollTop + offset - jumpOffsetPx,
+      behavior: smooth ? "smooth" : "auto",
+    });
   }
 
   return (
@@ -157,6 +184,9 @@ export function Transcript({
         className="scroller h-full overflow-y-auto"
         onScroll={onScroll}
         onWheel={onWheel}
+        onPointerDown={() => {
+          jumped.current = false;
+        }}
       >
         <div ref={content} role="log" aria-label="Messages" className={`${columnClass} py-6`}>
           <ol>
@@ -165,7 +195,12 @@ export function Transcript({
               const previous = settledItems[index - 1];
               const gap = !previous ? "" : previous.sender === item.sender ? "mt-1" : "mt-6";
               return (
-                <li key={key} data-sender={item.sender} className={gap}>
+                <li
+                  key={key}
+                  data-sender={item.sender}
+                  data-message-id={item.kind === "message" ? item.message.id : undefined}
+                  className={gap}
+                >
                   <Item item={item} bot={bot} connected={connected} finishedTools={finishedTools} />
                 </li>
               );
@@ -209,6 +244,12 @@ export function Transcript({
           </div>
         </div>
       </div>
+      <TimelineMinimap
+        items={deriveMinimapItems(settledItems)}
+        scroller={scroller}
+        content={content}
+        onJump={jumpToMessage}
+      />
       <p role="status" className="sr-only">
         {liveStatusLine(thought !== undefined, workingSince ? liveTools : [], Boolean(draft))}
       </p>

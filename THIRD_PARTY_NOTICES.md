@@ -6,8 +6,10 @@ Bee Bot adapts parts of the following software.
 
 Source: `apps/web/src/visibleAnimation.ts`, `apps/web/src/markdown-incremental.ts` and its test,
 the usage limit and transcript logic in `apps/web/src/usageLimits.ts` and `apps/server/src/usage.ts`,
-and the model picker in `apps/web/src/components/ModelPicker.tsx`, `modelPickerSearch.ts`,
-`EffortGlyph.tsx`, `ComposerControls.tsx` and the provider logos in `Logos.tsx`.
+the model picker in `apps/web/src/components/ModelPicker.tsx`, `modelPickerSearch.ts`,
+`EffortGlyph.tsx`, `ComposerControls.tsx` and the provider logos in `Logos.tsx`, and the chat
+navigator in `apps/web/src/components/TimelineMinimap.tsx`, `apps/web/src/timelineMinimap.ts` and
+`apps/web/src/timelineMinimapWheel.ts`.
 
 ```text
 MIT License
