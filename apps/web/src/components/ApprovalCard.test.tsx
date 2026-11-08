@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { Approval, ApprovalChange, PendingApproval } from "@beebot/contracts";
+import type { Approval, ApprovalChange, Continuation, PendingApproval } from "@beebot/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 const postCommand = vi.hoisted(() => vi.fn());
 vi.mock("../serverConnection", () => ({ postCommand }));
 
-const { ApprovalCard } = await import("./ApprovalCard");
+const { ApprovalCard, ContinuationCard } = await import("./ApprovalCard");
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -144,4 +144,53 @@ it("decides with the digest", async () => {
     digest: approval.digest,
     decision: "allow",
   });
+});
+
+const continuation: Continuation = {
+  id: "continuation",
+  botId: "bot",
+  runId: "run",
+  kind: "approval",
+  tool: "Bash",
+  shown: "Bash: npm publish",
+  digest: "shown-digest",
+  status: "waiting",
+  reason: null,
+  createdAt: "2026-11-06T00:00:00.000Z",
+  expiresAt: "2026-11-06T00:30:00.000Z",
+  decidedAt: null,
+  finishedAt: null,
+};
+
+const button = (label: string) =>
+  [...host.querySelectorAll("button")].find(({ textContent }) => textContent === label);
+
+it("answers a Box bot's action bound to the digest of exactly what it shows", async () => {
+  postCommand.mockResolvedValue({ ok: true });
+  act(() => root.render(<ContinuationCard name="Ada" continuation={continuation} connected />));
+  expect(host.querySelector('[aria-label="Exact request"]')?.textContent).toBe("Bash: npm publish");
+  await act(async () => button("Approve")?.click());
+  await act(async () => button("Deny")?.click());
+  expect(postCommand).toHaveBeenCalledTimes(1);
+  expect(postCommand).toHaveBeenCalledWith({
+    type: "decide-continuation",
+    continuationId: continuation.id,
+    digest: continuation.digest,
+    decision: "approve",
+  });
+});
+
+it("asks the owner to do a hand_off themselves, and never offers to run it", () => {
+  act(() =>
+    root.render(
+      <ContinuationCard
+        name="Ada"
+        continuation={{ ...continuation, kind: "hand_off" }}
+        connected
+      />,
+    ),
+  );
+  expect(button("Approve")).toBeUndefined();
+  expect(button("I did it")).toBeDefined();
+  expect(host.textContent).toContain("Bee never does this itself");
 });

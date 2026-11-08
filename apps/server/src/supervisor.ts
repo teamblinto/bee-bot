@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
+import { outcomeText } from "./continuations.ts";
 import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueCap, recoveryVerdict } from "./recovery.ts";
@@ -142,6 +143,32 @@ export function createSupervisor({
       now: at,
     }),
   );
+  store.continuations.recoverContinuations();
+
+  // An outcome is the owner's answer to the bot's waiting reply, so the next turn resumes the
+  // saved session with it. The fixed message ID makes a repeat after a crash a no-op.
+  function deliverOutcomes() {
+    for (const row of store.continuations.unresumedContinuations()) {
+      try {
+        const target = store.continuations.deliveryTarget(row.id);
+        const sent =
+          target &&
+          store.sendMessage({
+            id: `continuation:${row.id}`,
+            roomId: target.roomId,
+            body: outcomeText(row),
+            attended: row.reason === "owner" || target.attended,
+            ...(target.replyToId && { replyToId: target.replyToId }),
+          });
+        if (sent !== "sent" && sent !== "duplicate") {
+          console.error(`beebotd: outcome of ${row.id} was not delivered: ${sent}`);
+        }
+        store.continuations.markResumed(row.id);
+      } catch (error) {
+        console.error(`beebotd: outcome of ${row.id} failed`, error);
+      }
+    }
+  }
 
   function settleWake(wake: Wake, now: string) {
     const { hasActiveRun, hasInput, ...admission } = store.wakeContext(wake, now);
@@ -379,6 +406,8 @@ export function createSupervisor({
     try {
       store.clearExpiredBlocks(now);
       store.fireDueRoutines(now);
+      store.continuations.expireContinuations();
+      deliverOutcomes();
       for (const wake of store.dueWakes(now)) {
         try {
           settleWake(wake, now);
@@ -407,6 +436,7 @@ export function createSupervisor({
   }
 
   function stopBot(botId: string) {
+    store.continuations.stopContinuations(botId);
     const running = store.stopBot(botId);
     if (running) {
       approvals.closeRun(running);

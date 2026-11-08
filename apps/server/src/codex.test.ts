@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   type BotAccess,
+  type BotProfile,
   type Command,
   type EngineLane,
   EngineStatus,
@@ -834,6 +835,7 @@ describe("through the real server, store and approvals", () => {
     scenario: string,
     access: BotAccess = "supervised",
     lane: EngineLane = "subscription",
+    profile: BotProfile = "operator",
   ) {
     const store = openEventStore(dataDir);
     const server = await startServer({
@@ -886,6 +888,7 @@ describe("through the real server, store and approvals", () => {
       })
     ).json()) as { id: string; roomId: string };
     await post({ type: "set-bot-engine", botId: bot.id, access });
+    await post({ type: "set-bot-profile", botId: bot.id, profile });
     await post({ type: "set-account-lane", engineAccountId: "claude", lane });
     plantEnv("FAKE_PROJECT", workspacePath(dataDir, bot.id));
     await post({
@@ -926,8 +929,15 @@ describe("through the real server, store and approvals", () => {
       { timeout: 8000 },
     );
   const tainted = () => Number(rows("SELECT tainted FROM scopes")[0]?.tainted);
+  const brokerKinds = "('allow', 'deny', 'approve', 'hand_off')";
+  // The approval gate's own rows. The broker decides first and writes its rows too.
   const auditRows = () =>
-    rows("SELECT tool, status, reason FROM audit_log WHERE tool IS NOT NULL ORDER BY id");
+    rows(
+      `SELECT tool, status, reason FROM audit_log
+       WHERE tool IS NOT NULL AND status NOT IN ${brokerKinds} ORDER BY id`,
+    );
+  const brokerRows = () =>
+    rows(`SELECT tool, status FROM audit_log WHERE status IN ${brokerKinds} ORDER BY id`);
 
   it("holds a command for the owner and runs it on allow", async () => {
     const { nextCard, decide } = await boot("approve");
@@ -937,6 +947,15 @@ describe("through the real server, store and approvals", () => {
     await runFinished();
     expect(decisions()).toEqual(["accept"]);
     expect(auditRows()).toEqual([{ tool: "Bash", status: "allowed", reason: "owner" }]);
+    expect(brokerRows()).toEqual([{ tool: "Bash", status: "allow" }]);
+  });
+
+  it("declines a command the bot's profile doesn't allow, before any card", async () => {
+    await boot("approve", "full", "subscription", "reader");
+    await runFinished();
+    expect(decisions()).toEqual(["decline"]);
+    expect(brokerRows()).toEqual([{ tool: "Bash", status: "approve" }]);
+    expect(auditRows()).toEqual([]);
   });
 
   it("declines a command the owner denied", async () => {

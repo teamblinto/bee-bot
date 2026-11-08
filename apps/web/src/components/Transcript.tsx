@@ -5,8 +5,8 @@ import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "reac
 import { answeredLine, liveStatusLine, workedLine } from "../labels";
 import type { LiveTool } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
-import { isOpenItem, itemKey, type TranscriptItem } from "../transcript";
-import { ApprovalCard } from "./ApprovalCard";
+import { isOpenItem, isOutcomeMessage, itemKey, type TranscriptItem } from "../transcript";
+import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
 import { RoutineCard } from "./RoutineCard";
 import { TimelineMinimap } from "./TimelineMinimap";
@@ -45,10 +45,23 @@ function Item({
       <p className="text-small text-ink-secondary">{answeredLine(approval)}</p>
     );
   }
+  if (item.kind === "continuation") {
+    return (
+      <ContinuationCard name={bot.name} continuation={item.continuation} connected={connected} />
+    );
+  }
   if (item.kind === "routine") {
     return <RoutineCard routine={item.routine} firing={item.firing} connected={connected} />;
   }
   const { message } = item;
+  // Bee's record of the outcome, not words the owner typed.
+  if (isOutcomeMessage(message)) {
+    return (
+      <p className="text-small wrap-anywhere whitespace-pre-wrap text-ink-secondary">
+        {message.body}
+      </p>
+    );
+  }
   if (message.author === "human") {
     return (
       <p className="ml-auto w-fit max-w-[80%] rounded-bubble bg-message px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">

@@ -136,7 +136,10 @@ export const decide: Decide = (call, { profile, manifest, session, attended }) =
 export function decideTool(
   call: { botId: string; runId: string; tool: string },
   context: PolicyContext,
+  decideCall: Decide = decide,
 ): PolicyDecision {
   const rule = ruleFor(call.tool);
-  return rule ? decide({ ...call, ...rule }, context) : { kind: "deny", reason: "unknown_tool" };
+  return rule
+    ? decideCall({ ...call, ...rule }, context)
+    : { kind: "deny", reason: "unknown_tool" };
 }

@@ -6,18 +6,25 @@ import {
   type Approval,
   type ApprovalChange,
   ApprovalTool,
+  type Bot,
   type BotAccess,
   type Command,
+  type ContinuationKind,
   type PendingApproval,
 } from "@beebot/contracts";
 import { z } from "zod";
 
+import { type Decide, decide as policyDecide, type PolicyDecision } from "./broker.ts";
+import { waitingMessage } from "./continuations.ts";
 import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
+import { refusedText } from "./policy.ts";
 import type { EventStore } from "./store.ts";
 import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
 const defaultTimeoutMs = 5 * 60_000;
+const defaultContinuationTtlMs = 30 * 60_000;
+const maxResultChars = 4000;
 const maxPreviewChars = 20_000;
 const alwaysAllowable: ReadonlySet<ApprovalTool> = new Set(["Read", "Glob", "Grep"]);
 
@@ -28,9 +35,50 @@ export type Decision =
 const malformed: Decision = { behavior: "deny", message: "Refused: this call can't be approved." };
 const notApproved: Decision = { behavior: "deny", message: "The owner did not approve this." };
 
-const Arguments = z.object({ tool_name: ApprovalTool, input: z.record(z.string(), z.unknown()) });
+const Arguments = z.object({
+  tool_name: ApprovalTool,
+  input: z.record(z.string(), z.unknown()),
+  tool_use_id: z.string().optional(),
+});
+
+// Runs the action a Box bot's owner approved, once. A throw means the outcome is unknown.
+export type Execute = (call: {
+  botId: string;
+  tool: string;
+  payload: string;
+}) => Promise<{ ok: boolean; output: string }>;
+
+const testExecute: Execute = async ({ tool }) => ({ ok: true, output: `Test engine ran ${tool}.` });
+
+export type BoxVerdict =
+  | { answer: "allow" }
+  | { answer: "deny"; message: string }
+  | { answer: "wait"; kind: ContinuationKind };
+
+// R17: a Box bot's call is never held. It is answered now, or it waits and the turn ends. Nobody
+// to ask means no, and Bee never offers to run what it has no way to run.
+export function boxVerdict(
+  decision: PolicyDecision,
+  { surface, executable }: { surface: boolean; executable: boolean },
+): BoxVerdict {
+  if (decision.kind === "allow") {
+    return { answer: "allow" };
+  }
+  if (decision.kind === "deny") {
+    return { answer: "deny", message: `Refused: ${decision.reason}` };
+  }
+  if (!surface) {
+    return { answer: "deny", message: "Denied: nobody can approve this right now." };
+  }
+  if (decision.kind === "approve" && !executable) {
+    return { answer: "deny", message: "Refused: Bee can't run this on the owner's approval." };
+  }
+  return { answer: "wait", kind: decision.kind === "approve" ? "approval" : "hand_off" };
+}
 
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text);
+
+const Request = z.object({ tool: ApprovalTool, input: z.record(z.string(), z.unknown()) });
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -160,6 +208,34 @@ function proposedChange(
   return null;
 }
 
+const marked = (mark: string, text: string) =>
+  text
+    ? text
+        .replace(/\r?\n$/, "")
+        .split(/\r?\n/)
+        .map((line) => mark + line)
+    : [];
+
+// Everything the owner approves, as text. Undefined when the card would have to cut some of it.
+function shownInFull(tool: ApprovalTool, detail: string, change: ApprovalChange | null) {
+  if (change && change.hiddenChars > 0) {
+    return undefined;
+  }
+  const lines = [`${tool}: ${detail}`];
+  if (change) {
+    lines.push(`(${change.action}${change.replaceAll ? ", every match" : ""})`);
+    for (const file of change.files ?? []) {
+      lines.push(
+        `${patchFileHeader}${file.path}`,
+        ...marked("- ", file.removed),
+        ...marked("+ ", file.added),
+      );
+    }
+    lines.push(...marked("- ", change.removed ?? ""), ...marked("+ ", change.added));
+  }
+  return lines.join("\n");
+}
+
 export function writeAction(target: string): ApprovalChange["action"] {
   try {
     const stats = NodeFS.statSync(target, { throwIfNoEntry: false });
@@ -205,6 +281,13 @@ type Options = {
   onChange: () => void;
   timeoutMs?: number | undefined;
   clock?: AwakeClock | undefined;
+  decide?: Decide | undefined;
+  executors?: ReadonlyMap<string, Execute> | undefined;
+  // Whether a person could see a card right now.
+  hasSurface?: (() => boolean) | undefined;
+  continuationTtlMs?: number | undefined;
+  // A continuation reached its outcome, which goes back to the bot.
+  onSettled?: (() => void) | undefined;
 };
 
 export function createApprovals({
@@ -213,9 +296,112 @@ export function createApprovals({
   onChange,
   timeoutMs = defaultTimeoutMs,
   clock = createAwakeClock(),
+  decide = policyDecide,
+  executors = new Map(),
+  hasSurface = () => false,
+  continuationTtlMs = defaultContinuationTtlMs,
+  onSettled = () => {},
 }: Options) {
   const runs = new Map<string, Run>();
   const held = new Map<string, HeldCall>();
+  const { continuations } = store;
+
+  const checkPath = (botId: string, tool: ApprovalTool, input: Record<string, unknown>) =>
+    pathPolicy(
+      tool,
+      input,
+      workingFolder(dataDir, botId, store.getBot(botId)?.projectPath ?? null),
+      {
+        home: NodeOS.homedir(),
+        dataDir,
+        platform: process.platform,
+      },
+    );
+
+  const executorFor = (bot: Bot, tool: string) =>
+    bot.engineAccountId === "fake" ? testExecute : executors.get(tool);
+
+  // Resolved again just before it runs, so a target that moved after the owner saw it is refused.
+  function resolveCall(botId: string, tool: ApprovalTool, input: Record<string, unknown>) {
+    const detail = detailText(tool, input);
+    const proposal = proposedChange(tool, input);
+    const policy = checkPath(botId, tool, input);
+    if (detail === undefined || proposal === undefined || !policy.allowed) {
+      return undefined;
+    }
+    const target = policy.writeTarget ?? null;
+    const change = proposal && target ? { ...proposal, action: writeAction(target) } : proposal;
+    const shown = shownInFull(tool, detail, change);
+    if (shown === undefined) {
+      return undefined;
+    }
+    const payload = JSON.stringify(stable({ tool, input, target }));
+    return { payload, shown, digest: sha256(JSON.stringify({ payload, shown })).digest("hex") };
+  }
+
+  function boxApprove(
+    run: Run,
+    bot: Bot,
+    tool: ApprovalTool,
+    input: Record<string, unknown>,
+    toolUseId: string,
+    decision: PolicyDecision,
+  ): Decision {
+    const executable = executorFor(bot, tool) !== undefined;
+    const verdict = boxVerdict(decision, { surface: hasSurface(), executable });
+    if (verdict.answer === "allow") {
+      return { behavior: "allow", updatedInput: input };
+    }
+    if (verdict.answer === "deny") {
+      return { behavior: "deny", message: verdict.message };
+    }
+    const resolved = resolveCall(run.botId, tool, input);
+    if (!resolved) {
+      return {
+        behavior: "deny",
+        message: "Refused: this can't be shown in full, so it can't be approved.",
+      };
+    }
+    const { id } = continuations.openContinuation({
+      ...resolved,
+      botId: run.botId,
+      runId: run.id,
+      toolUseId,
+      kind: verdict.kind,
+      tool,
+      request: JSON.stringify({ tool, input }),
+      ttlMs: continuationTtlMs,
+    });
+    return { behavior: "deny", message: waitingMessage(id) };
+  }
+
+  // Claimed before it runs, and never run again: a crash from here on leaves it unknown.
+  async function runApproved(id: string) {
+    const row = continuations.getContinuation(id);
+    const bot = row && store.getBot(row.botId);
+    if (!row || !bot) {
+      return;
+    }
+    const { tool, input } = Request.parse(JSON.parse(row.request));
+    const execute = executorFor(bot, tool);
+    if (!execute || resolveCall(row.botId, tool, input)?.digest !== row.digest) {
+      continuations.denyContinuation(id, "payload_changed");
+      return;
+    }
+    if (!continuations.claimContinuation(id)) {
+      return;
+    }
+    let status: "succeeded" | "failed" | "unknown" = "unknown";
+    let output = "";
+    try {
+      const result = await execute({ botId: row.botId, tool, payload: row.payload });
+      status = result.ok ? "succeeded" : "failed";
+      output = capped(result.output, maxResultChars);
+    } catch (error) {
+      console.error(`beebotd: approved action ${id} threw ${(error as Error)?.name}`);
+    }
+    continuations.finishContinuation(id, status, output);
+  }
 
   // Every outcome funnels through here, so a row and its held call can't disagree. Nothing is
   // released as allowed unless the decision is on record.
@@ -301,23 +487,25 @@ export function createApprovals({
       if (!parsed.success || !runs.has(run.id) || closed.aborted) {
         return malformed;
       }
-      const { tool_name: tool, input } = parsed.data;
+      const { tool_name: tool, input, tool_use_id: toolUseId = "" } = parsed.data;
+      // Every engine's prompt lands here, so the broker decides each call before anything else.
+      const ruling = store.policy.check(run, tool, input, decide);
       const detail = detailText(tool, input);
       const proposal = proposedChange(tool, input);
       if (detail === undefined || proposal === undefined) {
         return malformed;
       }
-      const projectPath = store.getBot(run.botId)?.projectPath ?? null;
-      const checkPath = () =>
-        pathPolicy(tool, input, workingFolder(dataDir, run.botId, projectPath), {
-          home: NodeOS.homedir(),
-          dataDir,
-          platform: process.platform,
-        });
-      const policy = checkPath();
+      const policy = checkPath(run.botId, tool, input);
       if (!policy.allowed) {
         store.auditTool(run.id, run.botId, tool, "refused", null);
         return { behavior: "deny", message: policy.message };
+      }
+      const bot = store.getBot(run.botId);
+      if (bot?.boundary === "box") {
+        return boxApprove(run, bot, tool, input, toolUseId, ruling);
+      }
+      if (ruling.kind !== "allow") {
+        return { behavior: "deny", message: refusedText(ruling) };
       }
       // Read on every call, so lowering the level holds the running turn's next call.
       const access = store.botAccess(run.botId);
@@ -335,7 +523,7 @@ export function createApprovals({
         proposal && writeTarget ? { ...proposal, action: writeAction(writeTarget) } : proposal;
       const decision = await hold(run, tool, { detail, change, canAlwaysAllow }, input, closed);
       // A link can be swapped in during a long hold. This narrows that window; it can't close it.
-      const after = decision.behavior === "allow" ? checkPath() : undefined;
+      const after = decision.behavior === "allow" ? checkPath(run.botId, tool, input) : undefined;
       if (after && !after.allowed) {
         store.auditTool(run.id, run.botId, tool, "refused", null);
         return { behavior: "deny", message: after.message };
@@ -361,6 +549,32 @@ export function createApprovals({
       return settle(call, decision === "deny" ? "denied" : "allowed", "owner")
         ? { status: 200, body: { ok: true } }
         : { status: 500, body: { code: "storage_failed" } };
+    },
+
+    // Only the owner's answer is taken here. What happens next goes back to the bot as new input.
+    decideContinuation: ({
+      continuationId,
+      digest,
+      decision,
+    }: Extract<Command, { type: "decide-continuation" }>) => {
+      const result = continuations.decideContinuation(continuationId, digest, decision);
+      if (result === "not_found") {
+        return { status: 404, body: { code: "not_found" } };
+      }
+      if (result === "closed" || result === "digest_mismatch") {
+        const code = result === "closed" ? "continuation_closed" : result;
+        return { status: 409, body: { code } };
+      }
+      if (result === "approved") {
+        void runApproved(continuationId)
+          .catch((error: unknown) =>
+            console.error(`beebotd: approved action failed: ${(error as Error)?.name}`),
+          )
+          .finally(onSettled);
+      } else {
+        onSettled();
+      }
+      return { status: 200, body: { ok: true } };
     },
 
     pending: (): PendingApproval[] =>

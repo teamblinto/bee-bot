@@ -34,6 +34,7 @@ function BotRow({
   const lastBotMessage = messages.findLast(({ author }) => author === "bot");
   const waiting =
     chat.approvals.some(({ botId, status }) => botId === bot.id && status === "pending") ||
+    chat.continuations.some(({ botId }) => botId === bot.id) ||
     openCards(chat, bot.id).length > 0;
   const unread = !selected && lastBotMessage && lastBotMessage.id !== lastSeen[bot.id];
   const working = isActive(chat.runs.find(({ botId }) => botId === bot.id));

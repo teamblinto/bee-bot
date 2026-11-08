@@ -4,9 +4,15 @@ import type { DatabaseSync } from "node:sqlite";
 import { type AuditPage, type Bot, BotProfile } from "@beebot/contracts";
 import { z } from "zod";
 
-import type { Decision } from "./approvals.ts";
 import { type AuditQuery, openAudit } from "./audit.ts";
-import { decideTool, Manifest, type PolicyDecision, ruleFor } from "./broker.ts";
+import {
+  type Decide,
+  decide as brokerDecide,
+  decideTool,
+  Manifest,
+  type PolicyDecision,
+  ruleFor,
+} from "./broker.ts";
 import type { StoreTx } from "./store.ts";
 
 export type BrokerRun = { id: string; botId: string; attended: boolean };
@@ -69,7 +75,12 @@ export function openPolicy(
   return {
     // The legs are set before the answer goes back, so the tool can't run ahead of its taint. An
     // approval taints at once too: if the owner then refuses, the session is only stricter.
-    check: (run: BrokerRun, tool: string, args: unknown): PolicyDecision =>
+    check: (
+      run: BrokerRun,
+      tool: string,
+      args: unknown,
+      decide: Decide = brokerDecide,
+    ): PolicyDecision =>
       transaction(() => {
         const row = selectBotPolicy.get(run.botId);
         const legsRow = selectLegs.get(run.id);
@@ -85,6 +96,7 @@ export function openPolicy(
               session: Legs.parse(legsRow),
               attended: run.attended,
             },
+            decide,
           );
         }
         if (rule && (decision.kind === "allow" || decision.kind === "approve")) {
@@ -154,7 +166,7 @@ const refusals: Record<Exclude<PolicyDecision["kind"], "allow">, string> = {
   hand_off: "Only the owner can do this. Tell the user what they need to do.",
 };
 
-function refusedText(decision: Exclude<PolicyDecision, { kind: "allow" }>) {
+export function refusedText(decision: Exclude<PolicyDecision, { kind: "allow" }>) {
   const reason = "reason" in decision ? decision.reason : "approval_required";
   return JSON.stringify({ status: "refused", reason, note: refusals[decision.kind] });
 }
@@ -169,24 +181,4 @@ export function gateTool(
 ) {
   const decision = policy.check(run, name, args);
   return decision.kind === "allow" ? call() : refusedText(decision);
-}
-
-const ApproveArgs = z.object({ tool_name: z.string(), input: z.unknown() });
-
-// The engine's permission prompt: the broker decides first, then the owner's access level does.
-export async function gateApproval(
-  policy: Policy,
-  run: BrokerRun,
-  args: unknown,
-  approve: () => Promise<Decision>,
-): Promise<Decision> {
-  // The gate refuses what it can't parse or doesn't know, after marking the scope as it must.
-  const parsed = ApproveArgs.safeParse(args);
-  if (!parsed.success || !ruleFor(parsed.data.tool_name)) {
-    return approve();
-  }
-  const decision = policy.check(run, parsed.data.tool_name, parsed.data.input);
-  return decision.kind === "allow"
-    ? approve()
-    : { behavior: "deny", message: refusedText(decision) };
 }

@@ -105,7 +105,8 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
         delete drafts[run.id];
         delete thinking[run.id];
       }
-      if (run.status === "Completed") {
+      // A parked run has posted its reply too, and that reply carries the tools.
+      if (run.status === "Completed" || run.status === "WaitingUser") {
         delete liveTools[run.id];
       }
       return { ...state, drafts, liveTools, thinking, chat: { ...chat, runs } };

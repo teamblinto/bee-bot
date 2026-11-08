@@ -1,4 +1,4 @@
-import type { Approval, ApprovalChange, PendingApproval } from "@beebot/contracts";
+import type { Approval, ApprovalChange, Continuation, PendingApproval } from "@beebot/contracts";
 import { useEffect, useRef, useState } from "react";
 
 import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
@@ -153,6 +153,98 @@ export function ApprovalCard({
             Always allow
           </button>
         )}
+      </div>
+    </article>
+  );
+}
+
+// A Box bot's turn has already ended: answering starts the next one with the outcome.
+export function ContinuationCard({
+  name,
+  continuation,
+  connected,
+}: {
+  name: string;
+  continuation: Continuation;
+  connected: boolean;
+}) {
+  const deciding = useRef(false);
+  const card = useRef<HTMLElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function decide(decision: "approve" | "deny") {
+    if (deciding.current) {
+      return;
+    }
+    deciding.current = true;
+    const hadFocus = card.current?.contains(document.activeElement);
+    setBusy(true);
+    setError(undefined);
+    const { id: continuationId, digest } = continuation;
+    const result = await postCommand({
+      type: "decide-continuation",
+      continuationId,
+      digest,
+      decision,
+    });
+    // On success the lock stays: this card closes when the continuation event arrives.
+    if (!result.ok) {
+      deciding.current = false;
+      setBusy(false);
+      setError(result.message);
+    } else if (hadFocus) {
+      document.querySelector<HTMLElement>("[data-composer]")?.focus();
+    }
+  }
+
+  const handOff = continuation.kind === "hand_off";
+  const title = handOff
+    ? `${name} needs you to do this`
+    : `${name} wants to run ${continuation.tool}`;
+  const disabled = busy || !connected;
+  return (
+    <article
+      ref={card}
+      aria-label={title}
+      className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <h3 className="text-name font-medium">{title}</h3>
+        <TimeLeft expiresAt={continuation.expiresAt} />
+      </div>
+      <pre
+        role="region"
+        tabIndex={0}
+        aria-label="Exact request"
+        className="max-h-[40dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
+        onWheel={(event) => event.stopPropagation()}
+      >
+        {visibleDetail(continuation.shown)}
+      </pre>
+      <p className="text-small text-ink-secondary">
+        {handOff
+          ? `Bee never does this itself. If you want it done, do it yourself, then tell ${name}.`
+          : `Bee runs exactly this, once, then tells ${name} how it went.`}
+      </p>
+      {error && <p className="text-small text-ink-secondary">{error}</p>}
+      <div className="flex flex-wrap justify-end gap-1">
+        <button
+          type="button"
+          className="button button-outline"
+          disabled={disabled}
+          onClick={() => void decide("deny")}
+        >
+          {handOff ? "Not done" : "Deny"}
+        </button>
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={disabled}
+          onClick={() => void decide("approve")}
+        >
+          {handOff ? "I did it" : "Approve"}
+        </button>
       </div>
     </article>
   );
