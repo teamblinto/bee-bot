@@ -44,6 +44,7 @@ import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import { openVaultEntries } from "./vault.ts";
+import { openVaultStore } from "./vaultStore.ts";
 import {
   buildMemory,
   ftsQuery,
@@ -1845,6 +1846,7 @@ export function openEventStore(dataDir: string) {
     tasks,
     boxes,
     continuations,
+    vaultStore: openVaultStore(db, tx),
     effects: openEffects(db, tx),
     policy: openPolicy(db, tx, getBot),
     onEvent: (listener: (event: ServerEvent) => void) => {

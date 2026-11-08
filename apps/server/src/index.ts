@@ -10,6 +10,7 @@ import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
+import { openVault, readVaultKeyFile } from "./vaultStore.ts";
 import { createAwakeClock } from "./watchdog.ts";
 
 const bootstrapTimeoutMs = 5000;
@@ -74,9 +75,16 @@ async function boot(bootstrap: Bootstrap) {
     return turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
   };
   const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
+  const vaultKey = bootstrap.vault ?? readVaultKeyFile(process.env);
+  if (vaultKey.status === "unavailable") {
+    console.error(`beebotd: API keys can't be stored: ${vaultKey.problem}`);
+  }
+  // The egress proxy reads API keys from here, so none ever enters a box, argv, env or a log.
+  const vault = openVault(store.vaultStore, vaultKey);
   const server = await startServer({
     ...bootstrap,
     store,
+    vault,
     clock,
     runTurn,
     probeEngine: probe,

@@ -8,12 +8,14 @@ import {
   nativeImage,
   Notification,
   powerMonitor,
+  safeStorage,
   shell,
   Tray,
 } from "electron";
 
 import { watchNotices } from "./notices.ts";
 import { sendPower, startServer, stopServer } from "./server.ts";
+import { loadVaultKey } from "./vault.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
 
@@ -155,6 +157,7 @@ async function start() {
       dataDir: NodePath.join(app.getPath("userData"), "server"),
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
       fakeEngine: Boolean(devServerUrl),
+      vault: await loadVaultKey(safeStorage, NodePath.join(app.getPath("userData"), "vault-key")),
     });
   } catch {
     app.quit();

@@ -1,4 +1,4 @@
-import type { Bot, EngineStatus } from "@beebot/contracts";
+import type { Bot, Command, EngineStatus } from "@beebot/contracts";
 import { Check, Minus, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
@@ -13,6 +13,7 @@ import { BotForm } from "./BotForm";
 import { CopyButton } from "./CopyButton";
 import { RedactedText } from "./RedactedText";
 import { iconProps } from "./ui";
+import { AutomatedAccessNotice } from "./VaultPanel";
 
 function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
   return (
@@ -20,14 +21,14 @@ function Step({ number, title, children }: { number: number; title: string; chil
       <section className="surface flex w-full max-w-[520px] flex-col gap-5 p-6">
         <div className="flex flex-col gap-2">
           <div aria-hidden className="flex gap-1">
-            {[1, 2, 3].map((step) => (
+            {[1, 2, 3, 4].map((step) => (
               <span
                 key={step}
                 className={`h-1 flex-1 rounded-full ${step <= number ? "bg-honey-fill" : "bg-raised"}`}
               />
             ))}
           </div>
-          <p className="text-label text-ink-faint">Step {number} of 3</p>
+          <p className="text-label text-ink-faint">Step {number} of 4</p>
           <h1 className="text-heading font-semibold">{title}</h1>
         </div>
         {children}
@@ -150,7 +151,19 @@ function ConnectStep({
   );
 }
 
-function NoticeStep() {
+function AcknowledgeStep({
+  number,
+  title,
+  command,
+  buttonLabel,
+  children,
+}: {
+  number: number;
+  title: string;
+  command: Extract<Command, { type: "acknowledge-notice" | "acknowledge-automated-access" }>;
+  buttonLabel: string;
+  children: ReactNode;
+}) {
   const acknowledging = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -162,8 +175,8 @@ function NoticeStep() {
     acknowledging.current = true;
     setBusy(true);
     setError(undefined);
-    const result = await postCommand({ type: "acknowledge-notice" });
-    // On success the lock stays: this step leaves when the notice event arrives.
+    const result = await postCommand(command);
+    // On success the lock stays: this step leaves when the acknowledged event arrives.
     if (!result.ok) {
       acknowledging.current = false;
       setBusy(false);
@@ -172,12 +185,8 @@ function NoticeStep() {
   }
 
   return (
-    <Step number={2} title="How this works">
-      <ul className="flex flex-col gap-2 text-ink-secondary">
-        <li>Your bots use your own Claude login.</li>
-        <li>Your Claude account terms apply to what they do.</li>
-        <li>Bots run only while this app is open.</li>
-      </ul>
+    <Step number={number} title={title}>
+      {children}
       {error && (
         <p role="alert" className="text-small text-ink-secondary">
           {error}
@@ -192,10 +201,41 @@ function NoticeStep() {
           disabled={busy}
           onClick={() => void acknowledge()}
         >
-          Got it
+          {buttonLabel}
         </button>
       </div>
     </Step>
+  );
+}
+
+function NoticeStep() {
+  return (
+    <AcknowledgeStep
+      number={2}
+      title="How this works"
+      command={{ type: "acknowledge-notice" }}
+      buttonLabel="Got it"
+    >
+      <ul className="flex flex-col gap-2 text-ink-secondary">
+        <li>Your bots use your own Claude login.</li>
+        <li>Your Claude account terms apply to what they do.</li>
+        <li>Bots run only while this app is open.</li>
+      </ul>
+    </AcknowledgeStep>
+  );
+}
+
+function AutomatedAccessStep() {
+  return (
+    <AcknowledgeStep
+      number={3}
+      title="Bots that run on their own"
+      command={{ type: "acknowledge-automated-access" }}
+      buttonLabel="I understand"
+    >
+      <AutomatedAccessNotice />
+      <p className="text-small text-ink-faint">You can add API keys later, on the Usage page.</p>
+    </AcknowledgeStep>
   );
 }
 
@@ -210,9 +250,13 @@ export function Onboarding({
 }) {
   const [connected, setConnected] = useState(false);
 
-  if (connection.chat.noticeAcknowledgedAt) {
+  const { noticeAcknowledgedAt, automatedAccessAcknowledgedAt } = connection.chat;
+  if (noticeAcknowledgedAt && !automatedAccessAcknowledgedAt) {
+    return <AutomatedAccessStep />;
+  }
+  if (noticeAcknowledgedAt) {
     return (
-      <Step number={3} title="Create your first bot">
+      <Step number={4} title="Create your first bot">
         <BotForm
           bot={undefined}
           submitLabel="Create bot"

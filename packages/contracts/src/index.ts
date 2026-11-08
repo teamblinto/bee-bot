@@ -8,6 +8,26 @@ export const noRestartExitCodes = {
   storageFailed: 79,
 } as const;
 
+// Why the vault can't hold a secret. Bee never falls back to keeping one unprotected.
+export const VaultProblem = z.enum([
+  // Linux with no keyring: safeStorage's `basic_text` uses a key built into Chromium.
+  "insecure_keyring",
+  "keyring_unavailable",
+  "key_unreadable",
+  // Headless, with no key file.
+  "no_key",
+  // The key doesn't open the secrets already stored.
+  "wrong_key",
+]);
+export type VaultProblem = z.infer<typeof VaultProblem>;
+
+// The vault's key-encryption key: 32 bytes. Only ever travels on the bootstrap channel.
+export const VaultKey = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ready"), key: z.base64().length(44) }),
+  z.object({ status: z.literal("unavailable"), problem: VaultProblem }),
+]);
+export type VaultKey = z.infer<typeof VaultKey>;
+
 export const Bootstrap = z.object({
   port: z.number().int().min(0).max(65535),
   token: z.string().min(32),
@@ -19,6 +39,8 @@ export const Bootstrap = z.object({
   claudeCommand: z.array(z.string().min(1)).min(1).optional(),
   // Tests only: replaces the `codex` binary, so they never touch the real CLI.
   codexCommand: z.array(z.string().min(1)).min(1).optional(),
+  // Sent by the desktop, which unwraps it with the OS keyring. Headless reads a key file instead.
+  vault: VaultKey.optional(),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
@@ -309,6 +331,9 @@ export const AuditPage = z.object({
   brokenRowId: z.number().nullable(),
 });
 export type AuditPage = z.infer<typeof AuditPage>;
+
+export const ApiKeyAccountId = EngineAccountId.exclude(["fake"]);
+export type ApiKeyAccountId = z.infer<typeof ApiKeyAccountId>;
 
 export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
 export type MemoryType = z.infer<typeof MemoryType>;
@@ -727,6 +752,13 @@ export const Command = z.discriminatedUnion("type", [
     digest: z.string(),
     decision: z.enum(["approve", "deny"]),
   }),
+  z.object({
+    type: z.literal("store-api-key"),
+    engineAccountId: ApiKeyAccountId,
+    key: z.string().trim().min(1).max(1000),
+  }),
+  z.object({ type: z.literal("delete-api-key"), engineAccountId: ApiKeyAccountId }),
+  z.object({ type: z.literal("acknowledge-automated-access") }),
 ]);
 export type Command = z.infer<typeof Command>;
 

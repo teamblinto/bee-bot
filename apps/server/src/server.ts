@@ -39,6 +39,8 @@ import { auditQuery, gateTool } from "./policy.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
 import { fallbackSummary, type Summarize } from "./summary.ts";
+import type { Vault } from "./vault.ts";
+import { deleteApiKey, openVault, storeApiKey } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
 import {
   createLimitRefresher,
@@ -54,6 +56,7 @@ const maxMcpBodyBytes = 16 * 1024 * 1024;
 
 type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
+  vault?: Vault | undefined;
   probeEngine: (lane: EngineLane) => Promise<EngineStatus>;
   probeCodex?:
     | ((lane: EngineLane, onModels: (models: EngineModel[]) => void) => Promise<EngineStatus>)
@@ -133,6 +136,7 @@ export async function startServer({
   allowedOrigins,
   fakeEngine = false,
   store,
+  vault = openVault(store.vaultStore, { status: "unavailable", problem: "no_key" }),
   probeEngine,
   probeCodex,
   runTurn = fakeRunTurn,
@@ -526,6 +530,13 @@ export async function startServer({
         }
         return result === "started" ? ok : { status: 409, body: { code: result } };
       }
+      case "store-api-key":
+        return storeApiKey(vault, command.engineAccountId, command.key);
+      case "delete-api-key":
+        return deleteApiKey(vault, command.engineAccountId);
+      case "acknowledge-automated-access":
+        store.vaultStore.acknowledgeAutomatedAccess();
+        return ok;
       case "skip-firing": {
         const result = store.skipFiring(command.firingId);
         if (result === "not_found") {
@@ -550,7 +561,7 @@ export async function startServer({
       return;
     }
     try {
-      const { status, body } = runCommand(command);
+      const { status, body } = await runCommand(command);
       sendJson(response, status, body);
       supervisor.pump();
     } catch (error) {

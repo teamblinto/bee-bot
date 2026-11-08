@@ -35,6 +35,7 @@ import {
   remainingPercent,
 } from "../usageLimits";
 import { iconProps } from "./ui";
+import { VaultPanel } from "./VaultPanel";
 
 type Metric = "tokens" | "cost";
 type View = "limits" | "usage";
@@ -565,6 +566,7 @@ export function UsagePage({
             {view === "limits" ? refreshNote : ""}
           </p>
           {view === "limits" && <LimitsView limits={limits} now={now} refreshing={refreshing} />}
+          {view === "limits" && <VaultPanel chat={chat} />}
           {view === "usage" && loading && !summary && <UsageSkeleton />}
           {view === "usage" && summary?.status === "unavailable" && (
             <p className="text-small text-ink-secondary">
