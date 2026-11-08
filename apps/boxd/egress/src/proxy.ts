@@ -29,6 +29,8 @@ export type EgressConfig = {
   apiPort: number;
   // Unix socket path (a named pipe on Windows, for tests).
   control: string;
+  // Socket that reaches beebotd (through boxd): the API lane's `/bee/*` goes there, and only that.
+  bee?: string;
   // Tests only: a plain-HTTP stand-in that receives what would go to the vendor's API host.
   testUpstreams?: Partial<Record<Vendor, string>>;
 };
@@ -42,7 +44,7 @@ export function parseConfig(value: unknown): EgressConfig | string {
   if (typeof value !== "object" || value === null) {
     return "config is not an object";
   }
-  const { listen, dnsPort, proxyPort, apiPort, control, testUpstreams } = value as Record<
+  const { listen, dnsPort, proxyPort, apiPort, control, bee, testUpstreams } = value as Record<
     string,
     unknown
   >;
@@ -59,7 +61,17 @@ export function parseConfig(value: unknown): EgressConfig | string {
   if (typeof control !== "string" || control === "") {
     return "control needs a socket path";
   }
-  const config: EgressConfig = { listen, dnsPort, proxyPort, apiPort, control };
+  if (bee !== undefined && (typeof bee !== "string" || bee === "")) {
+    return "bee needs a socket path";
+  }
+  const config: EgressConfig = {
+    listen,
+    dnsPort,
+    proxyPort,
+    apiPort,
+    control,
+    ...(bee !== undefined && { bee }),
+  };
   if (testUpstreams === undefined) {
     return config;
   }
@@ -189,8 +201,61 @@ export async function startEgress(
     );
   }
 
+  // A box reaches beebotd's MCP and hook endpoints here and nowhere else of the host. The box
+  // carries its own token for beebotd, so Authorization passes through; no key is added.
+  function onBee(
+    request: NodeHttp.IncomingMessage,
+    response: NodeHttp.ServerResponse,
+    botId: string | null,
+    socketPath: string,
+  ) {
+    const path = (request.url ?? "").slice("/bee".length);
+    const deny = (status: number, reason: string) => {
+      log({ ev: "bee", bot: botId, host: null, ip: null, decision: "deny", reason, status });
+      response.writeHead(status, { connection: "close" }).end();
+    };
+    if (botId === null) {
+      return deny(403, "unknown source");
+    }
+    if (!path.startsWith("/") || path.startsWith("//")) {
+      return deny(400, "bad path");
+    }
+    track(botId, request.socket);
+    const { authorization } = request.headers;
+    const upstream = NodeHttp.request({
+      socketPath,
+      method: request.method,
+      path,
+      headers: {
+        ...forwardHeaders(request.headers),
+        ...(authorization !== undefined && { authorization }),
+        host: "127.0.0.1",
+      },
+    });
+    upstream.on("response", (answer) => {
+      response.writeHead(answer.statusCode ?? 502, answer.headers);
+      answer.pipe(response);
+    });
+    upstream.on("error", () => {
+      if (!response.headersSent) {
+        response.writeHead(502, { connection: "close" });
+      }
+      response.end();
+    });
+    request.on("error", () => upstream.destroy());
+    response.once("close", () => {
+      if (!response.writableFinished) {
+        upstream.destroy();
+      }
+    });
+    request.pipe(upstream);
+  }
+
   function onApi(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
     const { botId, policy } = table.lookup(request.socket.remoteAddress);
+    if (config.bee !== undefined && (request.url ?? "").startsWith("/bee/")) {
+      return onBee(request, response, botId, config.bee);
+    }
     const vendor = vendors.find((name) => (request.url ?? "").startsWith(`/${name}/`));
     const host = vendor === undefined ? null : vendorApi[vendor].host;
     const deny = (status: number, reason: string) => {
@@ -326,6 +391,7 @@ export async function startEgress(
     const owner = {};
     controls.add(connection);
     let buffered = "";
+    let replies = Promise.resolve();
     connection.setEncoding("utf8");
     connection.on("data", (chunk: string) => {
       buffered += chunk;
@@ -352,7 +418,16 @@ export async function startEgress(
           type: message.type,
           bot: "botId" in message ? message.botId : null,
         });
-        connection.write(`${JSON.stringify({ ok: true })}\n`);
+        // Replies keep request order, so each waits for the listen before it.
+        replies = replies
+          .then(() => (message.type === "listen" ? listenOn(message.address) : undefined))
+          .then(
+            () => ({ ok: true }),
+            (error: NodeJS.ErrnoException) => ({ ok: false, error: error.code ?? "listen failed" }),
+          )
+          .then((reply) => {
+            connection.write(`${JSON.stringify(reply)}\n`);
+          });
       }
     });
     connection.on("error", () => connection.destroy());
@@ -366,7 +441,13 @@ export async function startEgress(
   const servers: NodeNet.Server[] = [];
   const sockets: NodeDgram.Socket[] = [];
   const ports: { dns: number; proxy: number; api: number }[] = [];
-  for (const address of config.listen) {
+  const listening = new Map<string, Promise<void>>();
+  const listenOn = (address: string) => {
+    const started = listening.get(address) ?? serve(address);
+    listening.set(address, started);
+    return started;
+  };
+  async function serve(address: string) {
     const dns = NodeDgram.createSocket(NodeNet.isIPv6(address) ? "udp6" : "udp4");
     onDns(dns, address);
     dns.bind(config.dnsPort, address);
@@ -394,6 +475,9 @@ export async function startEgress(
       proxy: (proxy.address() as NodeNet.AddressInfo).port,
       api: (api.address() as NodeNet.AddressInfo).port,
     });
+  }
+  for (const address of config.listen) {
+    await listenOn(address);
   }
 
   const control = NodeNet.createServer(onControl);

@@ -90,6 +90,11 @@ async function boxRuntime(botIds: string[], onAttach: (seen: Seen) => void = () 
   const prepared: string[][] = [];
   const runtime: BoxRuntime = {
     ...fake,
+    writeBotFile: async (botId, name, content) => {
+      const dir = testLayout(botId).beeDir.box;
+      NodeFS.mkdirSync(dir, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(dir, name), content);
+    },
     execAttach: async (botId, exec) => {
       if (exec.argv[0] === "sh") {
         prepared.push(exec.argv);

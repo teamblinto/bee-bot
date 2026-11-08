@@ -1,16 +1,27 @@
+import * as NodeFs from "node:fs";
+import * as NodePath from "node:path";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import { createBoxd } from "./boxd.ts";
-import type { Egress } from "./egress.ts";
+import { type Egress, noEgress } from "./egress.ts";
 import { boxNames } from "./policy.ts";
-import { Kind, type Response, boxToken, frameReader, jsonFrame, frame } from "./protocol.ts";
-import { createFakePodman, testRunSpec } from "./testing.ts";
+import {
+  Kind,
+  type Response,
+  boxToken,
+  egressId,
+  frameReader,
+  jsonFrame,
+  frame,
+} from "./protocol.ts";
+import { createFakePodman, testRunSpec, testStateDir } from "./testing.ts";
 
 const secret = Buffer.alloc(32, 3);
 const box = { prefix: "beebot", owner: "env-1", botId: "bot-1" };
 const names = boxNames(box);
 
-function harness(fake = createFakePodman(), egress?: Egress) {
+function harness(fake = createFakePodman(), egress?: Egress, stateDir = testStateDir()) {
   const responses = new Map<number, (response: Response) => void>();
   const output: { channel: number; kind: number; payload: Buffer }[] = [];
   const read = frameReader((channel, kind, payload) => {
@@ -23,13 +34,14 @@ function harness(fake = createFakePodman(), egress?: Egress) {
   });
   const boxd = createBoxd({
     podman: fake.podman,
-    egress: egress ?? { start: async () => {}, attach: async () => ({ dns: null, env: {} }) },
+    egress: egress ?? noEgress,
     secret,
     owner: box.owner,
     prefix: box.prefix,
     labels: { "beebot-dev": "1" },
     runSpec: testRunSpec,
     seccomp: "/opt/boxd/seccomp-chromium.json",
+    stateDir,
     send: read,
   });
   let nextId = 1;
@@ -43,7 +55,7 @@ function harness(fake = createFakePodman(), egress?: Egress) {
         jsonFrame({ id, verb, botId: box.botId, token, ...extra }).subarray(9),
       );
     });
-  return { boxd, call, output, fake };
+  return { boxd, call, output, fake, stateDir };
 }
 
 describe("boxd", () => {
@@ -61,7 +73,7 @@ describe("boxd", () => {
 
   it("creates two containers on two isolated networks with separate volumes", async () => {
     const egress: Egress = {
-      start: async () => {},
+      ...noEgress,
       attach: async ({ role }) => ({
         dns: `10.0.${role === "engine" ? 1 : 2}.2`,
         env: { HTTPS_PROXY: "http://proxy:3128" },
@@ -74,7 +86,11 @@ describe("boxd", () => {
       names.network.engine,
       names.network.browser,
     ]);
-    expect([...fake.resources.volume.keys()]).toEqual([names.volume.engine, names.volume.browser]);
+    expect([...fake.resources.volume.keys()]).toEqual([
+      names.volume("engine", "home"),
+      names.volume("engine", "workspace"),
+      names.volume("browser", "profile"),
+    ]);
     for (const network of fake.resources.network.values()) {
       expect(network.args).toContain("isolate=true");
       expect(network.labels["beebot-dev"]).toBe("1");
@@ -86,6 +102,41 @@ describe("boxd", () => {
     );
     expect(engineCreate?.env.HTTPS_PROXY).toBe("http://proxy:3128");
     expect(await call("create")).toMatchObject({ ok: false, error: "box bot-1 is stopped" });
+  });
+
+  it("mounts the bot's read-only directory and its account's credentials into the engine", async () => {
+    const { call, fake, stateDir } = harness();
+    expect(await call("create", { account: "../x" })).toMatchObject({ error: "bad account" });
+    expect(await call("create", { account: "claude" })).toMatchObject({ ok: true });
+    const engine = fake.resources.container.get(names.container.engine)!.args.join(" ");
+    const browser = fake.resources.container.get(names.container.browser)!.args.join(" ");
+    const botDir = NodePath.join(stateDir, "bots", box.botId, "box");
+    expect(engine).toContain(`${botDir}:/run/bee/bot:ro,`);
+    expect(engine).toContain(
+      `${NodePath.join(stateDir, "credentials", "claude")}:/run/bee/credential:`,
+    );
+    expect(browser).not.toContain(stateDir);
+    expect(
+      await call("put", { put: { name: "persona.md", content: "You are Bee." } }),
+    ).toMatchObject({ ok: true });
+    expect(NodeFs.readFileSync(NodePath.join(botDir, "persona.md"), "utf8")).toBe("You are Bee.");
+    expect(await call("put", { put: { name: "../evil", content: "" } })).toMatchObject({
+      error: "bad file",
+    });
+  });
+
+  it("opens the proxy's control socket only with its own token", async () => {
+    const { call } = harness();
+    const request = (botId: string, token: string) => call("egress", { botId, channel: 5 }, token);
+    expect(await request(egressId, boxToken(secret, box.botId))).toMatchObject({
+      error: "bad box token",
+    });
+    expect(await request(box.botId, boxToken(secret, box.botId))).toMatchObject({
+      error: "bad box token",
+    });
+    expect(await request(egressId, boxToken(secret, egressId))).toMatchObject({
+      error: "egress control unavailable",
+    });
   });
 
   it("rolls back a half-made box", async () => {
@@ -119,10 +170,14 @@ describe("boxd", () => {
 
   it("refuses an existing volume it does not own", async () => {
     const { call, fake } = harness();
-    fake.resources.volume.set(names.volume.engine, { labels: {}, args: [], running: false });
+    fake.resources.volume.set(names.volume("engine", "home"), {
+      labels: {},
+      args: [],
+      running: false,
+    });
     expect(await call("create")).toMatchObject({
       ok: false,
-      error: `volume ${names.volume.engine} is not owned by this boxd`,
+      error: `volume ${names.volume("engine", "home")} is not owned by this boxd`,
     });
   });
 

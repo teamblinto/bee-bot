@@ -52,7 +52,7 @@ export function recordingBoxRuntime(
   }
   return {
     ...runtime,
-    create: (botId) => step(botId, "creating", () => runtime.create(botId)),
+    create: (botId, account) => step(botId, "creating", () => runtime.create(botId, account)),
     start: (botId) => step(botId, "starting", () => runtime.start(botId)),
     stop: (botId) => step(botId, null, () => runtime.stop(botId)),
   };

@@ -4,6 +4,8 @@ import * as NodeReadline from "node:readline";
 
 import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@beebot/contracts";
 
+import { boxLayout } from "./boxEngine.ts";
+import { startBoxHost, windowsPodman } from "./boxHost.ts";
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
@@ -67,15 +69,6 @@ async function boot(bootstrap: Bootstrap) {
   const { claudeCommand = ["claude"], codexCommand = ["codex"], dataDir } = bootstrap;
   wipeRuntime(dataDir);
   const clock = createAwakeClock();
-  const claude = createClaudeRunTurn({ command: claudeCommand, dataDir, clock });
-  const codex = createCodexRunTurn({ command: codexCommand, dataDir });
-  const runTurn: RunTurn = (turn) => {
-    if (turn.launch.engineAccountId === "codex") {
-      return codex(turn);
-    }
-    return turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
-  };
-  const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
   const vaultKey = bootstrap.vault ?? readVaultKeyFile(process.env);
   if (vaultKey.status === "unavailable") {
     console.error(`beebotd: API keys can't be stored: ${vaultKey.problem}`);
@@ -83,8 +76,47 @@ async function boot(bootstrap: Bootstrap) {
   // The egress proxy reads API keys from here, so none ever enters a box, argv, env or a log.
   const vault = openVault(store.vaultStore, vaultKey);
 
-  // Until boxd runs a sidecar per bot: one Chromium for every bot, for development only.
-  const devBrowser = process.env.BEEBOT_DEV_BROWSER_CDP;
+  // Box bots run in boxd's containers in this Podman machine (Windows; see boxdRuntime.ts).
+  let port = 0;
+  const machine = process.env.BEEBOT_PODMAN_MACHINE;
+  const boxes =
+    machine === undefined
+      ? undefined
+      : await startBoxHost({
+          host: { kind: "podman-machine", podman: windowsPodman, machine },
+          installDir: "beebot/boxd",
+          owner: store.environmentId,
+          vault,
+          account: (botId) => store.getBot(botId)?.engineAccountId,
+          egressInput: store.egress.egressInput,
+          beebotdPort: () => port,
+          setBox: store.boxes.setBox,
+        }).catch((error: unknown) => {
+          console.error(`beebotd: boxes are unavailable: ${(error as Error)?.message}`);
+          return undefined;
+        });
+  const box = boxes && { runtime: boxes.runtime, layout: boxLayout(dataDir) };
+  const host = {
+    claude: createClaudeRunTurn({ command: claudeCommand, dataDir, clock }),
+    codex: createCodexRunTurn({ command: codexCommand, dataDir }),
+  };
+  // The CLIs as the box sees them, installed into its home by the vendors' installers.
+  const boxed = box && {
+    claude: createClaudeRunTurn({ command: ["claude"], dataDir, clock, box }),
+    codex: createCodexRunTurn({ command: ["codex"], dataDir, box }),
+  };
+  const runTurn: RunTurn = async (turn) => {
+    if (turn.launch.engineAccountId === "fake") {
+      return fakeRunTurn(turn);
+    }
+    // A box bot never falls back to the host.
+    const engines = store.getBot(turn.launch.botId)?.boundary === "box" ? boxed : host;
+    if (engines === undefined) {
+      return { kind: "failed" };
+    }
+    return turn.launch.engineAccountId === "codex" ? engines.codex(turn) : engines.claude(turn);
+  };
+  const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
   const server = await startServer({
     ...bootstrap,
     store,
@@ -100,13 +132,10 @@ async function boot(bootstrap: Bootstrap) {
       clock,
       lane: () => store.accountLane("claude"),
     }),
-    browserRuntime: devBrowser
-      ? createCdpBrowserRuntime(async () => ({
-          http: devBrowser,
-          downloadsDir: "/home/browser/downloads",
-        }))
-      : undefined,
+    box,
+    browserRuntime: boxes && createCdpBrowserRuntime(boxes.sidecar),
   });
+  port = server.port;
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe(store.accountLane("claude"));
   if (pauseReason) {
@@ -127,6 +156,7 @@ async function boot(bootstrap: Bootstrap) {
     stop: async () => {
       clearInterval(pruning);
       await server.close();
+      await boxes?.close();
       store.close();
     },
   };

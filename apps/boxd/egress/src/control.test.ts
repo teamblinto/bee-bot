@@ -9,6 +9,8 @@ describe("control messages", () => {
     ['{"type":"bind","address":"::ffff:10.89.171.5","botId":"b1"}', "bind"],
     ['{"type":"bind","address":"box-1","botId":"b1"}', "bind needs address and botId"],
     ['{"type":"unbind","address":"10.89.171.5"}', "unbind"],
+    ['{"type":"listen","address":"10.89.171.2"}', "listen"],
+    ['{"type":"listen","address":"proxy"}', "listen needs address"],
     ['{"type":"forget","botId":"b1"}', "forget"],
     [
       '{"type":"policy","botId":"b1","hosts":["PyPI.org."],"subscription":null,"api":null}',

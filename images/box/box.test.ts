@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -127,6 +128,8 @@ describe.skipIf(!podmanUp)("box image", () => {
   afterAll(async () => {
     if (containers.length) await podman(["rm", "-f", "-t", "0", ...containers]);
     if (volumes.length) await podman(["volume", "rm", "-f", ...volumes]);
+    // `podman machine ssh` must not leave the file the MSYS ssh writes for UserKnownHostsFile=NUL.
+    expect(readdirSync(process.cwd())).not.toContain("NUL");
   });
 
   it("ships no vendor CLI", async () => {

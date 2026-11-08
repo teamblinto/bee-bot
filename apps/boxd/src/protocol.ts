@@ -4,8 +4,10 @@ import type { BoxState } from "@beebot/contracts";
 
 // boxd speaks over its own stdin and stdout, because wsl.exe and `podman machine ssh` drop every
 // other file descriptor (S3). Frames multiplex the control channel (0) with one channel per exec.
-// Frame: u32 length of the rest, u32 channel, u8 kind, payload.
-export const Kind = { json: 0, data: 1, eof: 2, exit: 3, kill: 4 } as const;
+// Frame: u32 length of the rest, u32 channel, u8 kind, payload. The server numbers its channels
+// from 1; boxd opens channels toward beebotd (`open`) numbered from `boxdChannels`.
+export const Kind = { json: 0, data: 1, eof: 2, exit: 3, kill: 4, open: 5 } as const;
+export const boxdChannels = 0x80000000;
 export type Kind = (typeof Kind)[keyof typeof Kind];
 
 const maxFrame = 16 * 1024 * 1024;
@@ -52,9 +54,22 @@ export type Bootstrap = {
   owner: string;
   prefix: string;
   labels: Record<string, string>;
+  // Tests only: the egress proxy sends vendor API calls to these stand-ins.
+  testUpstreams?: Record<string, string>;
 };
 
-export type Verb = "create" | "start" | "stop" | "snapshot" | "exec";
+// `cdp` attaches to the sidecar's DevTools, `egress` to the proxy's control socket, `put` writes a
+// file into the bot's read-only directory, and `collect` copies a download into the workspace.
+export type Verb =
+  | "create"
+  | "start"
+  | "stop"
+  | "snapshot"
+  | "exec"
+  | "cdp"
+  | "egress"
+  | "put"
+  | "collect";
 
 export type ExecRequest = {
   argv: string[];
@@ -69,6 +84,10 @@ export type Request = {
   botId: string;
   token: string;
   exec?: ExecRequest;
+  account?: string;
+  channel?: number;
+  put?: { name: string; content: string };
+  collect?: { file: string; name: string };
 };
 
 export type Response =
@@ -78,6 +97,11 @@ export type Response =
 export type Hello = { ready: true } | { fatal: string };
 
 export const botIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const accountPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const botFileName = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+
+// Not a bot ID, so no bot's token opens the proxy's control socket.
+export const egressId = "-egress";
 
 function hmac(secret: Uint8Array, ...parts: string[]) {
   return NodeCrypto.createHmac("sha256", secret).update(parts.join("\n")).digest("hex");

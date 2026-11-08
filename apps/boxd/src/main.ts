@@ -1,8 +1,9 @@
 import * as NodeFs from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 
 import { createBoxd } from "./boxd.ts";
-import { noEgress } from "./egress.ts";
+import { createPodmanEgress, noEgress } from "./egress.ts";
 import { createPodman } from "./podman.ts";
 import { parseRunSpec } from "./policy.ts";
 import { type Bootstrap, type Hello, Kind, frameReader, jsonFrame } from "./protocol.ts";
@@ -20,6 +21,7 @@ function parseBootstrap(payload: Buffer): Bootstrap {
   const owner = get("owner");
   const prefix = get("prefix");
   const labels = get("labels");
+  const testUpstreams = get("testUpstreams");
   if (typeof secret !== "string" || Buffer.from(secret, "base64").length < 32) {
     throw new Error("bootstrap secret must be at least 32 bytes");
   }
@@ -42,7 +44,23 @@ function parseBootstrap(payload: Buffer): Bootstrap {
   ) {
     throw new Error("bad bootstrap labels");
   }
-  return { secret, owner, prefix, labels: labels as Record<string, string> };
+  if (
+    testUpstreams !== undefined &&
+    (testUpstreams === null ||
+      typeof testUpstreams !== "object" ||
+      !Object.values(testUpstreams).every((url) => typeof url === "string"))
+  ) {
+    throw new Error("bad bootstrap testUpstreams");
+  }
+  return {
+    secret,
+    owner,
+    prefix,
+    labels: labels as Record<string, string>,
+    ...(testUpstreams !== undefined && {
+      testUpstreams: testUpstreams as Record<string, string>,
+    }),
+  };
 }
 
 async function boot(bootstrap: Bootstrap) {
@@ -56,7 +74,29 @@ async function boot(bootstrap: Bootstrap) {
   const podman = createPodman();
   const result = await setup(podman, runSpec.engine);
   process.stderr.write(`boxd: setup ${JSON.stringify(result)}\n`);
-  const egress = noEgress;
+  // beebotd's endpoints reach the egress proxy through this socket; only that container mounts it.
+  const relayDir = NodePath.join(dir, "relay");
+  NodeFs.mkdirSync(relayDir, { recursive: true, mode: 0o755 });
+  NodeFs.rmSync(NodePath.join(relayDir, "bee.sock"), { force: true });
+  const script = NodePath.join(dir, "egress.mjs");
+  const egress = NodeFs.existsSync(script)
+    ? createPodmanEgress({
+        podman,
+        prefix: bootstrap.prefix,
+        owner: bootstrap.owner,
+        labels: bootstrap.labels,
+        image: runSpec.engine.image,
+        nodeDir: NodePath.join(dir, "node"),
+        script,
+        relayDir,
+        testUpstreams: bootstrap.testUpstreams,
+        log: (line) => process.stderr.write(`${line}\n`),
+        onExit: () => {
+          process.stderr.write("boxd: the egress proxy went away\n");
+          process.exit(1);
+        },
+      })
+    : noEgress;
   await egress.start();
   const boxd = createBoxd({
     podman,
@@ -67,9 +107,15 @@ async function boot(bootstrap: Bootstrap) {
     labels: bootstrap.labels,
     runSpec,
     seccomp,
+    stateDir: NodePath.join(dir, "state"),
     send,
   });
   await boxd.reapOrphans();
+  await boxd.rebind();
+  const relay = NodeNet.createServer((socket) => boxd.relay(socket));
+  await new Promise<void>((resolve) => relay.listen(NodePath.join(relayDir, "bee.sock"), resolve));
+  // The proxy runs as another user; the directory is mounted into its container alone.
+  NodeFs.chmodSync(NodePath.join(relayDir, "bee.sock"), 0o666);
   return boxd;
 }
 

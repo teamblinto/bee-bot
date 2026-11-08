@@ -6,12 +6,14 @@ import { Duplex } from "node:stream";
 
 import type { BoxState } from "@beebot/contracts";
 import {
-  type ExecRequest,
   type Hello,
   Kind,
+  type Request,
   type Response,
   type Verb,
   boxToken,
+  boxdChannels,
+  egressId,
   frame,
   frameReader,
   jsonFrame,
@@ -26,9 +28,18 @@ export type BoxdBootstrap = {
   owner: string;
   prefix?: string;
   labels?: Record<string, string>;
+  testUpstreams?: Record<string, string>;
 };
 
-export type BoxdConnection = { runtime: BoxRuntime; closed: Promise<void> };
+export type BoxdConnection = {
+  runtime: BoxRuntime;
+  // A fresh connection to the egress proxy's control socket, for the server's policies.
+  egressControl: () => Promise<Duplex>;
+  closed: Promise<void>;
+};
+
+// `relay` opens a connection to beebotd for each request a box makes to `/bee/*`.
+export type BoxdHooks = { relay?: () => Duplex };
 
 const chunkSize = 1024 * 1024;
 
@@ -37,6 +48,7 @@ const chunkSize = 1024 * 1024;
 export async function connectBoxd(
   transport: Duplex,
   bootstrap: BoxdBootstrap,
+  { relay }: BoxdHooks = {},
 ): Promise<BoxdConnection> {
   const { secret } = bootstrap;
   type Channel = {
@@ -72,6 +84,10 @@ export async function connectBoxd(
       pending.delete(response.id);
       return;
     }
+    if (channel >= boxdChannels) {
+      onRelayFrame(channel, kind, payload);
+      return;
+    }
     const entry = channels.get(channel);
     if (entry === undefined) {
       return;
@@ -88,8 +104,42 @@ export async function connectBoxd(
     }
   });
 
+  const relays = new Map<number, Duplex>();
+  function onRelayFrame(channel: number, kind: Kind, payload: Buffer) {
+    if (kind === Kind.open) {
+      const socket = relay?.();
+      if (socket === undefined) {
+        send(frame(channel, Kind.kill));
+        return;
+      }
+      relays.set(channel, socket);
+      socket.on("data", (chunk: Buffer) => send(frame(channel, Kind.data, chunk)));
+      socket.on("end", () => send(frame(channel, Kind.eof)));
+      socket.on("error", () => socket.destroy());
+      socket.on("close", () => {
+        if (relays.delete(channel)) {
+          send(frame(channel, Kind.kill));
+        }
+      });
+      return;
+    }
+    const socket = relays.get(channel);
+    if (kind === Kind.data) {
+      socket?.write(payload);
+    } else if (kind === Kind.eof) {
+      socket?.end();
+    } else if (kind === Kind.kill) {
+      relays.delete(channel);
+      socket?.destroy();
+    }
+  }
+
   const closed = new Promise<void>((resolve) => {
     transport.on("close", () => {
+      for (const socket of relays.values()) {
+        socket.destroy();
+      }
+      relays.clear();
       lost = new Error("boxd connection lost");
       onHello?.({ fatal: "boxd exited before it was ready" });
       for (const { reject } of pending.values()) {
@@ -122,7 +172,8 @@ export async function connectBoxd(
     transport.write(data, callback);
   }
 
-  function request(verb: Verb, botId: string, exec?: ExecRequest) {
+  type Extra = Omit<Request, "id" | "verb" | "botId" | "token">;
+  function request(verb: Verb, botId: string, extra: Extra = {}) {
     return new Promise<Response>((resolve, reject) => {
       if (lost !== null) {
         reject(lost);
@@ -130,9 +181,7 @@ export async function connectBoxd(
       }
       const id = nextId++;
       pending.set(id, { resolve, reject });
-      send(
-        jsonFrame({ id, verb, botId, token: boxToken(secret, botId), ...(exec ? { exec } : {}) }),
-      );
+      send(jsonFrame({ id, verb, botId, token: boxToken(secret, botId), ...extra }));
     }).then((response) => {
       if (!response.ok) {
         throw new Error(response.error);
@@ -141,7 +190,15 @@ export async function connectBoxd(
     });
   }
 
-  async function execAttach(botId: string, { argv, env, cwd }: BoxExec): Promise<BoxAttach> {
+  async function execAttach(botId: string, { argv, env, cwd }: BoxExec) {
+    return attach((channel) =>
+      request("exec", botId, {
+        exec: { argv, env, channel, ...(cwd === undefined ? {} : { cwd }) },
+      }),
+    );
+  }
+
+  async function attach(open: (channel: number) => Promise<Response>): Promise<BoxAttach> {
     const channel = nextChannel++;
     let exit: (code: number | null) => void = () => {};
     const exited = new Promise<number | null>((resolve) => {
@@ -186,7 +243,7 @@ export async function connectBoxd(
     };
     channels.set(channel, entry);
     try {
-      await request("exec", botId, { argv, env, channel, ...(cwd === undefined ? {} : { cwd }) });
+      await open(channel);
     } catch (error) {
       entry.exited = true;
       channels.delete(channel);
@@ -202,6 +259,7 @@ export async function connectBoxd(
       owner: bootstrap.owner,
       prefix: bootstrap.prefix ?? "beebot",
       labels: bootstrap.labels ?? {},
+      ...(bootstrap.testUpstreams && { testUpstreams: bootstrap.testUpstreams }),
     }),
   );
   const ready = await hello;
@@ -211,8 +269,15 @@ export async function connectBoxd(
   }
 
   const runtime: BoxRuntime = {
-    create: async (botId) => {
-      await request("create", botId);
+    create: async (botId, account) => {
+      await request("create", botId, account === undefined ? {} : { account });
+    },
+    writeBotFile: async (botId, name, content) => {
+      await request("put", botId, { put: { name, content } });
+    },
+    cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
+    collect: async (botId, file, name) => {
+      await request("collect", botId, { collect: { file, name } });
     },
     start: async (botId) => {
       await request("start", botId);
@@ -224,7 +289,12 @@ export async function connectBoxd(
       (await request("snapshot", botId)).state ?? "absent",
     execAttach,
   };
-  return { runtime, closed };
+  return {
+    runtime,
+    egressControl: async () =>
+      (await attach((channel) => request("egress", egressId, { channel }))).stream,
+    closed,
+  };
 }
 
 // Windows runs boxd in the Podman WSL machine (tested). macOS uses the same path with an applehv
@@ -234,21 +304,35 @@ export type BoxdHost =
   | { kind: "native"; node: string };
 
 // Local paths. `boxd[0]` is the entry point; runSpec.json and seccomp-chromium.json come from
-// images/box and are installed beside it.
-export type BoxdFiles = { boxd: string[]; runSpec: string; seccomp: string };
+// images/box and egress.mjs from apps/boxd/egress, and are installed beside it.
+export type BoxdFiles = { boxd: string[]; runSpec: string; seccomp: string; egress?: string };
 
 function installEntries(files: BoxdFiles) {
   return [
     ...files.boxd.map((path) => [NodePath.basename(path), path] as const),
     ["runSpec.json", files.runSpec] as const,
     ["seccomp-chromium.json", files.seccomp] as const,
+    ...(files.egress === undefined ? [] : [["egress.mjs", files.egress] as const]),
   ];
+}
+
+// `podman machine ssh` runs the first `ssh` on PATH with `UserKnownHostsFile=NUL`. The MSYS ssh
+// that ships with Git for Windows takes NUL for a file name and leaves a file called NUL in the
+// working directory, so Windows' own OpenSSH goes first.
+export function podmanEnv(env: NodeJS.ProcessEnv = process.env, platform = process.platform) {
+  if (platform !== "win32") {
+    return env;
+  }
+  const key = Object.keys(env).find((name) => name.toUpperCase() === "PATH") ?? "Path";
+  const openSsh = NodePath.win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH");
+  return { ...env, [key]: `${openSsh};${env[key] ?? ""}` };
 }
 
 function run(command: string, args: string[], stdin: string) {
   return new Promise<void>((resolve, reject) => {
     const child = NodeChildProcess.spawn(command, args, {
       stdio: ["pipe", "ignore", "pipe"],
+      env: podmanEnv(),
       windowsHide: true,
     });
     const err: Buffer[] = [];
@@ -268,7 +352,9 @@ export async function launchBoxd({
   installDir,
   files,
   bootstrap,
+  hooks,
 }: {
+  hooks?: BoxdHooks;
   host: BoxdHost;
   // Relative to the host user's home directory.
   installDir: string;
@@ -298,7 +384,7 @@ export async function launchBoxd({
         host.machine,
         `exec "$HOME/${installDir}/${nodeBin}" "$HOME/${installDir}/${entry}"`,
       ],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+      { stdio: ["pipe", "pipe", "pipe"], env: podmanEnv(), windowsHide: true },
     );
   } else {
     const dir = NodePath.join(NodeOs.homedir(), installDir);
@@ -322,7 +408,7 @@ export async function launchBoxd({
   // The wrapper does not always close when the process ends; the process ending is what counts.
   child.on("close", () => transport.destroy());
   try {
-    const connection = await connectBoxd(transport, bootstrap);
+    const connection = await connectBoxd(transport, bootstrap, hooks);
     return {
       ...connection,
       stderr: () => stderr,

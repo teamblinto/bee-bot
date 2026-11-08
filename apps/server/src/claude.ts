@@ -784,12 +784,14 @@ export function createClaudeRunTurn({
     }
     const cwd = box ? box.layout.workdir : workingFolder(dataDir, launch.botId, projectPath);
     const privateFolder = workspacePath(dataDir, launch.botId);
-    const personaPath = box
-      ? NodePath.join(box.layout.beeDir.host(launch.botId), "persona.md")
-      : NodePath.join(NodePath.dirname(privateFolder), "persona.md");
+    const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");
     await NodeFS.mkdir(privateFolder, { recursive: true });
-    await NodeFS.mkdir(NodePath.dirname(personaPath), { recursive: true });
-    await NodeFS.writeFile(personaPath, personaText(launch));
+    if (box) {
+      await box.runtime.writeBotFile(launch.botId, "persona.md", personaText(launch));
+    } else {
+      await NodeFS.mkdir(NodePath.dirname(personaPath), { recursive: true });
+      await NodeFS.writeFile(personaPath, personaText(launch));
+    }
 
     const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;
     const configPath = NodePath.join(dataDir, "runtime", name);
