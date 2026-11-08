@@ -33,6 +33,7 @@ import { chainAudit, openAudit } from "./audit.ts";
 import { openBoxes } from "./boxes.ts";
 import { openContinuations } from "./continuations.ts";
 import { openEffects } from "./effects.ts";
+import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
@@ -1831,6 +1832,7 @@ export function openEventStore(dataDir: string) {
     boxes,
     continuations,
     effects: openEffects(db, tx),
+    egress: openEgress(db),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);
     },
