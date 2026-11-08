@@ -244,7 +244,8 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
   beforeAll(async () => {
     const { image, files } = prepareRun(prefix, temp);
 
-    // The vendor stand-in on the proxy's upstream network answers with a hash of the key it got.
+    // The vendor stand-in answers with a hash of the key it got. It sits on a network of the test's
+    // own, which the proxy joins once boxd has made it and its upstream network.
     const respond = [
       'key=""',
       "while IFS= read -r line; do line=${line%$'\\r'}; [ -z \"$line\" ] && break",
@@ -260,8 +261,8 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
         `cat > ${dir}/respond.sh <<'BEEBOT_EOF'`,
         respond,
         "BEEBOT_EOF",
-        `podman network create --disable-dns --opt isolate=true --label beebot-dev=1 --label beebot.owner=${prefix} ${prefix}-egress-up >/dev/null`,
-        `podman run -d --name ${prefix}-vendor --label beebot-dev=1 --label beebot.owner=${prefix} --user 10001:10001 --cap-drop=all --network ${prefix}-egress-up -v ${dir}/respond.sh:/respond.sh:ro ${image} socat TCP-LISTEN:9000,fork,reuseaddr 'SYSTEM:bash /respond.sh' >/dev/null`,
+        `podman network create --disable-dns --opt isolate=true --label beebot-dev=1 ${prefix}-vendor-net >/dev/null`,
+        `podman run -d --name ${prefix}-vendor --label beebot-dev=1 --user 10001:10001 --cap-drop=all --network ${prefix}-vendor-net -v ${dir}/respond.sh:/respond.sh:ro ${image} socat TCP-LISTEN:9000,fork,reuseaddr 'SYSTEM:bash /respond.sh' >/dev/null`,
         `podman inspect ${prefix}-vendor --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`,
       ].join("\n"),
     );
@@ -294,6 +295,8 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       },
       files,
     });
+    const joined = await sh(`podman network connect ${prefix}-vendor-net ${prefix}-egress`);
+    expect(joined.code, joined.stderr).toBe(0);
   }, 900_000);
 
   afterAll(async () => {
@@ -323,6 +326,24 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       "grep -E '^(CapEff|NoNewPrivs)' /proc/self/status; touch /etc/x 2>&1 | grep -o 'Read-only file system'",
     );
     expect(status.output).toMatch(/^CapEff:\s+0+\nNoNewPrivs:\s+1\nRead-only file system$/);
+  }, 600_000);
+
+  it("isolates every network it makes, the proxy's upstream among them", async () => {
+    await inBox("true");
+    const listed = await sh(
+      `podman network inspect $(podman network ls -q --filter label=beebot.owner=${prefix})`,
+    );
+    expect(listed.code, listed.stderr).toBe(0);
+    const networks = JSON.parse(listed.stdout) as {
+      name: string;
+      options?: Record<string, string>;
+    }[];
+    // The upstream network and the box's two.
+    expect(networks.map(({ name }) => name)).toContain(`${prefix}-egress-up`);
+    expect(networks.length).toBeGreaterThanOrEqual(3);
+    for (const { name, options } of networks) {
+      expect({ name, isolate: options?.isolate }).toEqual({ name, isolate: "true" });
+    }
   }, 600_000);
 
   it("gives the engine its persona read-only and its credentials writable", async () => {
