@@ -1,0 +1,14 @@
+{
+  "name": "@beebot/egress",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bee Bot egress proxy, runs beside boxd in the Linux host",
+  "type": "module",
+  "scripts": {
+    "test": "vp test run"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
