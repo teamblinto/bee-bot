@@ -2271,7 +2271,7 @@ export function openEventStore(dataDir: string) {
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
         recordRun(run);
-        const { name, personality, model, effort, mode, projectPath } = BotRow.parse(
+        const { name, personality, model, effort, mode, projectPath, profile } = BotRow.parse(
           selectBot.get(run.botId),
         );
         return {
@@ -2290,7 +2290,11 @@ export function openEventStore(dataDir: string) {
             effort,
             mode,
             projectPath,
-            memory: buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
+            // A Researcher reads the web and holds no private data (§12), so it gets no memory.
+            memory:
+              profile === "researcher"
+                ? ""
+                : buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
           },
         };
       }),

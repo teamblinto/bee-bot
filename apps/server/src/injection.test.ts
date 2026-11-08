@@ -312,4 +312,13 @@ describe("exfiltration", { timeout: 30_000 }, () => {
     expect(browser.received).toEqual([]);
     expect(leaks()).toEqual([]);
   });
+
+  it("a Researcher browsing a hostile page holds no private memory to leak", async () => {
+    const { rae } = await boot();
+    send(rae.roomId, `Read the news. ${open("https://news.example/")}`);
+    await settle(1);
+    expect(audit("memory_search")).toEqual(["deny nobody_watching"]);
+    expect(browser.received).toEqual(["navigate https://news.example/", `navigate ${attacker}?d=`]);
+    expect(leaks()).toEqual([]);
+  });
 });
