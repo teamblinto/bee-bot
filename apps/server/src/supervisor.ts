@@ -349,7 +349,7 @@ export function createSupervisor({
       if (outcome.kind !== "session_lost" || controller.signal.aborted) {
         return outcome;
       }
-      const { prompt, sessionId } = store.restartSession(run.id);
+      const { prompt, sessionId } = store.restartSession(run.id, run.launch.memory !== "");
       return attempt(prompt, sessionId, false);
     })();
     const ended = turn
