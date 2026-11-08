@@ -1,8 +1,6 @@
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import { once } from "node:events";
 import * as NodeFS from "node:fs";
-import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -10,8 +8,9 @@ import { type Bot, type ChatState, type Command, protocolVersion } from "@beebot
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import { daemonTestTimeoutMs, spawnBeebotd } from "./fixtures/beebotd.ts";
+
 // The real `beebotd` on plain Node, driving the stand-in Claude CLI as a child process.
-const entry = NodePath.join(import.meta.dirname, "index.ts");
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
 const token = "t".repeat(43);
 
@@ -29,37 +28,14 @@ afterEach(async () => {
   await vi.waitFor(() => NodeFS.rmSync(dataDir, { recursive: true, force: true }));
 });
 
-async function freePort() {
-  const probe = NodeNet.createServer().listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const { port } = probe.address() as NodeNet.AddressInfo;
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
-
 async function startDaemon(scenario: string, env: NodeJS.ProcessEnv = {}) {
-  const port = await freePort();
-  const child = NodeChildProcess.spawn(process.execPath, [entry], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ...env },
-  });
-  const exited = once(child, "exit");
-  cleanups.push(async () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-      await exited;
-    }
-  });
-  let output = "";
-  const collect = (chunk: Buffer) => {
-    output += chunk.toString();
-  };
-  child.stdout.on("data", collect);
-  child.stderr.on("data", collect);
   const claudeCommand = [process.execPath, fakeCli, scenario, NodePath.join(dataDir, "cli.log")];
-  const bootstrap = { port, token, dataDir, allowedOrigins: [], claudeCommand };
-  child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
-  await vi.waitFor(() => expect(output).toContain("listening"), { timeout: 10_000 });
+  const daemon = spawnBeebotd(
+    { port: 0, token, dataDir, allowedOrigins: [], claudeCommand },
+    { env },
+  );
+  cleanups.push(daemon.kill);
+  const port = await daemon.listening;
 
   const url = (path: string) =>
     `http://127.0.0.1:${port}${path}?protocolVersion=${protocolVersion}`;
@@ -76,10 +52,10 @@ async function startDaemon(scenario: string, env: NodeJS.ProcessEnv = {}) {
   socket.send(JSON.stringify({ type: "subscribe", afterSeq: 0 }));
   const stop = async () => {
     socket.terminate();
-    child.stdin.end();
-    await exited;
+    daemon.child.stdin.end();
+    await daemon.exited;
   };
-  return { state, command, stop, output: () => output };
+  return { state, command, stop, output: daemon.output };
 }
 
 async function chatWithTwoBots(daemon: Awaited<ReturnType<typeof startDaemon>>) {
@@ -98,7 +74,7 @@ async function chatWithTwoBots(daemon: Awaited<ReturnType<typeof startDaemon>>) 
   await vi.waitFor(
     async () =>
       expect((await daemon.state()).messages.filter((m) => m.author === "bot")).toHaveLength(2),
-    { timeout: 15_000 },
+    { timeout: daemonTestTimeoutMs },
   );
   return bots;
 }
@@ -116,56 +92,70 @@ function everyFile(dir: string): string[] {
 }
 
 describe("the daemon with a Claude login", () => {
-  it("keeps two bots' chats through a restart", async () => {
-    const first = await startDaemon("success");
-    const bots = await chatWithTwoBots(first);
-    const before = await first.state();
-    await first.stop();
+  it(
+    "keeps two bots' chats through a restart",
+    async () => {
+      const first = await startDaemon("success");
+      const bots = await chatWithTwoBots(first);
+      const before = await first.state();
+      await first.stop();
 
-    const second = await startDaemon("success");
-    const after = await second.state();
-    expect(after.bots.map(({ id, status }) => ({ id, status }))).toEqual(
-      bots.map(({ id }) => ({ id, status: "ready" })),
-    );
-    for (const bot of bots) {
-      expect(history(after, bot)).toEqual([
-        { author: "human", body: `hello ${bot.name}` },
-        { author: "bot", body: "noted" },
-      ]);
-    }
-    expect(after.messages).toEqual(before.messages);
-    await second.stop();
-  }, 60_000);
+      const second = await startDaemon("success");
+      const after = await second.state();
+      expect(after.bots.map(({ id, status }) => ({ id, status }))).toEqual(
+        bots.map(({ id }) => ({ id, status: "ready" })),
+      );
+      for (const bot of bots) {
+        expect(history(after, bot)).toEqual([
+          { author: "human", body: `hello ${bot.name}` },
+          { author: "bot", body: "noted" },
+        ]);
+      }
+      expect(after.messages).toEqual(before.messages);
+      await second.stop();
+    },
+    2 * daemonTestTimeoutMs,
+  );
 
-  it("leaves no planted credential in the database files, its folder or the logs", async () => {
-    const secret = "sk-ant-planted-7c1e9b";
-    const settingsDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-settings-"));
-    cleanups.push(() => NodeFS.rmSync(settingsDir, { recursive: true, force: true }));
-    const settings = { apiKeyHelper: `echo ${secret}-helper`, env: { ANTHROPIC_API_KEY: secret } };
-    NodeFS.writeFileSync(NodePath.join(settingsDir, "settings.json"), JSON.stringify(settings));
-    NodeFS.writeFileSync(NodePath.join(settingsDir, ".credentials.json"), `{"token":"${secret}"}`);
-    const env = {
-      ANTHROPIC_API_KEY: `${secret}-key`,
-      ANTHROPIC_AUTH_TOKEN: `${secret}-auth`,
-      CLAUDE_CODE_OAUTH_TOKEN: `${secret}-oauth`,
-      CLAUDE_CONFIG_DIR: settingsDir,
-    };
+  it(
+    "leaves no planted credential in the database files, its folder or the logs",
+    async () => {
+      const secret = "sk-ant-planted-7c1e9b";
+      const settingsDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-settings-"));
+      cleanups.push(() => NodeFS.rmSync(settingsDir, { recursive: true, force: true }));
+      const settings = {
+        apiKeyHelper: `echo ${secret}-helper`,
+        env: { ANTHROPIC_API_KEY: secret },
+      };
+      NodeFS.writeFileSync(NodePath.join(settingsDir, "settings.json"), JSON.stringify(settings));
+      NodeFS.writeFileSync(
+        NodePath.join(settingsDir, ".credentials.json"),
+        `{"token":"${secret}"}`,
+      );
+      const env = {
+        ANTHROPIC_API_KEY: `${secret}-key`,
+        ANTHROPIC_AUTH_TOKEN: `${secret}-auth`,
+        CLAUDE_CODE_OAUTH_TOKEN: `${secret}-oauth`,
+        CLAUDE_CONFIG_DIR: settingsDir,
+      };
 
-    const first = await startDaemon("success", env);
-    await chatWithTwoBots(first);
-    const live = everyFile(dataDir).join("");
-    await first.stop();
-    const second = await startDaemon("success", env);
-    await second.state();
-    await second.stop();
+      const first = await startDaemon("success", env);
+      await chatWithTwoBots(first);
+      const live = everyFile(dataDir).join("");
+      await first.stop();
+      const second = await startDaemon("success", env);
+      await second.state();
+      await second.stop();
 
-    const files = everyFile(dataDir);
-    expect(files.length).toBeGreaterThan(1);
-    for (const text of [live, ...files, first.output(), second.output()]) {
-      expect(text).not.toContain(secret);
-      expect(text).not.toContain(settingsDir);
-      // The startup probe reads it from `auth status`.
-      expect(text).not.toContain("owner@example.com");
-    }
-  }, 60_000);
+      const files = everyFile(dataDir);
+      expect(files.length).toBeGreaterThan(1);
+      for (const text of [live, ...files, first.output(), second.output()]) {
+        expect(text).not.toContain(secret);
+        expect(text).not.toContain(settingsDir);
+        // The startup probe reads it from `auth status`.
+        expect(text).not.toContain("owner@example.com");
+      }
+    },
+    2 * daemonTestTimeoutMs,
+  );
 });

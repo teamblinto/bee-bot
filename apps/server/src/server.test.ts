@@ -1,10 +1,8 @@
 import * as NodeChildProcess from "node:child_process";
 import { once } from "node:events";
 import * as NodeFS from "node:fs";
-import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeReadline from "node:readline";
 
 import {
   Bot,
@@ -22,6 +20,7 @@ import { WebSocket } from "ws";
 
 import serverPackage from "../package.json" with { type: "json" };
 import type { RunTurn, TurnOutcome } from "./engine.ts";
+import { daemonTestTimeoutMs, spawnBeebotd } from "./fixtures/beebotd.ts";
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
 import { migrate, migrations, openEventStore, seedFromId } from "./store.ts";
@@ -943,52 +942,34 @@ describe("restart", () => {
 });
 
 describe("headless process", () => {
-  const entry = NodePath.join(import.meta.dirname, "index.ts");
-
-  const spawnServer = () => {
-    const child = NodeChildProcess.spawn(process.execPath, [entry], {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    cleanups.push(() => void child.kill());
-    return child;
-  };
-
-  const freePort = async () => {
-    const probe = NodeNet.createServer().listen(0, "127.0.0.1");
-    await once(probe, "listening");
-    const { port } = probe.address() as NodeNet.AddressInfo;
-    await new Promise((resolve) => probe.close(resolve));
-    return port;
-  };
-
-  it("boots on plain Node from a stdin bootstrap and stops on stdin EOF", async () => {
-    const port = await freePort();
-    const child = spawnServer();
-    const bootstrap = {
-      port,
+  const start = (bootstrap: object = {}) => {
+    const daemon = spawnBeebotd({
+      port: 0,
       token,
       dataDir,
       allowedOrigins: [],
       claudeCommand: ["beebot-no-such-cli"],
-    };
-    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
+      ...bootstrap,
+    });
+    cleanups.push(daemon.kill);
+    return daemon;
+  };
 
-    const stderr: string[] = [];
-    for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
-      stderr.push(line);
-      if (line.includes("listening")) {
-        break;
-      }
-    }
-    expect(stderr.join("\n")).not.toContain(token);
+  it(
+    "boots on plain Node from a stdin bootstrap and stops on stdin EOF",
+    async () => {
+      const { child, listening, exited, output } = start();
+      const port = await listening;
+      expect(output()).not.toContain(token);
 
-    const response = await http(`http://127.0.0.1:${port}`, "/health", { headers: auth });
-    expect(response.status).toBe(200);
+      const response = await http(`http://127.0.0.1:${port}`, "/health", { headers: auth });
+      expect(response.status).toBe(200);
 
-    child.stdin.end();
-    const [code] = await once(child, "exit");
-    expect(code).toBe(0);
-  }, 20_000);
+      child.stdin.end();
+      expect(await exited).toBe(0);
+    },
+    daemonTestTimeoutMs,
+  );
 
   it.runIf(process.platform === "win32")(
     "boots past a runtime directory it can't wipe, logging only the error code",
@@ -1010,74 +991,49 @@ describe("headless process", () => {
       });
       await once(holder, "spawn");
 
-      const port = await freePort();
-      const child = spawnServer();
-      const bootstrap = {
-        port,
-        token,
-        dataDir,
-        allowedOrigins: [],
-        claudeCommand: ["beebot-no-such-cli"],
-      };
-      child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
-
-      const stderr: string[] = [];
-      for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
-        stderr.push(line);
-        if (line.includes("listening")) {
-          break;
-        }
-      }
-      expect(stderr.join("\n")).toMatch(/could not clear runtime files: E[A-Z]+/);
-      expect(stderr.join("\n")).not.toContain(dataDir);
+      const { child, listening, exited, output } = start();
+      await listening;
+      expect(output()).toMatch(/could not clear runtime files: E[A-Z]+/);
+      expect(output()).not.toContain(dataDir);
 
       child.stdin.end();
-      const [code] = await once(child, "exit");
-      expect(code).toBe(0);
+      expect(await exited).toBe(0);
     },
-    20_000,
+    daemonTestTimeoutMs,
   );
 
-  it("pauses Claude bots at startup when the probe fails, with the reason", async () => {
-    const seeded = openEventStore(dataDir);
-    seeded.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
-    seeded.close();
+  it(
+    "pauses Claude bots at startup when the probe fails, with the reason",
+    async () => {
+      const seeded = openEventStore(dataDir);
+      seeded.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+      seeded.close();
 
-    const port = await freePort();
-    const child = spawnServer();
-    const bootstrap = {
-      port,
-      token,
-      dataDir,
-      allowedOrigins: [],
-      claudeCommand: ["beebot-no-such-cli"],
-    };
-    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
-    for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
-      if (line.includes("paused")) {
-        break;
-      }
-    }
-    await vi.waitFor(async () => {
-      const response = await http(`http://127.0.0.1:${port}`, "/state", { headers: auth });
-      const { state } = (await response.json()) as { state: ChatState };
-      expect(state.bots[0]).toMatchObject({ status: "paused", pauseReason: "cli_missing" });
-    });
-    child.stdin.end();
-    await once(child, "exit");
-  }, 20_000);
+      const { child, listening, exited } = start();
+      const port = await listening;
+      await vi.waitFor(
+        async () => {
+          const response = await http(`http://127.0.0.1:${port}`, "/state", { headers: auth });
+          const { state } = (await response.json()) as { state: ChatState };
+          expect(state.bots[0]).toMatchObject({ status: "paused", pauseReason: "cli_missing" });
+        },
+        { timeout: daemonTestTimeoutMs },
+      );
+      child.stdin.end();
+      await exited;
+    },
+    daemonTestTimeoutMs,
+  );
 
-  it("exits with a no-restart code on a bad bootstrap and keeps it out of stderr", async () => {
-    const child = spawnServer();
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.stdin.write(`{"token":"${token}"\n`);
-    const [code] = await once(child, "exit");
-    expect(code).toBe(78);
-    expect(stderr).not.toContain(token);
-  }, 20_000);
+  it(
+    "exits with a no-restart code on a bad bootstrap and keeps it out of stderr",
+    async () => {
+      const { exited, output } = spawnBeebotd(`{"token":"${token}"`);
+      expect(await exited).toBe(78);
+      expect(output()).not.toContain(token);
+    },
+    daemonTestTimeoutMs,
+  );
 });
 
 describe("the Codex account", () => {

@@ -4,6 +4,7 @@ import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { Duplex, Transform } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -177,29 +178,81 @@ function startMock(command: string) {
   );
 }
 
+// Every live process's command line. A payload's process exists from the moment it is spawned.
+function commandLines() {
+  const [command, args] =
+    process.platform === "win32"
+      ? [
+          "powershell.exe",
+          ["-NoProfile", "-Command", "Get-CimInstance Win32_Process | ForEach-Object CommandLine"],
+        ]
+      : ["ps", ["-eo", "args"]];
+  const listed = NodeChildProcess.spawnSync(command, args, { encoding: "utf8", windowsHide: true });
+  expect(listed.status).toBe(0);
+  return listed.stdout;
+}
+
+// Hides the project layer from the driver, which would otherwise refuse to start the thread.
+function hideProjectLayer(stream: Duplex) {
+  let pending = "";
+  const lines = new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      const parts = (pending + chunk.toString("utf8")).split("\n");
+      pending = parts.pop() ?? "";
+      done(
+        null,
+        parts.map((line) => `${line.includes('"layers"') ? hide(line) : line}\n`).join(""),
+      );
+    },
+  });
+  const hide = (line: string) => {
+    const frame = JSON.parse(line) as {
+      result: { layers: Array<{ name: { type: string }; disabledReason: unknown }> };
+    };
+    for (const layer of frame.result.layers) {
+      if (layer.name.type === "project") {
+        layer.disabledReason = "hidden by the test";
+      }
+    }
+    return JSON.stringify(frame);
+  };
+  return Duplex.from({ readable: stream.pipe(lines), writable: stream });
+}
+
 describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () => {
-  async function boxTurn(trusted: boolean) {
+  async function boxTurn(trust: "untrusted" | "trusted" | "trusted-hidden") {
     const { repo, command } = buildFixture();
     const apiLane = await startMock(command);
     const fake = createFakeBoxRuntime();
     await fake.create("bot");
     await fake.start("bot");
+    let appServer: Promise<number | null> | undefined;
     const runtime: BoxRuntime = {
       ...fake,
-      execAttach: (botId, exec) =>
-        fake.execAttach(botId, {
-          ...exec,
-          argv:
-            exec.argv[0] === "sh"
-              ? [shell ?? "sh", ...exec.argv.slice(1)]
-              : exec.argv.map((arg) =>
-                  trusted ? arg.replaceAll('"untrusted"', '"trusted"') : arg,
-                ),
-        }),
+      execAttach: async (botId, exec) => {
+        if (exec.argv[0] === "sh") {
+          return fake.execAttach(botId, { ...exec, argv: [shell ?? "sh", ...exec.argv.slice(1)] });
+        }
+        const argv = exec.argv.map((arg) =>
+          trust === "untrusted" ? arg : arg.replaceAll('"untrusted"', '"trusted"'),
+        );
+        const attach = await fake.execAttach(botId, { ...exec, argv });
+        appServer = attach.exited;
+        return trust === "trusted-hidden"
+          ? { ...attach, stream: hideProjectLayer(attach.stream) }
+          : attach;
+      },
     };
     const home = NodePath.join(root, "home").replaceAll("\\", "/");
     // Codex on win32 ignores a trust key that isn't lowercase.
     const workdir = process.platform === "win32" ? repo.toLowerCase() : repo;
+    const env = Object.fromEntries(
+      ["SystemRoot", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"].flatMap((name) =>
+        process.env[name] === undefined ? [] : [[name, process.env[name]]],
+      ),
+    );
+    // Git's sh finds its coreutils only on PATH.
+    const path = [NodePath.dirname(shell ?? "sh"), process.env.PATH].join(NodePath.delimiter);
     const layout: BoxLayout = {
       home,
       workdir,
@@ -208,18 +261,7 @@ describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () =>
       beeDir: { host: () => root, box: root },
       apiLane,
       beeUrl: (url) => url,
-      env: Object.fromEntries(
-        [
-          "PATH",
-          "Path",
-          "SystemRoot",
-          "TEMP",
-          "TMP",
-          "USERPROFILE",
-          "LOCALAPPDATA",
-          "APPDATA",
-        ].flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]])),
-      ),
+      env: { ...env, PATH: path, ...(process.platform === "win32" && { Path: path }) },
     };
     const asked: unknown[] = [];
     const runTurn = createCodexRunTurn({
@@ -257,25 +299,43 @@ describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () =>
         return { behavior: "deny", message: "denied by the test" };
       },
     });
-    // MCP servers and Stop hooks can fire late.
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    return { outcome, asked };
+    // MCP servers, notify and Stop hooks can fire late. Once the app-server is gone nothing new can
+    // spawn, so a payload that will ever run is a live process now, or has already run.
+    await appServer;
+    const pwn = NodePath.join(root, "pwn.cjs").replaceAll("\\", "/");
+    await vi.waitFor(() => expect(commandLines()).not.toContain(pwn), {
+      timeout: 30_000,
+      interval: 250,
+    });
+    return {
+      outcome,
+      asked,
+      ran: NodeFS.readdirSync(NodePath.join(root, "outside")),
+      seen: markers.filter((marker) => bodies.some((body) => body.includes(marker))),
+    };
   }
 
   it("runs none of the repo's rules, MCP servers, config, instructions or hooks", async () => {
-    const { outcome, asked } = await boxTurn(false);
+    const { outcome, asked, ran, seen } = await boxTurn("untrusted");
     expect(outcome).toMatchObject({ kind: "completed" });
-    expect(NodeFS.readdirSync(NodePath.join(root, "outside"))).toEqual([]);
+    expect(ran).toEqual([]);
     // No rule lifted the command out of the approval: it asked, and was refused.
     expect(asked).toHaveLength(1);
-    expect(markers.filter((marker) => bodies.some((body) => body.includes(marker)))).toEqual([]);
+    expect(seen).toEqual([]);
     expect(NodeFS.existsSync(NodePath.join(root, "home", ".codex", "rules"))).toBe(false);
   }, 120_000);
 
-  // The control: the same repo, trusted, is a live project layer, which the driver refuses to run.
-  it("sees the repo's config when the project is trusted", async () => {
-    const { outcome, asked } = await boxTurn(true);
+  it("refuses to run a trusted project, whose config is live", async () => {
+    const { outcome, asked } = await boxTurn("trusted");
     expect(outcome).toEqual({ kind: "failed" });
+    expect(asked).toEqual([]);
+  }, 120_000);
+
+  // The control: with the driver's refusal hidden, the same checks catch the repo's payloads.
+  it("would catch a payload if a trusted project got through", async () => {
+    const { asked, ran } = await boxTurn("trusted-hidden");
+    // The repo's rule lifted the command out of the approval, and the check sees it run.
+    expect(ran).toEqual(["PWNED-rules-escape"]);
     expect(asked).toEqual([]);
   }, 120_000);
 });
