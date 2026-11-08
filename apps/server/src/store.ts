@@ -33,7 +33,8 @@ import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openRooms } from "./rooms.ts";
 import { openTasks } from "./tasks.ts";
-import { catchUpWindowMs, dueSlot, nextSlot } from "./routines.ts";
+import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
+import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import {
   buildMemory,
@@ -446,6 +447,21 @@ export const migrations: Array<{
       updated_at TEXT NOT NULL
     );`,
   },
+  {
+    name: "routine_retry_and_heartbeat",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE routines ADD COLUMN paused_reason TEXT;
+    ALTER TABLE routines ADD COLUMN setup_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE routines ADD COLUMN last_tick_at TEXT;
+    ALTER TABLE routines ADD COLUMN last_attempt_at TEXT;
+    ALTER TABLE routine_firings ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE routine_firings ADD COLUMN retry_at TEXT;
+    ALTER TABLE routine_firings ADD COLUMN message_id TEXT;
+    UPDATE routine_firings SET attempts = 1, message_id = id WHERE status = 'ran';
+    CREATE INDEX routine_firings_by_message ON routine_firings (message_id)
+      WHERE message_id IS NOT NULL;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -497,7 +513,11 @@ const WakeRow = z.object({
   attended: z.number().transform(Boolean),
 });
 export type Wake = z.infer<typeof WakeRow>;
-const RoutineRow = Routine.extend({ enabled: z.number().transform(Boolean) });
+const RoutineRow = Routine.omit({ staggerMs: true })
+  .extend({ enabled: z.number().transform(Boolean) })
+  .transform((routine) => ({ ...routine, staggerMs: staggerMs(routine.id) }));
+const SetupFailures = z.object({ setupFailures: z.number() });
+const LastActivity = z.object({ at: z.string().nullable() });
 
 export type ClaimedRun = {
   id: string;
@@ -905,7 +925,9 @@ export function openEventStore(dataDir: string) {
   );
 
   const routineColumns = `id, bot_id AS botId, name, prompt, cron, timezone, enabled,
-    skip_if_later_mins AS skipIfLaterMins, next_fire_at AS nextFireAt, created_at AS createdAt`;
+    skip_if_later_mins AS skipIfLaterMins, next_fire_at AS nextFireAt,
+    paused_reason AS pausedReason, last_tick_at AS lastTickAt,
+    last_attempt_at AS lastAttemptAt, created_at AS createdAt`;
   const selectRoutines = db.prepare(`SELECT ${routineColumns} FROM routines ORDER BY rowid`);
   const selectRoutine = db.prepare(`SELECT ${routineColumns} FROM routines WHERE id = ?`);
   const selectDueRoutines = db.prepare(
@@ -920,13 +942,52 @@ export function openEventStore(dataDir: string) {
     `UPDATE routines SET name = ?, prompt = ?, cron = ?, timezone = ?, enabled = ?,
        skip_if_later_mins = ?, next_fire_at = ? WHERE id = ?`,
   );
-  const advanceRoutine = db.prepare("UPDATE routines SET next_fire_at = ? WHERE id = ?");
+  const advanceRoutine = db.prepare(
+    "UPDATE routines SET next_fire_at = ?, last_tick_at = ? WHERE id = ?",
+  );
   const disableRoutine = db.prepare(
-    "UPDATE routines SET enabled = 0, next_fire_at = NULL WHERE id = ?",
+    "UPDATE routines SET enabled = 0, next_fire_at = NULL, paused_reason = ? WHERE id = ?",
+  );
+  const setRoutinePause = db.prepare("UPDATE routines SET paused_reason = ? WHERE id = ?");
+  const resumeAwayRoutines = db.prepare(
+    `UPDATE routines SET paused_reason = NULL WHERE paused_reason = 'owner_away'
+     RETURNING ${routineColumns}`,
+  );
+  const resetRoutineHealth = db.prepare(
+    "UPDATE routines SET paused_reason = NULL, setup_failures = 0 WHERE id = ?",
+  );
+  const selectSetupFailures = db.prepare(
+    "SELECT setup_failures AS setupFailures FROM routines WHERE id = ?",
+  );
+  const setSetupFailures = db.prepare("UPDATE routines SET setup_failures = ? WHERE id = ?");
+  const markRoutineAttempt = db.prepare("UPDATE routines SET last_attempt_at = ? WHERE id = ?");
+  const selectLastHumanMessage = db.prepare(
+    "SELECT MAX(created_at) AS at FROM messages WHERE author = 'human'",
   );
   const deleteRoutineRow = db.prepare("DELETE FROM routines WHERE id = ?");
   const firingColumns = `id, routine_id AS routineId, slot, status, reason,
-    missed_before AS missedBefore, created_at AS createdAt, decided_at AS decidedAt`;
+    missed_before AS missedBefore, attempts, retry_at AS retryAt, created_at AS createdAt,
+    decided_at AS decidedAt`;
+  const startAttempt = db.prepare(
+    `UPDATE routine_firings SET status = 'ran', decided_at = ?, attempts = attempts + 1,
+       message_id = ?, retry_at = NULL
+     WHERE id = ? AND status = 'ready' RETURNING ${firingColumns}`,
+  );
+  const selectAttemptFiring = db.prepare(
+    `SELECT ${firingColumns} FROM routine_firings WHERE message_id =
+       (SELECT substr(idempotency_key, 9) FROM wakes WHERE id = ? AND source = 'routine')`,
+  );
+  const setRetry = db.prepare(
+    `UPDATE routine_firings SET retry_at = ? WHERE id = ? RETURNING ${firingColumns}`,
+  );
+  // Only a routine's latest firing reopens: once a newer slot has come, the retry is moot.
+  const reopenRetries = db.prepare(
+    `UPDATE routine_firings SET status = 'ready', decided_at = NULL, retry_at = NULL
+     WHERE status = 'ran' AND retry_at <= ?
+       AND rowid IN (SELECT MAX(rowid) FROM routine_firings GROUP BY routine_id)
+       AND routine_id IN (SELECT id FROM routines WHERE enabled = 1)
+     RETURNING ${firingColumns}`,
+  );
   const selectFiring = db.prepare(`SELECT ${firingColumns} FROM routine_firings WHERE id = ?`);
   const selectSlot = db.prepare("SELECT 1 FROM routine_firings WHERE routine_id = ? AND slot = ?");
   const selectLatestFirings = db.prepare(
@@ -1129,6 +1190,9 @@ export function openEventStore(dataDir: string) {
     if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
       addWake(scope, `message:${input.id}`, input.attended, source);
     }
+    for (const row of resumeAwayRoutines.all()) {
+      emit({ type: "routine.changed", routine: RoutineRow.parse(row) });
+    }
     return "sent";
   }
 
@@ -1152,13 +1216,21 @@ export function openEventStore(dataDir: string) {
     { slot, passedOver }: { slot: string; passedOver: number },
     now: string,
   ) {
-    let outcome: Pick<RoutineFiring, "status" | "reason"> = { status: "ready", reason: null };
-    if (Date.parse(now) - Date.parse(slot) > catchUpWindowMs) {
-      outcome = { status: "missed", reason: "asleep" };
-    } else if (getBot(routine.botId)?.status === "paused") {
-      outcome = { status: "skipped", reason: "bot_paused" };
+    const lastMessage = LastActivity.parse(selectLastHumanMessage.get()).at;
+    const { status, reason } = slotOutcome({
+      slot,
+      passedOver,
+      now,
+      staggerMs: routine.staggerMs,
+      lastOwnerActivity:
+        lastMessage && lastMessage > routine.createdAt ? lastMessage : routine.createdAt,
+      botPaused: getBot(routine.botId)?.status === "paused",
+    });
+    if (reason === "owner_away") {
+      setRoutinePause.run("owner_away", routine.id);
+    } else if (routine.pausedReason === "owner_away") {
+      setRoutinePause.run(null, routine.id);
     }
-    const { status, reason } = outcome;
     const decidedAt = status === "ready" ? null : now;
     const id = NodeCrypto.randomUUID();
     const firing = RoutineFiring.parse(
@@ -1167,25 +1239,59 @@ export function openEventStore(dataDir: string) {
     emit({ type: "firing.changed", firing });
   }
 
+  // Slots are walked on the cron's own clock, which runs `staggerMs` behind the wall clock.
   function fireRoutine(row: unknown, now: string) {
     const routine = RoutineRow.parse(row);
-    const next = nextSlot(routine, now);
+    const nextFireAt = z.string().parse(routine.nextFireAt);
+    const cronNow = new Date(Date.parse(now) - routine.staggerMs).toISOString();
+    if (nextFireAt > cronNow) {
+      return;
+    }
+    const next = nextSlot(routine, cronNow);
     transaction(() => {
       if (next === null) {
         endOpenFiring(routine.id, "skipped", "disabled");
-        disableRoutine.run(routine.id);
+        disableRoutine.run(null, routine.id);
       } else {
-        const due = dueSlot(routine, z.string().parse(routine.nextFireAt), now);
+        const due = dueSlot(routine, nextFireAt, cronNow);
         // A slot on record changes nothing, so a repeat can't close the card it opened.
         if (!selectSlot.get(routine.id, due.slot)) {
           // First, so a client that replaces by routine ends on the new firing.
           endOpenFiring(routine.id, "skipped", "no_boundary");
           recordFiring(routine, due, now);
         }
-        advanceRoutine.run(next, routine.id);
+        advanceRoutine.run(next, now, routine.id);
       }
       emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
     });
+  }
+
+  function endAttempt(run: RunRow, finished: FinishedRun, now: string) {
+    const row = selectAttemptFiring.get(run.wakeId);
+    if (!row) {
+      return;
+    }
+    const firing = RoutineFiring.parse(row);
+    const { routineId } = firing;
+    const { setupFailures, stop, retryAt } = attemptOutcome({
+      status: finished.status,
+      reason: finished.reason,
+      attempts: firing.attempts,
+      setupFailures: SetupFailures.parse(selectSetupFailures.get(routineId)).setupFailures,
+      now,
+    });
+    setSetupFailures.run(setupFailures, routineId);
+    if (stop) {
+      endOpenFiring(routineId, "skipped", "disabled");
+      disableRoutine.run("setup_failed", routineId);
+      emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routineId)) });
+    }
+    if (retryAt) {
+      emit({
+        type: "firing.changed",
+        firing: RoutineFiring.parse(setRetry.get(retryAt, firing.id)),
+      });
+    }
   }
 
   const getMemory = (id: string) => {
@@ -1449,6 +1555,7 @@ export function openEventStore(dataDir: string) {
         if (rescheduled) {
           next = enabled ? nextSlot(fields, new Date().toISOString()) : null;
           endOpenFiring(id, "skipped", "disabled");
+          resetRoutineHealth.run(id);
         }
         updateRoutineFields.run(
           name,
@@ -1476,6 +1583,7 @@ export function openEventStore(dataDir: string) {
 
     // Row by row, so one bad row can't block the others. A slot is decided only by comparing the
     // wall clock with the stored time, so a laptop's sleep is just a catch-up on the next tick.
+    // Slots first, so a retry whose routine has a newer slot is no longer the latest firing.
     fireDueRoutines: (now: string) => {
       for (const row of selectDueRoutines.all(now)) {
         try {
@@ -1483,6 +1591,15 @@ export function openEventStore(dataDir: string) {
         } catch (error) {
           console.error(`beebotd: routine ${IdRow.safeParse(row).data?.id} failed`, error);
         }
+      }
+      try {
+        transaction(() => {
+          for (const row of reopenRetries.all(now)) {
+            emit({ type: "firing.changed", firing: RoutineFiring.parse(row) });
+          }
+        });
+      } catch (error) {
+        console.error("beebotd: routine retries failed", error);
       }
     },
 
@@ -1515,9 +1632,15 @@ export function openEventStore(dataDir: string) {
         if (selectActiveRun.get(botId)) {
           return "bot_busy";
         }
-        endOpenFiring(routine.id, "ran", null);
+        const now = new Date().toISOString();
+        // A retry needs its own message, and the first attempt keeps the firing's ID.
+        const messageId = firing.attempts === 0 ? id : NodeCrypto.randomUUID();
+        const started = RoutineFiring.parse(startAttempt.get(now, messageId, id));
+        emit({ type: "firing.changed", firing: started });
+        markRoutineAttempt.run(now, routine.id);
+        emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
         const body = routineBody(routine, firing.slot, lateMs);
-        if (postMessage({ id, roomId, body, attended }, "routine") !== "sent") {
+        if (postMessage({ id: messageId, roomId, body, attended }, "routine") !== "sent") {
           throw new Error(`firing ${id} could not post its message`);
         }
         return "started";
@@ -1685,6 +1808,7 @@ export function openEventStore(dataDir: string) {
           advanceDelivered.run(run.inputHighSeq, run.scopeId);
         }
         recordRun(run);
+        endAttempt(run, finished, now);
         if (finished.blockedUntil) {
           blockAccount.run(finished.blockedUntil, run.engineAccountId);
           reopenWake.run(finished.blockedUntil, run.wakeId);

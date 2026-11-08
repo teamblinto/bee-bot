@@ -1,7 +1,14 @@
 import type { Command, Routine, RoutineFiring } from "@beebot/contracts";
 import { useRef, useState } from "react";
 
-import { dayAndTime, missedLine, routineReadyLine, visibleDetail } from "../labels";
+import {
+  catchUpLine,
+  dayAndTime,
+  missedLine,
+  retryCardLine,
+  routineReadyLine,
+  visibleDetail,
+} from "../labels";
 import { postCommand } from "../serverConnection";
 
 export function RoutineCard({
@@ -52,6 +59,10 @@ export function RoutineCard({
       <p className="line-clamp-3 text-small wrap-anywhere whitespace-pre-wrap text-ink-secondary">
         {visibleDetail(routine.prompt)}
       </p>
+      {firing.attempts > 0 && <p className="text-small text-ink-secondary">{retryCardLine}</p>}
+      {firing.reason === "catch_up" && (
+        <p className="text-small text-ink-secondary">{catchUpLine}</p>
+      )}
       {firing.missedBefore > 0 && (
         <p className="text-small text-ink-secondary">{missedLine(firing.missedBefore)}</p>
       )}

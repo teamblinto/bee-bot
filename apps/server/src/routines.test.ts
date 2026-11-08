@@ -6,8 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { Bot, Routine } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot, scheduleProblem } from "./routines.ts";
-import { type EventStore, openEventStore } from "./store.ts";
+import { type EventStore, type FinishedRun, openEventStore } from "./store.ts";
 
 const now = "2026-03-10T12:00:00.000Z";
 const utc = (cron: string) => ({ cron, timezone: "UTC" });
@@ -91,7 +92,7 @@ describe("firing", () => {
     skipIfLaterMins: null as number | null,
   };
   const slot = "2026-03-10T09:00:00.000Z";
-  const justAfter = "2026-03-10T09:00:01.000Z";
+  const justAfter = "2026-03-10T09:05:00.000Z";
 
   let dataDir: string;
   let store: EventStore;
@@ -174,9 +175,134 @@ describe("firing", () => {
   });
 
   it("makes exactly one catch-up after a long gap, and counts what it passed over", () => {
-    routineDue("2026-03-05T09:00:00.000Z");
+    const routine = routineDue("2026-03-05T09:00:00.000Z");
     store.fireDueRoutines("2026-03-10T10:00:00.000Z");
-    expect(firings()).toEqual([{ slot, status: "ready", reason: null, missedBefore: 5 }]);
+    store.fireDueRoutines("2026-03-10T10:00:30.000Z");
+    store.close();
+    store = openEventStore(dataDir);
+    store.fireDueRoutines("2026-03-10T10:01:00.000Z");
+    const caughtUp = { slot, status: "ready", reason: "catch_up", missedBefore: 5 };
+    expect(firings()).toEqual([caughtUp]);
+    expect(store.startFiring(firingId(routine), true)).toBe("started");
+    expect(firings()).toEqual([{ ...caughtUp, status: "ran" }]);
+  });
+
+  it("makes a late tick on a single missed slot a catch-up too", () => {
+    routineDue(slot);
+    store.fireDueRoutines("2026-03-10T15:00:00.000Z");
+    store.fireDueRoutines("2026-03-10T15:00:01.000Z");
+    expect(firings()).toEqual([{ slot, status: "ready", reason: "catch_up", missedBefore: 0 }]);
+  });
+
+  it("holds a slot until its stagger has passed", () => {
+    const routine = routineDue(slot);
+    const stagger = store.getRoutine(routine.id)?.staggerMs ?? 0;
+    expect(stagger).toBe(staggerMs(routine.id));
+    store.fireDueRoutines(new Date(Date.parse(slot) + stagger - 1000).toISOString());
+    expect(firings()).toEqual([]);
+    store.fireDueRoutines(new Date(Date.parse(slot) + stagger).toISOString());
+    expect(firings()).toEqual([{ slot, status: "ready", reason: null, missedBefore: 0 }]);
+  });
+
+  describe("an owner who is away", () => {
+    function awaySince(at: string) {
+      exec("UPDATE routines SET created_at = ?", at);
+      exec("UPDATE messages SET created_at = ?", at);
+    }
+
+    it("pauses the routine with its reason, then resumes on the owner's next message", () => {
+      const routine = routineDue(slot);
+      awaySince("2026-03-01T09:00:00.000Z");
+      store.fireDueRoutines(justAfter);
+      expect(firings()).toEqual([
+        { slot, status: "skipped", reason: "owner_away", missedBefore: 0 },
+      ]);
+      expect(store.getRoutine(routine.id)?.pausedReason).toBe("owner_away");
+      store.sendMessage({
+        id: crypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "hi",
+        attended: true,
+      });
+      expect(store.getRoutine(routine.id)?.pausedReason).toBeNull();
+    });
+
+    it("is not away within a week of a message", () => {
+      store.sendMessage({
+        id: crypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "hi",
+        attended: true,
+      });
+      const routine = routineDue(slot);
+      awaySince("2026-03-04T09:00:00.000Z");
+      store.fireDueRoutines(justAfter);
+      expect(latest(routine)?.status).toBe("ready");
+    });
+  });
+
+  describe("a failed attempt", () => {
+    const bootId = "boot";
+
+    function runAttempt(routine: Routine, finished: FinishedRun) {
+      expect(store.startFiring(firingId(routine), true)).toBe("started");
+      for (const wake of store.dueWakes(justAfter)) {
+        store.queueRun(wake);
+      }
+      const [queued] = store.queuedRuns();
+      store.claimRun(queued?.id ?? "", bootId, justAfter);
+      store.finishRun(queued?.id ?? "", bootId, finished);
+    }
+
+    const engineFailed = { status: "Failed", reason: "engine_failed" } as const;
+    const authFailed = { status: "Failed", reason: "auth_failed" } as const;
+
+    it("reopens its card once, after the retry delay", () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: Date.parse(justAfter) });
+      const routine = routineDue(slot);
+      store.fireDueRoutines(justAfter);
+      runAttempt(routine, engineFailed);
+      const retryAt = latest(routine)?.retryAt ?? "";
+      expect(Date.parse(retryAt) - Date.now()).toBe(12 * 60_000);
+      store.fireDueRoutines(new Date(Date.parse(retryAt) - 1000).toISOString());
+      expect(latest(routine)?.status).toBe("ran");
+      store.fireDueRoutines(retryAt);
+      expect(latest(routine)).toMatchObject({ status: "ready", attempts: 1, retryAt: null });
+      runAttempt(routine, engineFailed);
+      store.fireDueRoutines("2026-03-10T10:00:00.000Z");
+      expect(latest(routine)).toMatchObject({ status: "ran", attempts: 2, retryAt: null });
+      expect(store.state().messages.filter(({ author }) => author === "human")).toHaveLength(2);
+      expect(store.getRoutine(routine.id)?.lastAttemptAt).toBe(justAfter);
+    });
+
+    it("drops the retry once a newer slot has come", () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: Date.parse(justAfter) });
+      const routine = routineDue(slot, { cron: "0 9,10 * * *" });
+      store.fireDueRoutines(justAfter);
+      runAttempt(routine, engineFailed);
+      store.fireDueRoutines("2026-03-10T10:05:00.000Z");
+      expect(latest(routine)).toMatchObject({ slot: "2026-03-10T10:00:00.000Z", status: "ready" });
+      expect(firings()).toHaveLength(2);
+    });
+
+    it("turns the routine off after three setup failures in a row", () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: Date.parse(justAfter) });
+      const routine = routineDue(slot);
+      store.fireDueRoutines(justAfter);
+      runAttempt(routine, authFailed);
+      store.fireDueRoutines(latest(routine)?.retryAt ?? "");
+      runAttempt(routine, authFailed);
+      store.fireDueRoutines("2026-03-11T09:05:00.000Z");
+      runAttempt(routine, authFailed);
+      expect(store.getRoutine(routine.id)).toMatchObject({
+        enabled: false,
+        nextFireAt: null,
+        pausedReason: "setup_failed",
+      });
+      expect(latest(routine)?.retryAt).toBeNull();
+      store.updateRoutine(routine.id, { ...fields, enabled: true });
+      expect(store.getRoutine(routine.id)).toMatchObject({ enabled: true, pausedReason: null });
+    });
   });
 
   it("records the latest slot as missed, with no card, past the catch-up window", () => {
@@ -196,7 +322,7 @@ describe("firing", () => {
       }
     });
     store.fireDueRoutines(justAfter);
-    store.fireDueRoutines("2026-03-11T09:00:01.000Z");
+    store.fireDueRoutines("2026-03-11T09:05:00.000Z");
     expect(events).toEqual(["ready", "skipped", "ready"]);
     expect(firings()).toEqual([
       { slot, status: "skipped", reason: "no_boundary", missedBefore: 0 },
@@ -349,7 +475,7 @@ describe("firing", () => {
     const first = routineDue(slot);
     const second = routineDue(slot, { name: "Second" });
     store.fireDueRoutines(justAfter);
-    store.fireDueRoutines("2026-03-11T09:00:01.000Z");
+    store.fireDueRoutines("2026-03-11T09:05:00.000Z");
     const { firings: latestFirings } = store.state();
     expect(latestFirings).toHaveLength(2);
     expect(latest(first)?.slot).toBe("2026-03-11T09:00:00.000Z");
