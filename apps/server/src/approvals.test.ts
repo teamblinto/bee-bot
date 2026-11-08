@@ -153,7 +153,18 @@ async function boot(options: BootOptions = {}) {
     return client.cards()?.at(-1) as PendingApproval;
   };
 
-  return { store, port: server.port, stop, client, post, startTurn, decide, nextCard, turns };
+  return {
+    store,
+    port: server.port,
+    power: server.power,
+    stop,
+    client,
+    post,
+    startTurn,
+    decide,
+    nextCard,
+    turns,
+  };
 }
 
 const rpc = (method: string, params?: unknown, id: number | undefined = 1) =>
@@ -693,6 +704,20 @@ describe("a held call", () => {
     expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "timeout" });
     await vi.waitFor(() => expect(client.cards()).toEqual([]));
     expect(auditRows()).toEqual([{ tool: "Bash", status: "denied", reason: "timeout" }]);
+  });
+
+  it("spends none of its timeout asleep", async () => {
+    const { startTurn, nextCard, store, power } = await boot({ approvalTimeoutMs: 300 });
+    const { permissions } = (await startTurn()).turn;
+    const call = mcp(permissions, toolCall("Bash", { command }));
+    await nextCard();
+    power("suspend");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(store.state().approvals[0]).toMatchObject({ status: "pending" });
+
+    power("resume");
+    expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });
+    expect(store.state().approvals[0]).toMatchObject({ status: "denied", reason: "timeout" });
   });
 
   it.each(["stop-bot", "stop-all"] as const)("is denied by %s", async (type) => {

@@ -97,7 +97,13 @@ async function start(port = 0, heartbeatMs?: number) {
     }
   };
   cleanups.push(stop);
-  return { store, stop, base: `http://127.0.0.1:${server.port}`, port: server.port };
+  return {
+    store,
+    stop,
+    base: `http://127.0.0.1:${server.port}`,
+    port: server.port,
+    power: server.power,
+  };
 }
 
 const http = (base: string, path: string, init?: RequestInit) =>
@@ -359,6 +365,20 @@ describe("event stream", () => {
     const [code] = await once(silent, "close");
     expect(code).toBe(1006);
     expect(answering.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("spends none of a socket's pong deadline asleep", async () => {
+    const { port, power } = await start(0, 40);
+    power("suspend");
+    const silent = new WebSocket(wsUrl(port), { autoPong: false });
+    cleanups.push(() => silent.terminate());
+    await once(silent, "open");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(silent.readyState).toBe(WebSocket.OPEN);
+
+    power("resume");
+    const [code] = await once(silent, "close");
+    expect(code).toBe(1006);
   });
 });
 

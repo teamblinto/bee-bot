@@ -15,6 +15,7 @@ import { z } from "zod";
 import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
 import type { EventStore } from "./store.ts";
+import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
 const defaultTimeoutMs = 5 * 60_000;
 const maxPreviewChars = 20_000;
@@ -188,12 +189,12 @@ function accessAllows(access: BotAccess, tool: ApprovalTool, inside: boolean, ru
   );
 }
 
-type HeldCall = PendingApproval & {
+type HeldCall = Omit<PendingApproval, "expiresAt"> & {
   runId: string;
   botId: string;
   tool: ApprovalTool;
   digest: string;
-  timer: NodeJS.Timeout;
+  timer: ReturnType<typeof awakeTimeout>;
   resolve: (decision: Decision) => void;
   updatedInput: Record<string, unknown>;
 };
@@ -203,6 +204,7 @@ type Options = {
   dataDir: string;
   onChange: () => void;
   timeoutMs?: number | undefined;
+  clock?: AwakeClock | undefined;
 };
 
 export function createApprovals({
@@ -210,6 +212,7 @@ export function createApprovals({
   dataDir,
   onChange,
   timeoutMs = defaultTimeoutMs,
+  clock = createAwakeClock(),
 }: Options) {
   const runs = new Map<string, Run>();
   const held = new Map<string, HeldCall>();
@@ -218,7 +221,7 @@ export function createApprovals({
   // released as allowed unless the decision is on record.
   function settle(call: HeldCall, status: "allowed" | "denied", reason: Approval["reason"]) {
     held.delete(call.id);
-    clearTimeout(call.timer);
+    call.timer.cancel();
     let recorded = true;
     try {
       store.closeApproval(call.id, status, reason);
@@ -249,8 +252,7 @@ export function createApprovals({
         botId: run.botId,
         tool,
         digest,
-        expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
-        timer: setTimeout(() => settle(call, "denied", "timeout"), timeoutMs),
+        timer: awakeTimeout(clock, timeoutMs, () => settle(call, "denied", "timeout"), onChange),
         resolve,
         updatedInput: input,
       };
@@ -362,12 +364,12 @@ export function createApprovals({
     },
 
     pending: (): PendingApproval[] =>
-      [...held.values()].map(({ id, detail, change, canAlwaysAllow, expiresAt }) => ({
+      [...held.values()].map(({ id, detail, change, canAlwaysAllow, timer }) => ({
         id,
         detail,
         change,
         canAlwaysAllow,
-        expiresAt,
+        expiresAt: new Date(Date.now() + timer.leftMs()).toISOString(),
       })),
 
     isHolding: (runId: string) => [...held.values()].some((call) => call.runId === runId),
@@ -375,7 +377,7 @@ export function createApprovals({
     // Rows stay pending for the next boot to expire: the call only ended because we did.
     close: () => {
       for (const call of held.values()) {
-        clearTimeout(call.timer);
+        call.timer.cancel();
         call.resolve(notApproved);
       }
       held.clear();

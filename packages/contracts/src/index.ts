@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 16;
+export const protocolVersion = 15;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {

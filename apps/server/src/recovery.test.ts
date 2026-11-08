@@ -13,7 +13,7 @@ import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueWindowMs, recoveryVerdict } from "./recovery.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
-import { createAwakeClock, createWatchdog } from "./watchdog.ts";
+import { type AwakeClock, createAwakeClock, createWatchdog } from "./watchdog.ts";
 
 let dataDir: string;
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -58,7 +58,7 @@ function scriptedEngine() {
 // One "process": a store and the supervisor over it. `kill` leaves Running runs as a crash would.
 function boot(
   runTurn: RunTurn,
-  options: { turnTimeoutMs?: number; silenceMs?: number; now?: () => number } = {},
+  options: { turnTimeoutMs?: number; silenceMs?: number; clock?: AwakeClock } = {},
 ) {
   const store = openEventStore(dataDir);
   const approvals = createApprovals({ store, dataDir, onChange: () => {} });
@@ -266,7 +266,7 @@ describe("sleep and wake", () => {
     const engine = scriptedEngine();
     const { store, supervisor, send } = boot(engine.runTurn, {
       turnTimeoutMs: 2000,
-      now: () => Date.now() + offset,
+      clock: createAwakeClock(() => Date.now() + offset),
     });
     const bot = createBot(store);
     send(bot, "hello");
@@ -288,6 +288,24 @@ describe("sleep and wake", () => {
     supervisor.pump();
     expect(engine.turns).toHaveLength(1);
     expect(store.state().runs).toHaveLength(1);
+  });
+
+  it("spends none of a turn's deadline in a sleep nobody signalled", async () => {
+    let offset = 0;
+    const engine = scriptedEngine();
+    const { store, send } = boot(engine.runTurn, {
+      turnTimeoutMs: 2000,
+      clock: createAwakeClock(() => Date.now() + offset),
+    });
+    const bot = createBot(store);
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+
+    offset += 60 * 60_000;
+    await ticks(1);
+    expect(latestRun(store, bot)?.status).toBe("Running");
+    await expectStatus(store, bot, "Failed");
+    expect(latestRun(store, bot)?.reason).toBe("timeout");
   });
 
   it("stops a silent turn with no tool in flight", async () => {

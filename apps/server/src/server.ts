@@ -43,6 +43,7 @@ import {
   projectFolder,
   type UsageProbe,
 } from "./usage.ts";
+import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
 const maxBodyBytes = 256 * 1024;
 // A `Write` call carries the whole file.
@@ -63,6 +64,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   approvalTimeoutMs?: number | undefined;
   mcpKeepaliveMs?: number | undefined;
   heartbeatMs?: number | undefined;
+  clock?: AwakeClock | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -130,6 +132,7 @@ export async function startServer({
   approvalTimeoutMs,
   mcpKeepaliveMs,
   heartbeatMs = 30_000,
+  clock = createAwakeClock(),
 }: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -221,6 +224,7 @@ export async function startServer({
     store,
     dataDir,
     timeoutMs: approvalTimeoutMs,
+    clock,
     onChange: () => {
       broadcast({ type: "pending-approvals", approvals: approvals.pending() });
       supervisor.syncClocks();
@@ -232,6 +236,7 @@ export async function startServer({
     approvals,
     permissionsUrl: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
     turnTimeoutMs,
+    clock,
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
     onToolStart: (runId, { id, name, detail }) =>
       broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
@@ -714,7 +719,7 @@ export async function startServer({
       resolve();
     });
   });
-  const heartbeat = setInterval(() => {
+  const beat = () => {
     for (const client of sockets.clients) {
       if (!answered.has(client)) {
         client.terminate();
@@ -723,7 +728,9 @@ export async function startServer({
       answered.delete(client);
       client.ping();
     }
-  }, heartbeatMs);
+    heartbeat = awakeTimeout(clock, heartbeatMs, beat);
+  };
+  let heartbeat = awakeTimeout(clock, heartbeatMs, beat);
   supervisor.pump();
 
   return {
@@ -734,7 +741,7 @@ export async function startServer({
     power: (state: "suspend" | "resume") =>
       state === "suspend" ? supervisor.suspend() : supervisor.resume(),
     close: async () => {
-      clearInterval(heartbeat);
+      heartbeat.cancel();
       approvals.close();
       await supervisor.close();
       for (const client of sockets.clients) {

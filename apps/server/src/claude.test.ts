@@ -25,6 +25,7 @@ import {
   type ToolStart,
 } from "./engine.ts";
 import type { WindowUpdate } from "./usage.ts";
+import { createAwakeClock } from "./watchdog.ts";
 
 const plain: EngineChoice = { model: "sonnet", effort: null, mode: "build" };
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
@@ -45,11 +46,13 @@ const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must
 
 let dataDir: string;
 let logPath: string;
+let clock = createAwakeClock();
 const plantedEnv: string[] = [];
 
 beforeEach(() => {
   dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-claude-"));
   logPath = NodePath.join(dataDir, "fake-cli.log");
+  clock = createAwakeClock();
 });
 
 afterEach(async () => {
@@ -117,7 +120,7 @@ function turn(
   const thinking: ThinkingState[] = [];
   const rateLimits: WindowUpdate[] = [];
   let delivered = 0;
-  const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir })({
+  const outcome = createClaudeRunTurn({ command: fakeCommand(scenario), dataDir, clock })({
     approve: async () => ({ behavior: "deny", message: "unused" }),
     prompt,
     sessionId: "00000000-0000-4000-8000-000000000009",
@@ -557,6 +560,25 @@ describe("the credential gate", () => {
     const { outcome, delivered } = turn("gate-silent");
     expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "auth_failed" });
     expect(delivered()).toBe(0);
+    await vi.waitFor(() => expect(isAlive(spawns()[0]?.pid ?? 0)).toBe(false));
+  }, 15_000);
+
+  it("spends none of the gate's wait asleep", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      clock = createAwakeClock();
+      const controller = new AbortController();
+      const { outcome } = turn("gate-silent", controller.signal);
+      await vi.waitFor(() => expect(spawns()).toHaveLength(1), { timeout: 5000 });
+      clock.suspend();
+      await vi.advanceTimersByTimeAsync(60_000);
+      clock.resume();
+      await vi.advanceTimersByTimeAsync(4000);
+      controller.abort("stop");
+      expect(await outcome).toEqual({ kind: "failed" });
+    } finally {
+      vi.useRealTimers();
+    }
     await vi.waitFor(() => expect(isAlive(spawns()[0]?.pid ?? 0)).toBe(false));
   }, 15_000);
 

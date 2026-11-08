@@ -7,7 +7,7 @@ import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 import type { WindowUpdate } from "./usage.ts";
-import { createAwakeClock, createWatchdog } from "./watchdog.ts";
+import { type AwakeClock, createAwakeClock, createWatchdog } from "./watchdog.ts";
 
 const defaultTurnTimeoutMs = 10 * 60_000;
 const defaultSilenceMs = 5 * 60_000;
@@ -32,7 +32,7 @@ type Options = {
   turnTimeoutMs?: number | undefined;
   silenceMs?: number | undefined;
   outboxHandlers?: ReadonlyMap<string, Deliver> | undefined;
-  now?: (() => number) | undefined;
+  clock?: AwakeClock | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -114,10 +114,9 @@ export function createSupervisor({
   turnTimeoutMs = defaultTurnTimeoutMs,
   silenceMs = defaultSilenceMs,
   outboxHandlers = new Map(),
-  now = Date.now,
+  clock = createAwakeClock(),
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
-  const clock = createAwakeClock(now);
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
   const turns = new Map<
     string,

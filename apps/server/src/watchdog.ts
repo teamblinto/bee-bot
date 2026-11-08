@@ -37,6 +37,27 @@ export function createAwakeClock(now: () => number = Date.now, gapMs = defaultGa
 }
 export type AwakeClock = ReturnType<typeof createAwakeClock>;
 
+// A deadline in awake time: a timer that fires on wake re-arms for whatever the sleep didn't use.
+export function awakeTimeout(
+  clock: AwakeClock,
+  ms: number,
+  work: () => void,
+  rearmed: () => void = () => {},
+) {
+  const due = clock.awakeNow() + ms;
+  const leftMs = () => due - clock.awakeNow();
+  const check = () => {
+    if (leftMs() <= 0) {
+      work();
+    } else {
+      timer = setTimeout(check, leftMs());
+      rearmed();
+    }
+  };
+  let timer = setTimeout(check, ms);
+  return { leftMs, cancel: () => clearTimeout(timer) };
+}
+
 // A live turn means a live process: an engine settles its turn once the process exits. So silence
 // is the only signal left to read, and a tool in flight is never silence.
 export function createWatchdog(clock: AwakeClock, silenceMs: number) {

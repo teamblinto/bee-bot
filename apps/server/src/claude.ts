@@ -34,6 +34,7 @@ import {
   UsageReply,
   type WindowUpdate,
 } from "./usage.ts";
+import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
 export const testedClaudeVersion = "2.1.318";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
@@ -334,6 +335,7 @@ function mapResult({ result, assistantError, apiStatus, rateLimit }: Seen): Turn
 
 type Attempt = {
   command: readonly string[];
+  clock: AwakeClock;
   args: string[];
   cwd: string;
   prompt: string;
@@ -349,6 +351,7 @@ type Attempt = {
 
 function runProcess({
   command,
+  clock,
   args,
   cwd,
   prompt,
@@ -378,7 +381,7 @@ function runProcess({
       apiStatus: undefined,
       rateLimit: undefined,
     };
-    const timers = new Set<NodeJS.Timeout>();
+    const timers = new Set<() => void>();
     let gate: "pending" | "open" | PauseReason = "pending";
     let spawnFailed = false;
     let sessionMissing = false;
@@ -390,7 +393,10 @@ function runProcess({
     let thinking = false;
     let thinkingBlock: unknown;
 
-    const after = (ms: number, work: () => void) => timers.add(setTimeout(work, ms));
+    const after = (ms: number, work: () => void) => {
+      const timer = setTimeout(work, ms);
+      timers.add(() => clearTimeout(timer));
+    };
 
     function stop() {
       if (stopping) {
@@ -434,8 +440,8 @@ function runProcess({
       }
       onLine(stdout);
       settled = true;
-      for (const timer of timers) {
-        clearTimeout(timer);
+      for (const cancel of timers) {
+        cancel();
       }
       signal.removeEventListener("abort", stop);
       child.stdout.destroy();
@@ -560,13 +566,15 @@ function runProcess({
     child.once("exit", () => after(closeGraceMs, finish));
     child.once("close", finish);
 
-    after(gateTimeoutMs, () => {
-      if (gate === "pending") {
-        gate = authPause();
-        child.stdin.end();
-        stop();
-      }
-    });
+    timers.add(
+      awakeTimeout(clock, gateTimeoutMs, () => {
+        if (gate === "pending") {
+          gate = authPause();
+          child.stdin.end();
+          stop();
+        }
+      }).cancel,
+    );
     signal.addEventListener("abort", stop, { once: true });
     child.stdin.write(initializeLine);
   });
@@ -625,9 +633,13 @@ const isFolder = (path: string) =>
     () => false,
   );
 
-type Options = { command: readonly string[]; dataDir: string };
+type Options = { command: readonly string[]; dataDir: string; clock?: AwakeClock | undefined };
 
-export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
+export function createClaudeRunTurn({
+  command,
+  dataDir,
+  clock = createAwakeClock(),
+}: Options): RunTurn {
   return async ({
     prompt,
     sessionId,
@@ -659,6 +671,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     const attempt = (asResume: boolean, text: string, stop: AbortSignal, delivered: () => void) =>
       runProcess({
         command,
+        clock,
         args: turnArgs(personaPath, sessionId, asResume, launch, configPath),
         cwd,
         prompt: text,

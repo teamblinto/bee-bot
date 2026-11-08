@@ -10,6 +10,7 @@ import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
+import { createAwakeClock } from "./watchdog.ts";
 
 const bootstrapTimeoutMs = 5000;
 const pruneEveryMs = 24 * 60 * 60_000;
@@ -63,7 +64,8 @@ async function boot(bootstrap: Bootstrap) {
   const store = openStore(bootstrap.dataDir);
   const { claudeCommand = ["claude"], codexCommand = ["codex"], dataDir } = bootstrap;
   wipeRuntime(dataDir);
-  const claude = createClaudeRunTurn({ command: claudeCommand, dataDir });
+  const clock = createAwakeClock();
+  const claude = createClaudeRunTurn({ command: claudeCommand, dataDir, clock });
   const codex = createCodexRunTurn({ command: codexCommand, dataDir });
   const runTurn: RunTurn = (turn) => {
     if (turn.launch.engineAccountId === "codex") {
@@ -75,6 +77,7 @@ async function boot(bootstrap: Bootstrap) {
   const server = await startServer({
     ...bootstrap,
     store,
+    clock,
     runTurn,
     probeEngine: probe,
     probeCodex: (lane, onModels) => probeCodex(codexCommand, dataDir, lane, onModels),
