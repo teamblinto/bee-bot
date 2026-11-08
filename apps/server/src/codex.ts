@@ -3,7 +3,13 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import { Effort, type EngineModel, type EngineStatus, type PauseReason } from "@beebot/contracts";
+import {
+  Effort,
+  type EngineLane,
+  type EngineModel,
+  type EngineStatus,
+  type PauseReason,
+} from "@beebot/contracts";
 import { z } from "zod";
 
 import { patchFileHeader } from "./approvals.ts";
@@ -38,7 +44,6 @@ const lockedArgs = [
   "project_doc_max_bytes=0",
   "skills.bundled.enabled=false",
   'model_provider="openai"',
-  'forced_login_method="chatgpt"',
 ].flatMap((setting) => ["-c", setting]);
 const disabledFeatures = [
   "hooks",
@@ -70,11 +75,19 @@ function projectsArg(cwd: string) {
   return `projects={${keys.map((key) => `${key}={trust_level="untrusted"}`).join(",")}}`;
 }
 
-const launchArgs = (cwd: string) => [
+// What `forced_login_method` takes, and what `account/read` reports, for each lane.
+const loginMethods = {
+  subscription: { forced: "chatgpt", account: "chatgpt" },
+  api_key: { forced: "api", account: "apiKey" },
+} satisfies Record<EngineLane, { forced: string; account: string }>;
+
+const launchArgs = (cwd: string, lane: EngineLane) => [
   "app-server",
   "-c",
   projectsArg(cwd),
   ...lockedArgs,
+  "-c",
+  `forced_login_method="${loginMethods[lane].forced}"`,
   ...disabledFeatures,
 ];
 
@@ -88,7 +101,7 @@ const beeArgs = (url: string) =>
     `shell_environment_policy.exclude=["${tokenVariable}"]`,
   ].flatMap((setting) => ["-c", setting]);
 
-// `CODEX_HOME` stays: it is where the owner's ChatGPT login lives.
+// `CODEX_HOME` stays: it is where the owner's login lives, on either lane.
 const clearedEnv =
   /^(?!CODEX_HOME$)(OPENAI_|CODEX_|AWS_|GOOGLE_|GCP_|AZURE_|ANTHROPIC_|CLAUDE|T3CODE|ELECTRON_RUN_AS_NODE$)/i;
 
@@ -362,11 +375,21 @@ type AppServer = ReturnType<typeof startAppServer>;
 const Initialized = z.object({ userAgent: z.string() });
 const Account = z.object({ account: z.object({ type: loose }).nullish() });
 
-// The reply also holds the owner's email, which stops here: nothing else may read it.
-const isChatgpt = (reply: unknown) => Account.safeParse(reply).data?.account?.type === "chatgpt";
+// The reply also holds the owner's email, which stops here: nothing else may read it. Any other
+// login pauses the bot: the lane is never switched.
+function accountPause(reply: unknown, lane: EngineLane): PauseReason | null {
+  const type = Account.safeParse(reply).data?.account?.type;
+  if (type === loginMethods[lane].account) {
+    return null;
+  }
+  return type ? "credential_source" : "auth_failed";
+}
 
 // Null means open. Undefined means no answer came, and what that means is the caller's call.
-async function passGate(server: AppServer): Promise<PauseReason | null | undefined> {
+async function passGate(
+  server: AppServer,
+  lane: EngineLane,
+): Promise<PauseReason | null | undefined> {
   const initialized = await server.request("initialize", {
     clientInfo: { name: "bee", version: "1" },
     capabilities: { experimentalApi: true },
@@ -384,7 +407,7 @@ async function passGate(server: AppServer): Promise<PauseReason | null | undefin
   if (!account) {
     return undefined;
   }
-  return isChatgpt(account.result) ? null : "auth_failed";
+  return accountPause(account.result, lane);
 }
 
 const SkillList = z.object({
@@ -701,7 +724,7 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
 
     const server = startAppServer({
       command,
-      args: [...launchArgs(cwd), ...beeArgs(permissions.url)],
+      args: [...launchArgs(cwd, launch.lane), ...beeArgs(permissions.url)],
       cwd,
       env: { ...childEnv(), [tokenVariable]: permissions.token },
       onNotification,
@@ -718,7 +741,7 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
     };
 
     async function drive(): Promise<TurnOutcome> {
-      const gate = await passGate(server);
+      const gate = await passGate(server, launch.lane);
       if (gate === undefined) {
         if (server.spawnFailed()) {
           return { kind: "auth_failed", pauseReason: "cli_missing" };
@@ -796,6 +819,7 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
 export async function probeCodex(
   command: readonly string[],
   cwd: string,
+  lane: EngineLane,
   onModels?: (models: EngineModel[]) => void,
 ): Promise<EngineStatus> {
   const status = (pauseReason: PauseReason | null, cliFound = true, versionOk = true) => ({
@@ -807,14 +831,14 @@ export async function probeCodex(
   });
   const server = startAppServer({
     command,
-    args: launchArgs(await NodeFS.realpath(cwd)),
+    args: launchArgs(await NodeFS.realpath(cwd), lane),
     cwd,
     env: childEnv(),
     onRequest: refusal,
   });
   server.after(gateTimeoutMs, server.kill);
   try {
-    const gate = await passGate(server);
+    const gate = await passGate(server, lane);
     if (gate === undefined) {
       return server.spawnFailed() ? status("cli_missing", false, false) : status("auth_failed");
     }

@@ -8,6 +8,7 @@ const IGNORE_PATTERNS = [
   "pnpm-lock.yaml",
   "*.tsbuildinfo",
   "**/routeTree.gen.ts",
+  ".claude/worktrees",
 ];
 
 export default defineConfig({

@@ -259,7 +259,11 @@ const scenarios = {
   "gate-version": { userAgent: "bee/9.9.9 (Windows; x86_64)", steps: () => message("noted") },
   "gate-no-version": { userAgent: "garbled", steps: () => message("noted") },
   "gate-logged-out": { account: null, steps: () => message("noted") },
-  "gate-api-key": { account: { type: "apiKey" }, steps: () => message("noted") },
+  // The key is planted: the real reply carries none, but nothing Bee keeps may hold it if one did.
+  "gate-api-key": {
+    account: { type: "apiKey", apiKey: "sk-planted-key-that-must-not-leak" },
+    steps: () => message("noted"),
+  },
   "gate-bedrock": { account: { type: "amazonBedrock" }, steps: () => message("noted") },
   "gate-silent": { silent: true },
   "project-active": {

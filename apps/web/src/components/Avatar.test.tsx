@@ -7,9 +7,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 import { Avatar, avatarPartCounts, avatarParts } from "./Avatar";
 
-const postCommand = vi.hoisted(() => vi.fn());
+const { postCommand, chat } = vi.hoisted(() => ({ postCommand: vi.fn(), chat: { accounts: [] } }));
 vi.mock("../serverConnection", () => ({
-  getConnectionState: () => ({ models: undefined }),
+  getConnectionState: () => ({ models: undefined, chat }),
   subscribeToConnection: () => () => {},
   postCommand,
 }));

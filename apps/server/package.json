@@ -5,6 +5,7 @@
   "description": "Bee Bot headless server",
   "type": "module",
   "scripts": {
+    "start": "node dist/index.cjs",
     "test": "vp test run"
   },
   "devDependencies": {

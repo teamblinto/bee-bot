@@ -1,5 +1,6 @@
 // A stand-in for the CLI, run as a real child process so tests never touch the real one.
 // Usage: node fake-claude.mjs <scenario> <log file> ...<claude args>
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
@@ -30,6 +31,8 @@ const withUsage = (response) => ({
 });
 
 const subscriber = passingInit.response.response.account;
+// Unverified: no Console login was captured. Mirrors `consoleKeySource` in claude.ts.
+const consoleKey = { apiProvider: "firstParty", apiKeySource: "/login managed key" };
 const loggedIn = {
   loggedIn: true,
   authMethod: "claude.ai",
@@ -153,12 +156,19 @@ const scenarios = {
     init: () => withAccount({ ...subscriber, tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" }),
     frames: () => replay("success.ndjson"),
   },
+  "gate-console": { init: () => withAccount(consoleKey), frames: () => replay("success.ndjson") },
   "gate-logged-out": {
     init: () => fixture("logged-out.ndjson")[0],
     frames: () => replay("success.ndjson"),
   },
   "noisy-success": { frames: () => replay("success.ndjson"), noise: true },
   "no-final-newline": { frames: () => replay("success.ndjson"), noNewline: true },
+  // The test sets the account fields a credential source would show in the init reply.
+  "gate-account": {
+    init: () => withAccount({ ...subscriber, ...JSON.parse(process.env.FAKE_CLAUDE_ACCOUNT) }),
+    frames: () => replay("success.ndjson"),
+  },
+  "repo-loader": { loadsRepo: true, frames: () => replay("success.ndjson") },
   "gate-silent": { init: () => undefined, hang: true },
   "gate-version": {
     version: "9.9.9",
@@ -173,6 +183,7 @@ const scenarios = {
   "no-conversation": { onStart: () => "no_conversation" },
   "logged-out-status": { auth: { loggedIn: false }, authExit: 1 },
   "api-key-status": { auth: { ...loggedIn, apiKeySource: "ANTHROPIC_API_KEY" } },
+  "console-status": { auth: { ...loggedIn, authMethod: "console", ...consoleKey } },
 };
 
 const scenario = scenarios[scenarioName] ?? {};
@@ -203,6 +214,38 @@ if (args[0] === "--version") {
 if (args[0] === "auth") {
   console.log(JSON.stringify(scenario.auth ?? loggedIn));
   process.exit(scenario.authExit ?? 0);
+}
+
+// What the docs say non-bare `-p` loads from a folder it never asks to trust: hooks, the `env`
+// block and `apiKeyHelper` from project and local settings, and `.mcp.json` servers. A model of
+// the CLI, not the CLI: only spike S1 proves the real one honours these flags.
+function loadRepo() {
+  const flag = args.indexOf("--setting-sources");
+  const sources = flag === -1 ? ["user", "project", "local"] : args[flag + 1].split(",");
+  const files = { project: "settings.json", local: "settings.local.json" };
+  for (const source of sources.filter((name) => name in files)) {
+    const path = NodePath.join(process.cwd(), ".claude", files[source]);
+    const settings = NodeFS.existsSync(path) ? JSON.parse(NodeFS.readFileSync(path, "utf8")) : {};
+    Object.assign(process.env, settings.env);
+    for (const { hooks = [] } of settings.hooks?.SessionStart ?? []) {
+      hooks.forEach(({ command }) => NodeChildProcess.execSync(command));
+    }
+    if (settings.apiKeyHelper) {
+      NodeChildProcess.execSync(settings.apiKeyHelper);
+    }
+  }
+  const mcpPath = NodePath.join(process.cwd(), ".mcp.json");
+  if (!args.includes("--strict-mcp-config") && NodeFS.existsSync(mcpPath)) {
+    const { mcpServers = {} } = JSON.parse(NodeFS.readFileSync(mcpPath, "utf8"));
+    for (const { command, args: serverArgs = [] } of Object.values(mcpServers)) {
+      NodeChildProcess.execFileSync(command, serverArgs);
+    }
+  }
+  log({ loadedEnv: Object.keys(process.env) });
+}
+
+if (scenario.loadsRepo) {
+  loadRepo();
 }
 
 const early = scenario.onStart?.();

@@ -9,14 +9,18 @@ import * as NodeReadline from "node:readline";
 import {
   type Bot,
   type ChatState,
+  type EngineLane,
   type EngineStatus,
+  type PauseReason,
   maxAvatarSeed,
   protocolVersion,
+  ServerInfo,
   ServerMessage,
 } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import serverPackage from "../package.json" with { type: "json" };
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
@@ -36,7 +40,11 @@ const healthy: EngineStatus = {
 
 let dataDir: string;
 let engineStatus: EngineStatus;
-const probeEngine = async () => engineStatus;
+const probedLanes: EngineLane[] = [];
+const probeEngine = async (lane: EngineLane) => {
+  probedLanes.push(lane);
+  return engineStatus;
+};
 const cleanups: Array<() => Promise<void> | void> = [];
 
 beforeEach(() => {
@@ -51,7 +59,7 @@ afterEach(async () => {
   NodeFS.rmSync(dataDir, { recursive: true, force: true });
 });
 
-async function start(port = 0) {
+async function start(port = 0, heartbeatMs?: number) {
   const store = openEventStore(dataDir);
   const server = await startServer({
     port,
@@ -60,6 +68,7 @@ async function start(port = 0) {
     allowedOrigins: [appOrigin],
     store,
     probeEngine,
+    heartbeatMs,
   });
   let open = true;
   const stop = async () => {
@@ -321,6 +330,48 @@ describe("event stream", () => {
     const [code] = await once(socket, "close");
     expect(code).toBe(1008);
   });
+
+  it("drops a socket that stops answering pings, and keeps one that answers", async () => {
+    const { port } = await start(0, 40);
+    const silent = new WebSocket(wsUrl(port), { autoPong: false });
+    const answering = new WebSocket(wsUrl(port));
+    cleanups.push(() => answering.terminate());
+    await Promise.all([once(silent, "open"), once(answering, "open")]);
+    const [code] = await once(silent, "close");
+    expect(code).toBe(1006);
+    expect(answering.readyState).toBe(WebSocket.OPEN);
+  });
+});
+
+describe("server info", () => {
+  it("answers without the token or a protocol version, and keeps its ID across restarts", async () => {
+    const first = await start();
+    const response = await fetch(`${first.base}/.well-known/bee-bot`, {
+      headers: { Origin: appOrigin },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(appOrigin);
+    const info = ServerInfo.parse(await response.json());
+    expect(info).toEqual({
+      environmentId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      version: serverPackage.version,
+      protocolVersion,
+      capabilities: [],
+    });
+    await first.stop();
+
+    const second = await start();
+    const again = await fetch(`${second.base}/.well-known/bee-bot`);
+    expect(ServerInfo.parse(await again.json()).environmentId).toBe(info.environmentId);
+  });
+
+  it("refuses a foreign Origin", async () => {
+    const { base } = await start();
+    const response = await fetch(`${base}/.well-known/bee-bot`, {
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(response.status).toBe(403);
+  });
 });
 
 describe("engine status", () => {
@@ -371,6 +422,42 @@ describe("engine status", () => {
     await engine(base);
     expect(reasons()).toEqual([null, "owner", null]);
     expect(store.state().bots.map(({ id }) => id)).toEqual([ada.id, ben.id, fake.id]);
+  });
+
+  it("changes an account's lane and lifts only its credential pauses", async () => {
+    const { base, store } = await start();
+    const pausedFor = (name: string, reason: PauseReason) => {
+      const bot = store.createBot({ name, personality: "", engineAccountId: "claude" });
+      store.setBotPause(bot.id, reason);
+      return bot;
+    };
+    const ada = pausedFor("Ada", "credential_source");
+    pausedFor("Ben", "auth_failed");
+    pausedFor("Cy", "owner");
+    pausedFor("Dee", "cli_version");
+    pausedFor("Eve", "cli_missing");
+    const reasons = () => store.state().bots.map(({ pauseReason }) => pauseReason);
+    const setLane = (lane: EngineLane) =>
+      command(base, { type: "set-account-lane", engineAccountId: "claude", lane });
+    const lane = () => store.state().accounts.find(({ id }) => id === "claude")?.lane;
+    expect(lane()).toBe("subscription");
+
+    const before = store.bounds().latest;
+    expect((await setLane("api_key")).status).toBe(200);
+    expect(lane()).toBe("api_key");
+    expect(store.getBot(ada.id)?.pauseReason).toBeNull();
+    expect(reasons()).toEqual([null, null, "owner", "cli_version", "cli_missing"]);
+    expect(store.eventsAfter(before).map(({ type }) => type)).toEqual([
+      "account.changed",
+      "bot.changed",
+      "bot.changed",
+    ]);
+
+    const unchanged = store.bounds().latest;
+    await setLane("api_key");
+    expect(store.eventsAfter(unchanged)).toEqual([]);
+    await engine(base);
+    expect(probedLanes.at(-1)).toBe("api_key");
   });
 });
 
@@ -592,7 +679,11 @@ describe("bot avatars", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DROP TABLE routine_firings;
+    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
+      DELETE FROM migrations WHERE name = 'account_lane';
+      ALTER TABLE settings DROP COLUMN environment_id;
+      DELETE FROM migrations WHERE name = 'environment_id';
+      DROP TABLE routine_firings;
       DROP TABLE routines;
       DELETE FROM migrations WHERE name = 'routines';
       DELETE FROM migrations WHERE name = 'codex_account';
@@ -640,6 +731,29 @@ describe("storage failure", () => {
 });
 
 describe("restart", () => {
+  it("puts every account on the subscription lane, its stored events too", async () => {
+    const first = await start();
+    await first.stop();
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
+      DELETE FROM migrations WHERE name = 'account_lane';
+      INSERT INTO events (type, payload, created_at) VALUES ('account.changed',
+        '{"type":"account.changed","account":{"id":"claude","label":"Claude","blockedUntil":null}}',
+        'then');`);
+    db.close();
+
+    const { store } = await start();
+    expect(store.state().accounts.map(({ lane }) => lane)).toEqual([
+      "subscription",
+      "subscription",
+      "subscription",
+    ]);
+    expect(store.eventsAfter(0)).toMatchObject([
+      { type: "account.changed", account: { id: "claude", lane: "subscription" } },
+    ]);
+  });
+
   it("clears events from before the event contract changed", async () => {
     const { DatabaseSync } = await import("node:sqlite");
     NodeFS.mkdirSync(dataDir, { recursive: true });
@@ -663,7 +777,11 @@ describe("restart", () => {
     seeded.close();
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DROP TABLE routine_firings;
+    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
+      DELETE FROM migrations WHERE name = 'account_lane';
+      ALTER TABLE settings DROP COLUMN environment_id;
+      DELETE FROM migrations WHERE name = 'environment_id';
+      DROP TABLE routine_firings;
       DROP TABLE routines;
       DELETE FROM migrations WHERE name = 'routines';
       DELETE FROM migrations WHERE name = 'codex_account';
@@ -1145,7 +1263,11 @@ describe("project folders", () => {
 
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`DROP TABLE routine_firings;
+    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
+      DELETE FROM migrations WHERE name = 'account_lane';
+      ALTER TABLE settings DROP COLUMN environment_id;
+      DELETE FROM migrations WHERE name = 'environment_id';
+      DROP TABLE routine_firings;
       DROP TABLE routines;
       DELETE FROM migrations WHERE name = 'routines';
       DELETE FROM migrations WHERE name = 'codex_account';

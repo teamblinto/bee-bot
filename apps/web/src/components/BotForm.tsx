@@ -1,4 +1,4 @@
-import { Bot, defaultBotModel, EngineAccountId } from "@beebot/contracts";
+import { Bot, defaultBotModel, EngineAccountId, EngineLane } from "@beebot/contracts";
 import { Dices } from "lucide-react";
 import {
   type FormEvent,
@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { codexRulesWarning, projectPathValue } from "../labels";
+import { codexRulesWarning, laneLabels, projectPathValue } from "../labels";
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { ModelPicker } from "./ModelPicker";
@@ -37,11 +37,20 @@ export function BotForm({
   const [projectPath, setProjectPath] = useState(bot?.projectPath ?? "");
   const [engine, setEngine] = useState<keyof typeof EngineAccountId.enum>("claude");
   const catalog = useSyncExternalStore(subscribeToConnection, () => getConnectionState().models);
+  const accounts = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().chat.accounts,
+  );
+  const [laneChoice, setLaneChoice] = useState<EngineLane>();
   const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const saving = useRef(false);
   const accountId = bot?.engineAccountId ?? engine;
+  const savedLane = accounts.find(({ id }) => id === accountId)?.lane;
+  const lane = laneChoice ?? savedLane ?? "subscription";
+  const laneAccount = accountId === "claude" || accountId === "codex" ? accountId : undefined;
+  const lanes = laneAccount && laneLabels[laneAccount];
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -58,11 +67,22 @@ export function BotForm({
       avatarSeed,
       projectPath: projectPathValue(projectPath),
     };
-    const result = await postCommand(
-      bot
-        ? { type: "update-bot", botId: bot.id, ...fields }
-        : { type: "create-bot", ...fields, engineAccountId: engine },
-    );
+    const laneResult =
+      laneAccount && laneChoice && laneChoice !== savedLane
+        ? await postCommand({
+            type: "set-account-lane",
+            engineAccountId: laneAccount,
+            lane: laneChoice,
+          })
+        : undefined;
+    const result =
+      laneResult && !laneResult.ok
+        ? laneResult
+        : await postCommand(
+            bot
+              ? { type: "update-bot", botId: bot.id, ...fields }
+              : { type: "create-bot", ...fields, engineAccountId: engine },
+          );
     saving.current = false;
     setBusy(false);
     const saved = result.ok ? Bot.safeParse(result.body).data : undefined;
@@ -120,11 +140,35 @@ export function BotForm({
           field
           onPick={(accountId, picked) => {
             setModel(picked);
+            setLaneChoice(undefined);
             setEngine(EngineAccountId.parse(accountId));
           }}
         />
         {accountId === "codex" && <p className="text-small">{codexRulesWarning}</p>}
       </div>
+      {lanes && (
+        <label className={labelClass}>
+          Login
+          <select
+            className="field text-ink"
+            aria-describedby="lane-help"
+            value={lane}
+            onChange={(event) => setLaneChoice(EngineLane.parse(event.target.value))}
+          >
+            {EngineLane.options.map((option) => (
+              <option key={option} value={option}>
+                {lanes[option]}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {lanes && (
+        <p id="lane-help" className="text-small text-ink-secondary">
+          Applies to every bot on this engine. Log the CLI in this way yourself; Bee Bot never sees
+          the key and pauses bots if the login doesn't match.
+        </p>
+      )}
       <label className={labelClass}>
         Project folder (optional)
         <input

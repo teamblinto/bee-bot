@@ -3,7 +3,7 @@ import { once } from "node:events";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers/promises";
 
-import type { ApprovalTool, Bot, PauseReason } from "@beebot/contracts";
+import type { ApprovalTool, Bot, EngineLane, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
@@ -26,6 +26,7 @@ export type BotLaunch = EngineChoice & {
   name: string;
   personality: string;
   engineAccountId: string;
+  lane: EngineLane;
   memory: string;
 };
 

@@ -12,6 +12,7 @@ import {
   type ChatState,
   defaultBotModel,
   EngineAccount,
+  type EngineLane,
   type EventBody,
   maxAvatarSeed,
   MemoryItem,
@@ -306,6 +307,20 @@ export const migrations: Array<{
       UNIQUE (routine_id, slot)
     );`,
   },
+  {
+    name: "environment_id",
+    sql: "ALTER TABLE settings ADD COLUMN environment_id TEXT NOT NULL DEFAULT '';",
+    backfill: (db: DatabaseSync) => {
+      db.prepare("UPDATE settings SET environment_id = ?").run(NodeCrypto.randomUUID());
+    },
+  },
+  {
+    name: "account_lane",
+    sql: `ALTER TABLE engine_accounts ADD COLUMN lane TEXT NOT NULL DEFAULT 'subscription'
+      CHECK (lane IN ('subscription', 'api_key'));
+    UPDATE events SET payload = json_set(payload, '$.account.lane', 'subscription')
+      WHERE type = 'account.changed';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -380,7 +395,14 @@ export type FinishedRun = {
 const continuationNote =
   "Your previous turn was cut off before it finished. Continue from where you left off.";
 const approvalsInState = 500;
-const enginePauses = ["auth_failed", "cli_missing", "cli_version", "config_dir"];
+const enginePauses = [
+  "auth_failed",
+  "cli_missing",
+  "cli_version",
+  "config_dir",
+  "credential_source",
+] satisfies PauseReason[];
+const credentialPauses = ["auth_failed", "credential_source"] satisfies PauseReason[];
 const digestCap = 16_000;
 const digestRows = 200;
 const digestHeader =
@@ -544,10 +566,13 @@ export function openEventStore(dataDir: string) {
   );
   const updateBotStatus = db.prepare("UPDATE bots SET status = ?, pause_reason = ? WHERE id = ?");
 
-  const accountColumns = "id, label, blocked_until AS blockedUntil";
+  const accountColumns = "id, label, lane, blocked_until AS blockedUntil";
   const selectAccounts = db.prepare(`SELECT ${accountColumns} FROM engine_accounts ORDER BY id`);
   const selectAccount = db.prepare(`SELECT ${accountColumns} FROM engine_accounts WHERE id = ?`);
   const blockAccount = db.prepare("UPDATE engine_accounts SET blocked_until = ? WHERE id = ?");
+  const updateLane = db.prepare(
+    `UPDATE engine_accounts SET lane = ? WHERE id = ? AND lane <> ? RETURNING ${accountColumns}`,
+  );
   const unblockExpired = db.prepare(
     `UPDATE engine_accounts SET blocked_until = NULL WHERE blocked_until <= ?
      RETURNING ${accountColumns}`,
@@ -699,6 +724,9 @@ export function openEventStore(dataDir: string) {
   const selectSettings = db.prepare(
     "SELECT notice_acknowledged_at AS noticeAcknowledgedAt FROM settings",
   );
+  const { environmentId } = z
+    .object({ environmentId: z.string().min(1) })
+    .parse(db.prepare("SELECT environment_id AS environmentId FROM settings").get());
   const acknowledge = db.prepare(
     `UPDATE settings SET notice_acknowledged_at = ? WHERE notice_acknowledged_at IS NULL
      RETURNING notice_acknowledged_at AS noticeAcknowledgedAt`,
@@ -1100,6 +1128,15 @@ export function openEventStore(dataDir: string) {
     return bot;
   }
 
+  function clearEnginePauses(engineAccountId: string, reasons: PauseReason[] = enginePauses) {
+    for (const bot of z.array(Bot).parse(selectBots.all())) {
+      const paused = bot.pauseReason && reasons.includes(bot.pauseReason);
+      if (bot.engineAccountId === engineAccountId && paused) {
+        setPause(bot.id, null);
+      }
+    }
+  }
+
   // The files are the truth, so the index is rebuilt at every boot. No events: a client from before
   // this boot gets a snapshot instead (`catchUp`).
   transaction(() => {
@@ -1205,12 +1242,15 @@ export function openEventStore(dataDir: string) {
         }
       }),
     clearEnginePauses: (engineAccountId: string) =>
+      transaction(() => clearEnginePauses(engineAccountId)),
+    accountLane: (id: string) => EngineAccount.parse(selectAccount.get(id)).lane,
+    // Credential pauses are lifted so the next run's gate checks the CLI against the new lane.
+    setAccountLane: (id: string, lane: EngineLane) =>
       transaction(() => {
-        for (const bot of z.array(Bot).parse(selectBots.all())) {
-          const paused = bot.pauseReason && enginePauses.includes(bot.pauseReason);
-          if (bot.engineAccountId === engineAccountId && paused) {
-            setPause(bot.id, null);
-          }
+        const changed = updateLane.get(lane, id, lane);
+        if (changed) {
+          emit({ type: "account.changed", account: EngineAccount.parse(changed) });
+          clearEnginePauses(id, credentialPauses);
         }
       }),
 
@@ -1433,6 +1473,7 @@ export function openEventStore(dataDir: string) {
             name,
             personality,
             engineAccountId: run.engineAccountId,
+            lane: EngineAccount.parse(selectAccount.get(run.engineAccountId)).lane,
             model,
             effort,
             mode,
@@ -1687,6 +1728,8 @@ export function openEventStore(dataDir: string) {
           writeUsage(accountId, merged, current.unavailable);
         }
       }),
+
+    environmentId,
 
     acknowledgeNotice: () =>
       transaction(() => {

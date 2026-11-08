@@ -4,6 +4,7 @@ import {
   type ApprovalTool,
   type Bot,
   type EngineAccount,
+  type EngineLane,
   type EngineStatus,
   type MemoryItem,
   memoryRequest,
@@ -52,6 +53,12 @@ export function changeNote({ action, replaceAll }: ApprovalChange) {
 export const codexRulesWarning =
   "Commands you've pre-approved in Codex's own rules (~/.codex/rules) run without a card.";
 
+// Bee never takes the key: the owner logs the vendor CLI in, and Bee checks it matches.
+export const laneLabels = {
+  claude: { subscription: "Claude subscription", api_key: "API key (Console login)" },
+  codex: { subscription: "ChatGPT plan", api_key: "API key" },
+} satisfies Record<string, Record<EngineLane, string>>;
+
 export const hiddenCharsLine = (count: number) =>
   `${formatCount(count)} more ${count === 1 ? "character" : "characters"} not shown. Allowing applies the whole change.`;
 
@@ -95,6 +102,13 @@ export function engineFix(engine: EngineStatus) {
       command: "claude auth login",
     };
   }
+  if (engine.pauseReason === "credential_source") {
+    return {
+      label: "Claude is logged in a different way",
+      text: "Claude Code is logged in with another method than this account's login setting. Log in with the matching one from a terminal, then check again.",
+      command: "claude auth login",
+    };
+  }
   if (!engine.loggedIn || engine.pauseReason === "auth_failed") {
     return {
       label: "Claude isn't logged in",
@@ -115,11 +129,30 @@ const codexPauseLines: Partial<Record<NonNullable<Bot["pauseReason"]>, string>> 
   cli_version: `This Codex version is untested. Install version ${testedCodexVersion}, then Resume.`,
 };
 
+const credentialLines = {
+  claude: {
+    subscription:
+      "Claude Code is logged in with something other than your Claude subscription. Run claude auth login and sign in with your Claude account, then Resume.",
+    api_key:
+      "Claude Code isn't logged in with a Console API key. Run claude auth login and sign in with your Anthropic Console account, then Resume.",
+  },
+  codex: {
+    subscription:
+      "Codex is logged in with something other than ChatGPT. Run codex login and sign in with ChatGPT, then Resume.",
+    api_key:
+      "Codex isn't logged in with an API key. Run codex login --with-api-key in your own terminal, then Resume.",
+  },
+};
+
 export function pauseLine(
   reason: NonNullable<Bot["pauseReason"]>,
   accountId: string,
   engine?: EngineStatus,
+  lane: EngineLane = "subscription",
 ) {
+  if (reason === "credential_source") {
+    return credentialLines[accountId === "codex" ? "codex" : "claude"][lane];
+  }
   const version = engine ? `version ${engine.testedVersion}` : "the tested version";
   const lines = {
     owner: "Paused. Resume to send messages.",

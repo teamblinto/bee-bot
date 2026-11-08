@@ -2,7 +2,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import { Bootstrap, noRestartExitCodes } from "@beebot/contracts";
+import { Bootstrap, type EngineLane, noRestartExitCodes } from "@beebot/contracts";
 
 import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
@@ -62,17 +62,17 @@ async function boot(bootstrap: Bootstrap) {
     }
     return turn.launch.engineAccountId === "fake" ? fakeRunTurn(turn) : claude(turn);
   };
-  const probe = () => probeEngine(claudeCommand, dataDir);
+  const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
   const server = await startServer({
     ...bootstrap,
     store,
     runTurn,
     probeEngine: probe,
-    probeCodex: (onModels) => probeCodex(codexCommand, dataDir, onModels),
+    probeCodex: (lane, onModels) => probeCodex(codexCommand, dataDir, lane, onModels),
     probeUsage: (onModels) => probeUsage(claudeCommand, dataDir, onModels),
   });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
-  const { pauseReason } = await probe();
+  const { pauseReason } = await probe(store.accountLane("claude"));
   if (pauseReason) {
     console.error(`beebotd: Claude bots paused: ${pauseReason}`);
     store.pauseReadyBots("claude", pauseReason);
@@ -85,31 +85,53 @@ async function boot(bootstrap: Bootstrap) {
   };
 }
 
-const bootstrapTimer = setTimeout(
-  () => exitWith(noRestartExitCodes.invalidBootstrap, "no bootstrap on stdin"),
-  bootstrapTimeoutMs,
-);
-
-let running: ReturnType<typeof boot> | undefined;
-const stdin = NodeReadline.createInterface({ input: process.stdin });
-
-stdin.once("line", (line) => {
-  clearTimeout(bootstrapTimer);
-  const bootstrap = parseBootstrap(line);
+function start(bootstrap: Bootstrap | undefined) {
   if (!bootstrap) {
     exitWith(noRestartExitCodes.invalidBootstrap, "invalid bootstrap");
   }
-  running = boot(bootstrap);
+  const running = boot(bootstrap);
   running.catch((error: unknown) => {
     console.error(error);
     process.exit(1);
   });
-});
+  return running;
+}
 
-// The parent holds stdin open for our whole life, so EOF means stop, even if the parent crashed.
-stdin.once("close", () => {
-  if (!running) {
-    exitWith(noRestartExitCodes.invalidBootstrap, "stdin closed before bootstrap");
+function readBootstrapFile(path: string | undefined) {
+  try {
+    return path === undefined ? undefined : parseBootstrap(NodeFS.readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
   }
-  void running.then((stop) => stop()).then(() => process.exit(0));
-});
+}
+
+const fileFlag = process.argv.indexOf("--bootstrap", 2);
+
+if (fileFlag === -1) {
+  const bootstrapTimer = setTimeout(
+    () => exitWith(noRestartExitCodes.invalidBootstrap, "no bootstrap on stdin"),
+    bootstrapTimeoutMs,
+  );
+
+  let running: ReturnType<typeof boot> | undefined;
+  const stdin = NodeReadline.createInterface({ input: process.stdin });
+
+  stdin.once("line", (line) => {
+    clearTimeout(bootstrapTimer);
+    running = start(parseBootstrap(line));
+  });
+
+  // The parent holds stdin open for our whole life, so EOF means stop, even if the parent crashed.
+  stdin.once("close", () => {
+    if (!running) {
+      exitWith(noRestartExitCodes.invalidBootstrap, "stdin closed before bootstrap");
+    }
+    void running.then((stop) => stop()).then(() => process.exit(0));
+  });
+} else {
+  // Headless: no parent holds stdin open, so a signal is the order to stop.
+  const running = start(readBootstrapFile(process.argv[fileFlag + 1]));
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => void running.then((stop) => stop()).then(() => process.exit(0)));
+  }
+}

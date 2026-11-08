@@ -4,7 +4,13 @@ import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import { Effort, type EngineModel, type EngineStatus, type PauseReason } from "@beebot/contracts";
+import {
+  Effort,
+  type EngineLane,
+  type EngineModel,
+  type EngineStatus,
+  type PauseReason,
+} from "@beebot/contracts";
 import { z } from "zod";
 
 import {
@@ -233,18 +239,44 @@ function parseFrame(line: string) {
   }
 }
 
-function gateRejection(frame: Frame) {
+// shortcut: unverified, no Console login was ever captured. This is the name the CLI is believed to
+// give a key that `claude auth login` stored. Replace it with a capture.
+const consoleKeySource = "/login managed key";
+
+type Credential = { firstParty: boolean; plan: boolean; apiKeySource: unknown; token: unknown };
+
+// The one check for the run gate and the startup probe. A login the lane doesn't use is never
+// switched to: the bot pauses until the owner logs the CLI in the lane's way.
+function credentialPause(lane: EngineLane, credential: Credential) {
+  const { plan, apiKeySource, token } = credential;
+  if (!plan && !apiKeySource && (token === undefined || token === "none")) {
+    return authPause();
+  }
+  return resolvedLane(credential) === lane ? undefined : "credential_source";
+}
+
+function resolvedLane({ firstParty, plan, apiKeySource, token }: Credential) {
+  if (!firstParty) {
+    return undefined;
+  }
+  if (apiKeySource) {
+    return apiKeySource === consoleKeySource && !plan ? "api_key" : undefined;
+  }
+  return plan && (token ?? "claude.ai") === "claude.ai" ? "subscription" : undefined;
+}
+
+function gateRejection(frame: Frame, lane: EngineLane) {
   const reply = frame.response?.response;
   if (reply?.claude_code_version !== testedClaudeVersion) {
     return "cli_version";
   }
   const account = reply.account;
-  const subscription =
-    Boolean(account?.subscriptionType) &&
-    account?.apiProvider === "firstParty" &&
-    !account.apiKeySource &&
-    (account.tokenSource ?? "claude.ai") === "claude.ai";
-  return subscription ? undefined : authPause();
+  return credentialPause(lane, {
+    firstParty: account?.apiProvider === "firstParty",
+    plan: Boolean(account?.subscriptionType),
+    apiKeySource: account?.apiKeySource,
+    token: account?.tokenSource,
+  });
 }
 
 type Seen = {
@@ -292,6 +324,7 @@ type Attempt = {
   args: string[];
   cwd: string;
   prompt: string;
+  lane: EngineLane;
   signal: AbortSignal;
   onDelta: (text: string) => void;
   onToolStart: (tool: ToolStart) => void;
@@ -306,6 +339,7 @@ function runProcess({
   args,
   cwd,
   prompt,
+  lane,
   signal,
   onDelta,
   onToolStart,
@@ -397,7 +431,7 @@ function runProcess({
     }
 
     function openGate(frame: Frame) {
-      const rejection = gateRejection(frame);
+      const rejection = gateRejection(frame, lane);
       if (rejection) {
         gate = rejection;
         child.stdin.end();
@@ -549,7 +583,19 @@ export async function writeMcpConfig(path: string, url: string, token: string) {
   await (await NodeFS.open(path, "wx", 0o600)).close();
   if (process.platform === "win32") {
     const grant = `*${await currentUserSid()}:F`;
-    await execFile("icacls", [path, "/inheritance:r", "/grant:r", grant], { windowsHide: true });
+    // icacls copies a file's inherited entries in as explicit ones on its first edit, so
+    // `/inheritance:r` alone leaves them. Each listed principal is removed by name instead.
+    const { stdout } = await execFile("icacls", [path], { windowsHide: true });
+    const listed = stdout
+      .replace(path, "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes(":("))
+      .map((line) => line.slice(0, line.indexOf(":(")));
+    const remove = listed.length > 0 ? ["/remove:g", ...listed] : [];
+    await execFile("icacls", [path, "/inheritance:r", ...remove, "/grant:r", grant], {
+      windowsHide: true,
+    });
   }
   const bee = {
     type: "http",
@@ -601,6 +647,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
         args: turnArgs(personaPath, sessionId, asResume, launch, configPath),
         cwd,
         prompt,
+        lane: launch.lane,
         signal,
         onDelta,
         onToolStart,
@@ -707,7 +754,7 @@ export function probeUsage(
         return;
       }
       if (frame.response?.request_id === "init-1") {
-        const rejection = gateRejection(frame);
+        const rejection = gateRejection(frame, "subscription");
         if (rejection === "cli_version") {
           finish(unavailableProbe("probeFailed", "This Claude Code version is untested."));
         } else if (rejection) {
@@ -739,13 +786,18 @@ export function probeUsage(
 }
 
 const AuthStatus = z.object({
+  loggedIn: loose,
   authMethod: loose,
   apiProvider: loose,
   apiKeySource: loose,
 });
 
 // Holds the owner's email and org, so nothing from either command may be logged or stored.
-export async function probeEngine(command: readonly string[], cwd: string): Promise<EngineStatus> {
+export async function probeEngine(
+  command: readonly string[],
+  cwd: string,
+  lane: EngineLane,
+): Promise<EngineStatus> {
   const status = (pauseReason: PauseReason | null, cliFound = true, versionOk = true) => ({
     cliFound,
     versionOk,
@@ -772,9 +824,13 @@ export async function probeEngine(command: readonly string[], cwd: string): Prom
   }
   try {
     const auth = AuthStatus.parse(JSON.parse((await run("auth", "status", "--json")).stdout));
-    const subscription =
-      auth.authMethod === "claude.ai" && auth.apiProvider === "firstParty" && !auth.apiKeySource;
-    return status(subscription ? null : authPause());
+    const pause = credentialPause(lane, {
+      firstParty: auth.apiProvider === "firstParty",
+      plan: auth.authMethod === "claude.ai",
+      apiKeySource: auth.apiKeySource,
+      token: auth.loggedIn === false ? "none" : auth.authMethod,
+    });
+    return status(pause ?? null);
   } catch {
     return status(authPause());
   }

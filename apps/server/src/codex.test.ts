@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type BotAccess,
   type Command,
+  type EngineLane,
   EngineStatus,
   type PendingApproval,
   protocolVersion,
@@ -34,6 +35,7 @@ const launch: BotLaunch = {
   name: "Ada",
   personality: "Terse.",
   engineAccountId: "codex",
+  lane: "subscription",
   model: "gpt-6.1-sol",
   effort: null,
   mode: "build",
@@ -219,6 +221,12 @@ describe("the launch", () => {
     expect(disabled).not.toContain("unified_exec");
   });
 
+  it("forces the API-key login on the API-key lane", async () => {
+    await turn("gate-api-key", { fields: { lane: "api_key" } }).outcome;
+    expect(settings()).toContain('forced_login_method="api"');
+    expect(settings()).not.toContain('forced_login_method="chatgpt"');
+  });
+
   it("exposes the memory tools but not `approve`, and hides the token from the shell", async () => {
     await turn("success").outcome;
     expect(settings()).toEqual(
@@ -298,15 +306,27 @@ describe("the launch", () => {
 });
 
 describe("the credential gate", () => {
-  it.each(["gate-logged-out", "gate-api-key", "gate-bedrock"])(
-    "%s never sends the prompt and pauses the bot",
-    async (scenario) => {
-      const { outcome, order } = turn(scenario);
-      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "auth_failed" });
+  it.each([
+    ["subscription", "gate-logged-out", "auth_failed"],
+    ["subscription", "gate-api-key", "credential_source"],
+    ["subscription", "gate-bedrock", "credential_source"],
+    ["api_key", "success", "credential_source"],
+    ["api_key", "gate-bedrock", "credential_source"],
+    ["api_key", "gate-logged-out", "auth_failed"],
+  ] as const)(
+    "on the %s lane, %s never sends the prompt and pauses with %s",
+    async (lane, scenario, pauseReason) => {
+      const { outcome, order } = turn(scenario, { fields: { lane } });
+      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason });
       expect(calls()).not.toContain("thread/start");
       expect(order).toEqual([]);
     },
   );
+
+  it("lets an API-key login through on the API-key lane", async () => {
+    const { outcome } = turn("gate-api-key", { fields: { lane: "api_key" } });
+    expect(await outcome).toEqual({ kind: "completed", text: "noted" });
+  });
 
   it.each(["gate-version", "gate-no-version"])("%s pauses on the version", async (scenario) => {
     expect(await turn(scenario).outcome).toEqual({
@@ -706,8 +726,11 @@ describe("the child environment", () => {
 });
 
 describe("the engine probe", () => {
-  const probe = (scenario: string, onModels?: (models: unknown[]) => void) =>
-    probeCodex(fakeCommand(scenario), dataDir, onModels);
+  const probe = (
+    scenario: string,
+    onModels?: (models: unknown[]) => void,
+    lane: EngineLane = "subscription",
+  ) => probeCodex(fakeCommand(scenario), dataDir, lane, onModels);
 
   it("passes and lists models with no thread or prompt, dropping the identity", async () => {
     const models: unknown[] = [];
@@ -724,20 +747,31 @@ describe("the engine probe", () => {
     expect(calls()).toEqual(["initialize", "initialized", "account/read", "model/list"]);
   });
 
-  it.each([
-    ["gate-version", "cli_version", true, false],
-    ["gate-logged-out", "auth_failed", true, true],
-    ["gate-api-key", "auth_failed", true, true],
-  ])("%s pauses with %s and lists nothing", async (scenario, pauseReason, cliFound, versionOk) => {
-    const onModels = vi.fn();
-    expect(await probe(scenario, onModels)).toMatchObject({
-      pauseReason,
-      cliFound,
-      versionOk,
-      loggedIn: false,
+  it("passes an API-key login on the API-key lane", async () => {
+    expect(await probe("gate-api-key", undefined, "api_key")).toMatchObject({
+      loggedIn: true,
+      pauseReason: null,
     });
-    expect(onModels).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["subscription", "gate-version", "cli_version", true, false],
+    ["subscription", "gate-logged-out", "auth_failed", true, true],
+    ["subscription", "gate-api-key", "credential_source", true, true],
+    ["api_key", "success", "credential_source", true, true],
+  ] as const)(
+    "on the %s lane, %s pauses with %s and lists nothing",
+    async (lane, scenario, pauseReason, cliFound, versionOk) => {
+      const onModels = vi.fn();
+      expect(await probe(scenario, onModels, lane)).toMatchObject({
+        pauseReason,
+        cliFound,
+        versionOk,
+        loggedIn: false,
+      });
+      expect(onModels).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the static list when the reply lists nothing", async () => {
     const onModels = vi.fn();
@@ -747,7 +781,7 @@ describe("the engine probe", () => {
   });
 
   it("pauses on a missing CLI", async () => {
-    expect(await probeCodex(["beebot-no-such-cli"], dataDir)).toMatchObject({
+    expect(await probeCodex(["beebot-no-such-cli"], dataDir, "subscription")).toMatchObject({
       pauseReason: "cli_missing",
       cliFound: false,
     });
@@ -757,7 +791,11 @@ describe("the engine probe", () => {
 describe("through the real server, store and approvals", () => {
   const ownerToken = "t".repeat(43);
 
-  async function boot(scenario: string, access: BotAccess = "supervised") {
+  async function boot(
+    scenario: string,
+    access: BotAccess = "supervised",
+    lane: EngineLane = "subscription",
+  ) {
     const store = openEventStore(dataDir);
     const server = await startServer({
       port: 0,
@@ -809,6 +847,7 @@ describe("through the real server, store and approvals", () => {
       })
     ).json()) as { id: string; roomId: string };
     await post({ type: "set-bot-engine", botId: bot.id, access });
+    await post({ type: "set-account-lane", engineAccountId: "claude", lane });
     plantEnv("FAKE_PROJECT", workspacePath(dataDir, bot.id));
     await post({
       type: "send-message",
@@ -931,5 +970,25 @@ describe("through the real server, store and approvals", () => {
       expect(stored).not.toContain(secret);
       expect(printed).not.toContain(secret);
     }
+  });
+
+  it("runs on the API-key lane without the key reaching the database or the logs", async () => {
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
+      vi.spyOn(console, method),
+    );
+    await boot("gate-api-key", "supervised", "api_key");
+    await runFinished();
+    const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
+    vi.restoreAllMocks();
+    expect(rows("SELECT status FROM runs")).toEqual([{ status: "Completed" }]);
+    expect(rows("SELECT lane FROM engine_accounts WHERE id = 'claude'")).toEqual([
+      { lane: "api_key" },
+    ]);
+    const stored = NodeFS.readdirSync(dataDir)
+      .filter((name) => name.startsWith("beebot.db"))
+      .map((name) => NodeFS.readFileSync(NodePath.join(dataDir, name), "latin1"))
+      .join("");
+    expect(stored).not.toContain("sk-planted");
+    expect(printed).not.toContain("sk-planted");
   });
 });

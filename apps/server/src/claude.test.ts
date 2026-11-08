@@ -3,7 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { Effort, EngineStatus } from "@beebot/contracts";
+import { Effort, type EngineLane, EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -32,6 +32,7 @@ const launch: BotLaunch = {
   name: "Ada",
   personality: "Terse.",
   engineAccountId: "claude",
+  lane: "subscription",
   model: "opus",
   effort: null,
   mode: "build",
@@ -74,6 +75,7 @@ type LogEntry = {
   prompt?: string;
   mcpConfig?: string;
   control?: string;
+  loadedEnv?: string[];
 };
 
 function cliLog(): LogEntry[] {
@@ -103,6 +105,7 @@ function turn(
   resume = false,
   memory = "",
   projectPath: string | null = null,
+  lane: EngineLane = "subscription",
 ) {
   const deltas: string[] = [];
   const tools: string[] = [];
@@ -117,7 +120,7 @@ function turn(
     prompt,
     sessionId: "00000000-0000-4000-8000-000000000009",
     resume,
-    launch: { ...launch, memory, projectPath },
+    launch: { ...launch, memory, projectPath, lane },
     signal,
     onDelta: (text) => deltas.push(text),
     onToolStart: ({ id, name, detail }) => {
@@ -516,16 +519,30 @@ describe("outcomes", () => {
 });
 
 describe("the credential gate", () => {
-  it.each(["gate-api-key", "gate-token", "gate-logged-out"])(
-    "%s never writes the prompt and pauses the bot",
-    async (scenario) => {
-      const { outcome, delivered } = turn(scenario);
-      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "auth_failed" });
+  it.each([
+    ["subscription", "gate-api-key", "credential_source"],
+    ["subscription", "gate-token", "credential_source"],
+    ["subscription", "gate-console", "credential_source"],
+    ["subscription", "gate-logged-out", "auth_failed"],
+    ["api_key", "success", "credential_source"],
+    ["api_key", "gate-api-key", "credential_source"],
+    ["api_key", "gate-logged-out", "auth_failed"],
+  ] as const)(
+    "on the %s lane, %s never writes the prompt and pauses with %s",
+    async (lane, scenario, pauseReason) => {
+      const { outcome, delivered } = turn(scenario, undefined, false, "", null, lane);
+      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason });
       expect(prompts()).toEqual([]);
       expect(delivered()).toBe(0);
     },
     15_000,
   );
+
+  it("lets a Console login through on the API-key lane", async () => {
+    const { outcome } = turn("gate-console", undefined, false, "", null, "api_key");
+    expect(await outcome).toMatchObject({ kind: "completed" });
+    expect(prompts()).toEqual([prompt]);
+  }, 15_000);
 
   it("fails closed when the gate times out, and kills the child", async () => {
     const { outcome, delivered } = turn("gate-silent");
@@ -618,6 +635,64 @@ describe("the child environment", () => {
   });
 });
 
+// The six sources the authentication docs rank above `/login`, each planted where it lives and
+// each reported by the CLI as the source in use, as it would be if the scrub missed it.
+describe("a credential source that outranks the login", () => {
+  const planted = "sk-ant-planted-credential";
+
+  it.each([
+    [
+      "cloud provider flags",
+      { CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_USE_VERTEX: "1", CLAUDE_CODE_USE_FOUNDRY: "1" },
+      { apiProvider: "bedrock" },
+    ],
+    [
+      "ANTHROPIC_AUTH_TOKEN",
+      { ANTHROPIC_AUTH_TOKEN: planted },
+      { apiKeySource: "ANTHROPIC_AUTH_TOKEN" },
+    ],
+    ["ANTHROPIC_API_KEY", { ANTHROPIC_API_KEY: planted }, { apiKeySource: "ANTHROPIC_API_KEY" }],
+    // A settings key: no scrub reaches it, so only the flags and the gate stand in its way.
+    ["apiKeyHelper", {}, { apiKeySource: "apiKeyHelper" }],
+    [
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      { CLAUDE_CODE_OAUTH_TOKEN: planted },
+      { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" },
+    ],
+    // shortcut: no real init reply from a profile was ever captured, so this field is a guess.
+    [
+      "Anthropic profile and federation credentials",
+      {
+        ANTHROPIC_PROFILE: "work",
+        ANTHROPIC_FEDERATION_RULE_ID: "rule",
+        ANTHROPIC_ORGANIZATION_ID: "org",
+        ANTHROPIC_IDENTITY_TOKEN_FILE: "token-file",
+      },
+      { tokenSource: "anthropic_profile" },
+    ],
+  ])(
+    "%s is cleared from the child and fails the turn closed",
+    async (_, env, account) => {
+      for (const [name, value] of Object.entries(env)) {
+        plantEnv(name, value);
+      }
+      plantEnv("FAKE_CLAUDE_ACCOUNT", JSON.stringify(account));
+      const { outcome, delivered } = turn("gate-account");
+      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "credential_source" });
+      expect(prompts()).toEqual([]);
+      expect(delivered()).toBe(0);
+      const [spawn] = spawns();
+      for (const name of Object.keys(env)) {
+        expect(spawn?.env).not.toContain(name);
+      }
+      const args = spawn?.args ?? [];
+      expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
+      expect(args.join(" ")).not.toContain("apiKeyHelper");
+    },
+    15_000,
+  );
+});
+
 describe("session errors", () => {
   it("retries a session ID already in use, once, with --resume", async () => {
     expect(await turn("in-use").outcome).toEqual({ kind: "completed", text: "noted" });
@@ -667,7 +742,7 @@ describe("stopping", () => {
 
 describe("the engine probe", () => {
   it("passes on the tested version and a subscription login, and drops the identity", async () => {
-    const status = await probeEngine(fakeCommand("success"), dataDir);
+    const status = await probeEngine(fakeCommand("success"), dataDir, "subscription");
     expect(status).toEqual({
       cliFound: true,
       versionOk: true,
@@ -678,21 +753,33 @@ describe("the engine probe", () => {
     expect(EngineStatus.parse(status)).toEqual(status);
   });
 
-  it.each([
-    ["gate-version", "cli_version", true, false],
-    ["logged-out-status", "auth_failed", true, true],
-    ["api-key-status", "auth_failed", true, true],
-  ])("%s pauses with %s", async (scenario, pauseReason, cliFound, versionOk) => {
-    expect(await probeEngine(fakeCommand(scenario), dataDir)).toMatchObject({
-      pauseReason,
-      cliFound,
-      versionOk,
-      loggedIn: false,
-    });
+  it("passes a Console login on the API-key lane", async () => {
+    const status = await probeEngine(fakeCommand("console-status"), dataDir, "api_key");
+    expect(status).toMatchObject({ loggedIn: true, pauseReason: null });
   });
 
+  it.each([
+    ["subscription", "gate-version", "cli_version", true, false],
+    ["subscription", "logged-out-status", "auth_failed", true, true],
+    ["subscription", "api-key-status", "credential_source", true, true],
+    ["subscription", "console-status", "credential_source", true, true],
+    ["api_key", "success", "credential_source", true, true],
+    ["api_key", "api-key-status", "credential_source", true, true],
+    ["api_key", "logged-out-status", "auth_failed", true, true],
+  ] as const)(
+    "on the %s lane, %s pauses with %s",
+    async (lane, scenario, pauseReason, cliFound, versionOk) => {
+      expect(await probeEngine(fakeCommand(scenario), dataDir, lane)).toMatchObject({
+        pauseReason,
+        cliFound,
+        versionOk,
+        loggedIn: false,
+      });
+    },
+  );
+
   it("pauses on a missing CLI", async () => {
-    expect(await probeEngine(["beebot-no-such-cli"], dataDir)).toMatchObject({
+    expect(await probeEngine(["beebot-no-such-cli"], dataDir, "subscription")).toMatchObject({
       pauseReason: "cli_missing",
       cliFound: false,
     });
@@ -700,7 +787,7 @@ describe("the engine probe", () => {
 
   it("names the cleared config dir", async () => {
     plantEnv("CLAUDE_CONFIG_DIR", "somewhere");
-    const status = await probeEngine(fakeCommand("logged-out-status"), dataDir);
+    const status = await probeEngine(fakeCommand("logged-out-status"), dataDir, "subscription");
     expect(status.pauseReason).toBe("config_dir");
   });
 });
@@ -731,6 +818,51 @@ describe("a project folder", () => {
     expect(NodeFS.readdirSync(project)).toEqual([]);
     expect(NodeFS.readdirSync(NodePath.dirname(project))).not.toContain("persona.md");
   });
+
+  it("runs none of a hostile repo's hooks, env block, apiKeyHelper or MCP servers", async () => {
+    const write = (name: string, content: unknown) => {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(project, name)), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(project, name), JSON.stringify(content));
+    };
+    const marker = NodePath.join(project, "mark.cjs");
+    NodeFS.writeFileSync(
+      marker,
+      'require("fs").writeFileSync(require("path").join(__dirname, "ran-" + process.argv[2]), "")',
+    );
+    const mark = (what: string) =>
+      `${JSON.stringify(process.execPath)} ${JSON.stringify(marker)} ${what}`;
+    const hook = (what: string) => ({
+      SessionStart: [{ hooks: [{ type: "command", command: mark(what) }] }],
+    });
+    write(".claude/settings.json", {
+      env: { BEE_HOSTILE_ENV: "1" },
+      hooks: hook("hook"),
+      apiKeyHelper: mark("helper"),
+    });
+    write(".claude/settings.local.json", { hooks: hook("local-hook") });
+    write(".mcp.json", {
+      mcpServers: { evil: { command: process.execPath, args: [marker, "mcp"] } },
+    });
+    const ran = () => NodeFS.readdirSync(project).filter((name) => name.startsWith("ran-"));
+
+    // Armed: the same stand-in, launched with no flags, runs all of it.
+    const armed = NodePath.join(dataDir, "armed.log");
+    NodeChildProcess.spawnSync(process.execPath, [fakeCli, "repo-loader", armed], {
+      cwd: project,
+      input: "",
+    });
+    expect(ran().sort()).toEqual(["ran-helper", "ran-hook", "ran-local-hook", "ran-mcp"]);
+    expect(NodeFS.readFileSync(armed, "utf8")).toContain("BEE_HOSTILE_ENV");
+    for (const name of ran()) {
+      NodeFS.rmSync(NodePath.join(project, name));
+    }
+
+    expect(await inProject("repo-loader")).toEqual({ kind: "completed", text: "noted" });
+    expect(ran()).toEqual([]);
+    const loaded = cliLog().find((entry) => entry.loadedEnv)?.loadedEnv;
+    expect(loaded).toBeDefined();
+    expect(loaded).not.toContain("BEE_HOSTILE_ENV");
+  }, 15_000);
 
   it.each(["gone", "a-file"])("is missing when it is %s, and nothing is spawned", async (name) => {
     const path = NodePath.join(project, name);

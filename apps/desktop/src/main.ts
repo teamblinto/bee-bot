@@ -1,8 +1,9 @@
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, Menu, nativeImage, Notification, shell, Tray } from "electron";
 
+import { watchNotices } from "./notices.ts";
 import { startServer, stopServer } from "./server.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
@@ -14,6 +15,12 @@ if (process.platform === "win32") {
 
 let connection: Awaited<ReturnType<typeof startServer>>;
 let serverStopped = false;
+let quitting = false;
+let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let stopNotices: (() => void) | undefined;
+// Electron drops a notification's click handler once nothing holds the notification.
+const shownNotifications = new Set<Notification>();
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -27,8 +34,20 @@ function createWindow() {
       sandbox: true,
     },
   });
+  mainWindow = window;
 
   window.once("ready-to-show", () => window.show());
+  window.on("close", (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = undefined;
+    }
+  });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (["http:", "https:"].includes(URL.parse(url)?.protocol ?? "")) {
       void shell.openExternal(url);
@@ -58,23 +77,59 @@ function createWindow() {
   }
 }
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
+function openWindow() {
+  if (!connection) {
+    return;
   }
-});
-
-app.on("activate", () => {
-  if (connection && BrowserWindow.getAllWindows().length === 0) {
+  if (!mainWindow) {
     createWindow();
+    return;
   }
-});
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// A honey-coloured dot, drawn here so the tray needs no image asset.
+function trayIcon() {
+  const size = 32;
+  const pixels = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      if (Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) <= size / 2 - 1) {
+        pixels.set([0x1a, 0xb3, 0xf5, 0xff], (y * size + x) * 4);
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(pixels, { width: size, height: size, scaleFactor: 2 });
+}
+
+function createTray() {
+  tray = new Tray(trayIcon());
+  tray.setToolTip("Bee Bot");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Open Bee Bot", click: openWindow },
+      { label: "Quit", click: () => app.quit() },
+    ]),
+  );
+  tray.on("click", openWindow);
+}
+
+// Listening keeps Electron from quitting with the last window: the tray decides when to quit.
+app.on("window-all-closed", () => {});
+
+app.on("activate", openWindow);
 
 app.on("before-quit", (event) => {
+  quitting = true;
   if (serverStopped) {
     return;
   }
   event.preventDefault();
+  stopNotices?.();
   void stopServer().finally(() => {
     serverStopped = true;
     app.quit();
@@ -96,16 +151,23 @@ async function start() {
     app.quit();
     return;
   }
+  createTray();
   createWindow();
+  stopNotices = watchNotices(connection.url, connection.token, ({ title, body }) => {
+    if (!Notification.isSupported() || BrowserWindow.getFocusedWindow()) {
+      return;
+    }
+    const notification = new Notification({ title, body });
+    notification.on("click", openWindow);
+    notification.on("close", () => shownNotifications.delete(notification));
+    notification.show();
+    shownNotifications.add(notification);
+  });
 }
 
 // One server per database: a second one would write events this one never broadcasts.
 if (app.requestSingleInstanceLock()) {
-  app.on("second-instance", () => {
-    const [window] = BrowserWindow.getAllWindows();
-    window?.show();
-    window?.focus();
-  });
+  app.on("second-instance", openWindow);
   void app.whenReady().then(start);
 } else {
   app.quit();

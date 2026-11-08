@@ -15,7 +15,8 @@ import {
 
 import { routineReadyLine, routineRefusalLines } from "./labels";
 
-const reconnectDelayMs = 1000;
+const firstReconnectDelayMs = 1000;
+const maxReconnectDelayMs = 30_000;
 const lastSeenKey = "beebot.lastSeen";
 
 // Lives only in this client's memory: after a reload a finished turn has names alone.
@@ -304,9 +305,13 @@ function endpoint(path: string) {
   return url;
 }
 
+let failedAttempts = 0;
+
 function reconnect() {
+  const delay = Math.min(firstReconnectDelayMs * 2 ** failedAttempts, maxReconnectDelayMs);
+  failedAttempts += 1;
   setState({ ...state, status: "disconnected" });
-  setTimeout(() => void connect(), reconnectDelayMs);
+  setTimeout(() => void connect(), delay);
 }
 
 async function fetchEngine() {
@@ -391,6 +396,7 @@ export async function connect() {
   socket.onopen = () => {
     const subscribe: ClientMessage = { type: "subscribe", afterSeq: state.seq };
     socket.send(JSON.stringify(subscribe));
+    failedAttempts = 0;
     setState({ ...state, status: "connected" });
     void checkEngine();
   };

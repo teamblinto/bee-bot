@@ -1181,6 +1181,7 @@ describe("fake engine", () => {
         name: "Ada",
         personality: "",
         engineAccountId: "fake",
+        lane: "subscription",
         model: "sonnet",
         effort: null,
         mode: "build",

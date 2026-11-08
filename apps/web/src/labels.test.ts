@@ -87,6 +87,15 @@ it("sends a paused Codex bot to Codex's own fix, and a Claude bot to Claude's", 
   expect(pauseLine("owner", "codex")).toBe(pauseLine("owner", "claude"));
 });
 
+it("tells a bot on the wrong login how to log in its account's way", () => {
+  const line = (accountId: string, lane: "subscription" | "api_key") =>
+    pauseLine("credential_source", accountId, undefined, lane);
+  expect(line("claude", "subscription")).toContain("Claude account");
+  expect(line("claude", "api_key")).toContain("Console account");
+  expect(line("codex", "subscription")).toContain("sign in with ChatGPT");
+  expect(line("codex", "api_key")).toContain("codex login --with-api-key");
+});
+
 it("doesn't blame Claude when a Codex bot's login fails mid-run", () => {
   const run: Run = {
     id: "run",

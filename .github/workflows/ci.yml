@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm fmt:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter @beebot/server...
+      - name: Electron is not installed
+        run: |
+          if find node_modules apps/server/node_modules -maxdepth 3 \( -name electron -o -name 'electron@*' \) | grep .; then
+            exit 1
+          fi
+      - run: pnpm --filter @beebot/server exec vp run build
+      - name: Boot beebotd and wait for /health
+        run: |
+          token=$(openssl rand -hex 32)
+          port=47831
+          printf '{"port":%d,"token":"%s","dataDir":"%s","allowedOrigins":[]}' \
+            "$port" "$token" "$RUNNER_TEMP/beebot-data" > "$RUNNER_TEMP/bootstrap.json"
+          protocol=$(node --input-type=module -e \
+            'import { protocolVersion } from "./packages/contracts/src/index.ts"; console.log(protocolVersion)')
+          node apps/server/dist/index.cjs --bootstrap "$RUNNER_TEMP/bootstrap.json" &
+          pid=$!
+          status=000
+          for _ in $(seq 50); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+              "http://127.0.0.1:$port/health?protocolVersion=$protocol" || true)
+            [ "$status" = 200 ] && break
+            sleep 0.2
+          done
+          kill "$pid"
+          wait "$pid" || true
+          [ "$status" = 200 ]

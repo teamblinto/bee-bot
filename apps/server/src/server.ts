@@ -12,17 +12,20 @@ import {
   Command,
   defaultBotModel,
   type Effort,
+  type EngineLane,
   type EngineModel,
   EngineStatus,
   type ModelCatalog,
   type ProtocolNotice,
   protocolVersion,
+  type ServerInfo,
   type ServerMessage,
   usageDays,
   type UsageRefreshResult,
 } from "@beebot/contracts";
 import { type WebSocket, WebSocketServer } from "ws";
 
+import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals } from "./approvals.ts";
 import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
@@ -46,8 +49,10 @@ const maxMcpBodyBytes = 16 * 1024 * 1024;
 
 type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
-  probeEngine: () => Promise<EngineStatus>;
-  probeCodex?: ((onModels: (models: EngineModel[]) => void) => Promise<EngineStatus>) | undefined;
+  probeEngine: (lane: EngineLane) => Promise<EngineStatus>;
+  probeCodex?:
+    | ((lane: EngineLane, onModels: (models: EngineModel[]) => void) => Promise<EngineStatus>)
+    | undefined;
   runTurn?: RunTurn;
   probeUsage?: ((onModels: (models: EngineModel[]) => void) => Promise<UsageProbe>) | undefined;
   // Where Claude Code keeps its transcripts.
@@ -56,6 +61,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   turnTimeoutMs?: number | undefined;
   approvalTimeoutMs?: number | undefined;
   mcpKeepaliveMs?: number | undefined;
+  heartbeatMs?: number | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -122,6 +128,7 @@ export async function startServer({
   turnTimeoutMs,
   approvalTimeoutMs,
   mcpKeepaliveMs,
+  heartbeatMs = 30_000,
 }: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -196,6 +203,9 @@ export async function startServer({
   }
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+
+  // A sleeping laptop or a dropped network leaves a socket that never closes on its own.
+  const answered = new WeakSet<WebSocket>();
 
   function broadcast(message: ServerMessage) {
     for (const subscriber of subscribers) {
@@ -368,6 +378,10 @@ export async function startServer({
       case "stop-all":
         supervisor.stopAll();
         return ok;
+      case "set-account-lane":
+        store.setAccountLane(command.engineAccountId, command.lane);
+        supervisor.pump();
+        return ok;
       case "continue-run": {
         const result = store.continueRun(command.runId, attended);
         if (result === "not_found") {
@@ -481,7 +495,9 @@ export async function startServer({
     }
     codexProbing = true;
     try {
-      const { pauseReason } = EngineStatus.parse(await probeCodex(setCodexModels));
+      const { pauseReason } = EngineStatus.parse(
+        await probeCodex(store.accountLane("codex"), setCodexModels),
+      );
       if (pauseReason) {
         console.error(`beebotd: Codex bots paused: ${pauseReason}`);
         store.pauseReadyBots("codex", pauseReason);
@@ -498,7 +514,10 @@ export async function startServer({
 
   async function handleEngine(response: NodeHttp.ServerResponse) {
     try {
-      const [status] = await Promise.all([probeEngine().then(EngineStatus.parse), checkCodex()]);
+      const [status] = await Promise.all([
+        probeEngine(store.accountLane("claude")).then(EngineStatus.parse),
+        checkCodex(),
+      ]);
       if (status.pauseReason) {
         store.pauseReadyBots("claude", status.pauseReason);
       } else {
@@ -556,6 +575,22 @@ export async function startServer({
       return;
     }
 
+    // Before the token and protocol checks: a client reads this to learn whether it can connect.
+    if (request.method === "GET" && url.pathname === "/.well-known/bee-bot") {
+      if (!originAllowed(origin)) {
+        sendJson(response, 403, { code: "origin_refused" });
+        return;
+      }
+      const info: ServerInfo = {
+        environmentId: store.environmentId,
+        version: serverPackage.version,
+        protocolVersion,
+        capabilities: [],
+      };
+      sendJson(response, 200, info);
+      return;
+    }
+
     const refused = refusal(origin, request.headers.authorization?.replace(/^Bearer /, ""), url);
     if (refused) {
       sendJson(response, refused.status, refused.body);
@@ -601,6 +636,8 @@ export async function startServer({
       return;
     }
     sockets.handleUpgrade(request, socket, head, (client) => {
+      answered.add(client);
+      client.on("pong", () => answered.add(client));
       client.on("error", () => client.terminate());
       client.on("close", () => subscribers.delete(client));
       client.on("message", (data) => {
@@ -631,6 +668,16 @@ export async function startServer({
       resolve();
     });
   });
+  const heartbeat = setInterval(() => {
+    for (const client of sockets.clients) {
+      if (!answered.has(client)) {
+        client.terminate();
+        continue;
+      }
+      answered.delete(client);
+      client.ping();
+    }
+  }, heartbeatMs);
   supervisor.pump();
 
   return {
@@ -639,6 +686,7 @@ export async function startServer({
     refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
     checkCodex,
     close: async () => {
+      clearInterval(heartbeat);
       approvals.close();
       await supervisor.close();
       for (const client of sockets.clients) {

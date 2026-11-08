@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 13;
+export const protocolVersion = 14;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -22,12 +22,23 @@ export const Bootstrap = z.object({
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
+// Served at `GET /.well-known/bee-bot` without auth, so a client can identify a server before it connects.
+export const ServerInfo = z.object({
+  environmentId: z.string(),
+  version: z.string(),
+  protocolVersion: z.number().int(),
+  capabilities: z.array(z.string()),
+});
+export type ServerInfo = z.infer<typeof ServerInfo>;
+
 export const PauseReason = z.enum([
   "owner",
   "auth_failed",
   "cli_missing",
   "cli_version",
   "config_dir",
+  // The CLI authenticated with a different credential source than the account's lane.
+  "credential_source",
 ]);
 export type PauseReason = z.infer<typeof PauseReason>;
 
@@ -129,9 +140,14 @@ export const Run = z.object({
 });
 export type Run = z.infer<typeof Run>;
 
+// Either way the credential stays in the vendor CLI's own store; Bee never holds it.
+export const EngineLane = z.enum(["subscription", "api_key"]);
+export type EngineLane = z.infer<typeof EngineLane>;
+
 export const EngineAccount = z.object({
   id: z.string(),
   label: z.string(),
+  lane: EngineLane,
   blockedUntil: z.string().nullable(),
 });
 export type EngineAccount = z.infer<typeof EngineAccount>;
@@ -446,6 +462,11 @@ export const Command = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
+  z.object({
+    type: z.literal("set-account-lane"),
+    engineAccountId: EngineAccountId,
+    lane: EngineLane,
+  }),
   z.object({ type: z.literal("continue-run"), runId: z.uuid() }),
   z.object({
     type: z.literal("decide-approval"),
