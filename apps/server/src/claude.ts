@@ -28,6 +28,7 @@ import {
   workingFolder,
   workspacePath,
 } from "./engine.ts";
+import { cleanSummary, type Summarize, summaryInstructions, summaryPrompt } from "./summary.ts";
 import {
   claudeRateLimitEventToUpdate,
   claudeUsageResponseToLimits,
@@ -777,6 +778,71 @@ const usageArgs = [
   "--tools",
   "",
 ];
+
+const summaryTimeoutMs = 60_000;
+
+// No tools, settings or session: the personality is only text to describe.
+const summaryArgs = [
+  "-p",
+  "--output-format",
+  "stream-json",
+  "--input-format",
+  "stream-json",
+  "--verbose",
+  "--model",
+  "haiku",
+  "--setting-sources",
+  settingSources,
+  "--strict-mcp-config",
+  "--tools",
+  "",
+  "--no-session-persistence",
+  "--system-prompt",
+  summaryInstructions,
+];
+
+const ignore = () => {};
+
+// Runs behind a turn's gate, so it never spends a login the account's lane doesn't use.
+export function createClaudeSummarize({
+  command,
+  dataDir,
+  clock = createAwakeClock(),
+  lane,
+}: Options & { lane: () => EngineLane }): Summarize {
+  return async (bot, signal) => {
+    if (signal.aborted) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    signal.addEventListener("abort", stop, { once: true });
+    const timeout = awakeTimeout(clock, summaryTimeoutMs, stop);
+    try {
+      const outcome = await runProcess({
+        command,
+        clock,
+        args: summaryArgs,
+        cwd: dataDir,
+        prompt: summaryPrompt(bot),
+        lane: lane(),
+        signal: controller.signal,
+        onDelta: ignore,
+        onToolStart: ignore,
+        onToolEnd: ignore,
+        onThinking: ignore,
+        onRateLimit: ignore,
+        onDelivered: ignore,
+      });
+      return outcome !== "in_use" && outcome.kind === "completed"
+        ? cleanSummary(outcome.text)
+        : undefined;
+    } finally {
+      timeout.cancel();
+      signal.removeEventListener("abort", stop);
+    }
+  };
+}
 
 const UsageFrame = z.object({
   type: z.literal("control_response"),

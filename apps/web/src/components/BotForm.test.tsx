@@ -111,6 +111,7 @@ it("warns when editing a bot that's already on Codex", () => {
     id: "b",
     name: "Ada",
     personality: "",
+    summary: null,
     status: "ready",
     pauseReason: null,
     roomId: "r",

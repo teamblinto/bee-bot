@@ -20,6 +20,7 @@ const bot: Bot = {
   id: "bot",
   name: "Ada",
   personality: "",
+  summary: null,
   status: "ready",
   pauseReason: null,
   roomId: "room",

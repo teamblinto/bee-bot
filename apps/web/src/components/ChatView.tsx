@@ -196,8 +196,8 @@ export function ChatView({
       {empty ? (
         <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
           <p className="text-empty">{bot.name}</p>
-          {bot.personality && (
-            <p className="line-clamp-3 text-small text-ink-secondary">{bot.personality}</p>
+          {bot.summary && (
+            <p className="line-clamp-3 text-small text-ink-secondary">{bot.summary}</p>
           )}
         </div>
       ) : (

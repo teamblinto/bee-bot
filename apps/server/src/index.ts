@@ -4,7 +4,7 @@ import * as NodeReadline from "node:readline";
 
 import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@beebot/contracts";
 
-import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
+import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { pruneEvents } from "./retention.ts";
@@ -82,6 +82,12 @@ async function boot(bootstrap: Bootstrap) {
     probeEngine: probe,
     probeCodex: (lane, onModels) => probeCodex(codexCommand, dataDir, lane, onModels),
     probeUsage: (onModels) => probeUsage(claudeCommand, dataDir, onModels),
+    summarize: createClaudeSummarize({
+      command: claudeCommand,
+      dataDir,
+      clock,
+      lane: () => store.accountLane("claude"),
+    }),
   });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe(store.accountLane("claude"));

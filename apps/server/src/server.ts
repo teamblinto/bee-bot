@@ -36,6 +36,7 @@ import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
+import { fallbackSummary, type Summarize } from "./summary.ts";
 import { createSupervisor } from "./supervisor.ts";
 import {
   createLimitRefresher,
@@ -57,6 +58,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
     | undefined;
   runTurn?: RunTurn;
   probeUsage?: ((onModels: (models: EngineModel[]) => void) => Promise<UsageProbe>) | undefined;
+  summarize?: Summarize | undefined;
   // Where Claude Code keeps its transcripts.
   projectsDir?: string | undefined;
   usageRefreshGapMs?: number | undefined;
@@ -111,6 +113,10 @@ function parseCommand(text: string | undefined) {
   }
 }
 
+function logSummaryFailure(error: unknown) {
+  console.error(`beebotd: summary failed: ${(error as Error)?.name}`);
+}
+
 function logUsageFailure(error: unknown) {
   console.error(`beebotd: usage check failed: ${(error as Error)?.name}`);
 }
@@ -126,6 +132,7 @@ export async function startServer({
   probeCodex,
   runTurn = fakeRunTurn,
   probeUsage,
+  summarize,
   projectsDir = NodePath.join(NodeOS.homedir(), ".claude", "projects"),
   usageRefreshGapMs,
   turnTimeoutMs,
@@ -253,6 +260,29 @@ export async function startServer({
     minGapMs: usageRefreshGapMs,
     onSettled: () => supervisor.pump(),
   });
+
+  // One at a time, in the background: a bot is usable before its summary exists.
+  const stopSummaries = new AbortController();
+  let summaries = Promise.resolve();
+  function writeSummary(botId: string) {
+    const { signal } = stopSummaries;
+    summaries = summaries
+      .then(async () => {
+        const bot = store.getBot(botId);
+        if (!bot?.personality || bot.summary !== null || signal.aborted) {
+          return;
+        }
+        // The test engine never reaches a real CLI.
+        const written =
+          bot.engineAccountId === "fake"
+            ? undefined
+            : await summarize?.(bot, signal).catch(() => undefined);
+        if (!signal.aborted) {
+          store.setBotSummary(botId, bot.personality, written ?? fallbackSummary(bot.personality));
+        }
+      })
+      .catch(logSummaryFailure);
+  }
   const history = createUsageHistory(projectsDir);
 
   // Non-browser clients send no Origin; they still need the token.
@@ -327,6 +357,7 @@ export async function startServer({
           projectPath: folder.projectPath,
           ...(avatarSeed !== undefined && { avatarSeed }),
         });
+        writeSummary(bot.id);
         return { status: 200, body: bot };
       }
       case "update-bot": {
@@ -350,7 +381,9 @@ export async function startServer({
         const { model, effort } = choice;
         const { avatarSeed = current.avatarSeed } = command;
         const fields = { name, personality, model, effort, avatarSeed, projectPath };
-        return { status: 200, body: store.updateBot(botId, fields) };
+        const bot = store.updateBot(botId, fields);
+        writeSummary(botId);
+        return { status: 200, body: bot };
       }
       case "set-bot-engine": {
         const current = store.getBot(command.botId);
@@ -732,6 +765,10 @@ export async function startServer({
   };
   let heartbeat = awakeTimeout(clock, heartbeatMs, beat);
   supervisor.pump();
+  // Bots from before summaries, or whose summary a stop cut off.
+  for (const { id } of store.botsWithoutSummary()) {
+    writeSummary(id);
+  }
 
   return {
     port: (server.address() as AddressInfo).port,
@@ -741,6 +778,8 @@ export async function startServer({
     power: (state: "suspend" | "resume") =>
       state === "suspend" ? supervisor.suspend() : supervisor.resume(),
     close: async () => {
+      stopSummaries.abort();
+      await summaries;
       heartbeat.cancel();
       approvals.close();
       await supervisor.close();

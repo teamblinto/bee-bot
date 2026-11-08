@@ -485,6 +485,13 @@ export const migrations: Array<{
     );
     CREATE INDEX turn_summaries_by_bot ON turn_summaries (bot_id, ended_at);`,
   },
+  {
+    name: "bot_summary",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    // Existing bots get their summary written at the next boot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN summary TEXT;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -743,7 +750,7 @@ export function openEventStore(dataDir: string) {
     return event.seq;
   }
 
-  const botColumns = `b.id, b.name, b.personality, b.status, b.pause_reason AS pauseReason,
+  const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
     b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
   const selectBots = db.prepare(
@@ -764,8 +771,12 @@ export function openEventStore(dataDir: string) {
   );
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
   const updateBotFields = db.prepare(
-    `UPDATE bots SET name = ?, personality = ?, model = ?, effort = ?, avatar_seed = ?,
+    `UPDATE bots SET name = ?, personality = ?, summary = ?, model = ?, effort = ?, avatar_seed = ?,
        project_path = ? WHERE id = ?`,
+  );
+  // Only for the personality it was written from: an edit while it was being written wins.
+  const updateSummary = db.prepare(
+    "UPDATE bots SET summary = ? WHERE id = ? AND personality = ? AND summary IS NOT ?",
   );
   const resetBotAccess = db.prepare("UPDATE bots SET access = 'supervised' WHERE id = ?");
   const deleteGrants = db.prepare("DELETE FROM bot_tool_grants WHERE bot_id = ?");
@@ -1782,8 +1793,10 @@ export function openEventStore(dataDir: string) {
     ) =>
       transaction(() => {
         const { name, personality, model, effort, avatarSeed, projectPath } = fields;
-        const moved = getBot(id)?.projectPath !== projectPath;
-        updateBotFields.run(name, personality, model, effort, avatarSeed, projectPath, id);
+        const current = getBot(id);
+        const moved = current?.projectPath !== projectPath;
+        const summary = current?.personality === personality ? current.summary : null;
+        updateBotFields.run(name, personality, summary, model, effort, avatarSeed, projectPath, id);
         // What the owner allowed was allowed for the old folder, and a session can't change folder.
         if (moved) {
           deleteGrants.run(id);
@@ -1796,6 +1809,22 @@ export function openEventStore(dataDir: string) {
         }
         return bot;
       }),
+    setBotSummary: (id: string, personality: string, summary: string) =>
+      transaction(() => {
+        if (updateSummary.run(summary, id, personality, summary).changes === 0) {
+          return undefined;
+        }
+        const bot = getBot(id);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+        }
+        return bot;
+      }),
+    botsWithoutSummary: () =>
+      z
+        .array(Bot)
+        .parse(selectBots.all())
+        .filter(({ personality, summary }) => personality && summary === null),
     setBotEngine: (id: string, fields: Pick<Bot, "model" | "effort" | "mode" | "access">) =>
       transaction(() => {
         const { model, effort, mode, access } = fields;

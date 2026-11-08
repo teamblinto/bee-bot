@@ -25,6 +25,7 @@ import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
 import { migrate, migrations, openEventStore, seedFromId } from "./store.ts";
+import type { Summarize } from "./summary.ts";
 
 const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
@@ -77,7 +78,7 @@ const oldBot = (id: string) => `INSERT INTO bots (id, name, personality, status,
   INSERT INTO rooms (id, default_bot_id, created_at) VALUES ('room-${id}', '${id}', 'then');
   INSERT INTO scopes (id, room_id, bot_id) VALUES ('scope-${id}', 'room-${id}', '${id}');`;
 
-async function start(port = 0, heartbeatMs?: number) {
+async function start(port = 0, heartbeatMs?: number, summarize?: Summarize) {
   const store = openEventStore(dataDir);
   const server = await startServer({
     port,
@@ -87,6 +88,7 @@ async function start(port = 0, heartbeatMs?: number) {
     store,
     probeEngine,
     heartbeatMs,
+    summarize,
   });
   let open = true;
   const stop = async () => {
@@ -1263,5 +1265,100 @@ describe("project folders", () => {
       type: "snapshot",
       state: { bots: [{ projectPath: null }] },
     });
+  });
+});
+
+describe("personality summary", () => {
+  const personality =
+    "You are a patient math tutor. Explain every step. Never give answers outright.";
+
+  async function created(base: string, fields: Record<string, unknown> = {}) {
+    const response = await command(base, {
+      type: "create-bot",
+      name: "Ada",
+      personality,
+      ...fields,
+    });
+    return (await response.json()) as Bot;
+  }
+
+  it("writes it after creation and keeps the personality as written", async () => {
+    const summarize = vi.fn<Summarize>(async () => "A patient math tutor who explains each step.");
+    const { base, store } = await start(0, undefined, summarize);
+    const bot = await created(base);
+    expect(bot.summary).toBeNull();
+    await vi.waitFor(() =>
+      expect(store.getBot(bot.id)?.summary).toBe("A patient math tutor who explains each step."),
+    );
+    expect(store.getBot(bot.id)?.personality).toBe(personality);
+    expect(summarize).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Ada", personality }),
+      expect.anything(),
+    );
+  });
+
+  it("falls back to the personality's opening when no model can write one", async () => {
+    const { base, store } = await start(0, undefined, async () => {
+      throw new Error("no CLI");
+    });
+    const bot = await created(base);
+    await vi.waitFor(() =>
+      expect(store.getBot(bot.id)?.summary).toBe("You are a patient math tutor."),
+    );
+  });
+
+  it("asks nothing for an empty personality", async () => {
+    const summarize = vi.fn<Summarize>(async () => "unused");
+    const { base, store } = await start(0, undefined, summarize);
+    const empty = await created(base, { personality: "" });
+    // Summaries are written in order, so once this one is in, the empty bot's turn has passed.
+    const next = await created(base);
+    await vi.waitFor(() => expect(store.getBot(next.id)?.summary).toBe("unused"));
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(store.getBot(empty.id)?.summary).toBeNull();
+  });
+
+  it("is rewritten only when the personality changes", async () => {
+    const summarize = vi.fn<Summarize>(async ({ personality: text }) => `About: ${text}`);
+    const { base, store } = await start(0, undefined, summarize);
+    const bot = await created(base);
+    await vi.waitFor(() => expect(store.getBot(bot.id)?.summary).toBe(`About: ${personality}`));
+    const edit = (fields: Record<string, unknown>) =>
+      command(base, { type: "update-bot", botId: bot.id, name: "Ada", personality, ...fields });
+
+    await edit({ name: "Ada Two" });
+    expect(store.getBot(bot.id)?.summary).toBe(`About: ${personality}`);
+    await edit({ personality: "You are a terse code reviewer." });
+    await vi.waitFor(() =>
+      expect(store.getBot(bot.id)?.summary).toBe("About: You are a terse code reviewer."),
+    );
+    expect(summarize).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops one written for a personality the owner has since changed", async () => {
+    const pending = Promise.withResolvers<string>();
+    const summarize = vi
+      .fn<Summarize>()
+      .mockImplementationOnce(() => pending.promise)
+      .mockImplementation(async () => "A terse code reviewer.");
+    const { base, store } = await start(0, undefined, summarize);
+    const bot = await created(base);
+    await vi.waitFor(() => expect(summarize).toHaveBeenCalledTimes(1));
+    await command(base, {
+      type: "update-bot",
+      botId: bot.id,
+      name: "Ada",
+      personality: "You are a terse code reviewer.",
+    });
+    pending.resolve("A patient math tutor.");
+    await vi.waitFor(() => expect(store.getBot(bot.id)?.summary).toBe("A terse code reviewer."));
+  });
+
+  it("is written at boot for a bot that has none", async () => {
+    const store = openEventStore(dataDir);
+    const bot = store.createBot({ name: "Ada", personality, engineAccountId: "claude" });
+    store.close();
+    const { store: reopened } = await start(0, undefined, async () => "A patient math tutor.");
+    await vi.waitFor(() => expect(reopened.getBot(bot.id)?.summary).toBe("A patient math tutor."));
   });
 });

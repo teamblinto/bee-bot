@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 16;
+export const protocolVersion = 17;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -83,6 +83,8 @@ export const Bot = z.object({
   id: z.string(),
   name: z.string(),
   personality: z.string(),
+  // Shown in chat instead of the personality. Null until written, and for an empty personality.
+  summary: z.string().nullable(),
   status: z.enum(["ready", "paused"]),
   pauseReason: PauseReason.nullable(),
   roomId: z.string(),

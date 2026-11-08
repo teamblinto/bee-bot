@@ -236,6 +236,7 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   id: "b",
   name: "Ada",
   personality: "",
+  summary: null,
   status: "ready",
   pauseReason: null,
   roomId: "r",

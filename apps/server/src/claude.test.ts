@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   childEnv,
   createClaudeRunTurn,
+  createClaudeSummarize,
   modelsFromInitialize,
   probeEngine,
   probeUsage,
@@ -951,5 +952,37 @@ describe("a project folder", () => {
     expect(delivered()).toBe(0);
     expect(NodeFS.readdirSync(project)).toEqual(name === "gone" ? [] : ["a-file"]);
     expect(NodeFS.existsSync(NodePath.join(dataDir, "bots"))).toBe(false);
+  });
+});
+
+describe("createClaudeSummarize", () => {
+  const bot = { name: "Ada", personality: "You are a patient math tutor." };
+  const summarize = (scenario: string, lane: EngineLane = "subscription") =>
+    createClaudeSummarize({ command: fakeCommand(scenario), dataDir, clock, lane: () => lane })(
+      bot,
+      new AbortController().signal,
+    );
+
+  it("sends the personality on stdin as text to describe, with no tools or session", async () => {
+    expect(await summarize("success")).toBe("noted");
+    const args = spawns()[0]?.args ?? [];
+    expect(args).toEqual(expect.arrayContaining(["--no-session-persistence", "--system-prompt"]));
+    expect(args[args.indexOf("--tools") + 1]).toBe("");
+    expect(args.join(" ")).not.toContain(bot.personality);
+    expect(prompts()).toEqual([expect.stringContaining(`<personality>\n${bot.personality}\n`)]);
+  });
+
+  it("sends nothing on a login the account's lane doesn't use", async () => {
+    expect(await summarize("gate-api-key")).toBeUndefined();
+    expect(prompts()).toEqual([]);
+  });
+
+  it("gives up when the CLI is missing", async () => {
+    const missing = createClaudeSummarize({
+      command: ["beebot-no-such-cli"],
+      dataDir,
+      lane: () => "subscription",
+    });
+    expect(await missing(bot, new AbortController().signal)).toBeUndefined();
   });
 });

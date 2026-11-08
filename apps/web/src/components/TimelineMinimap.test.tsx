@@ -248,6 +248,7 @@ const bot: Bot = {
   id: "b",
   name: "Ada",
   personality: "",
+  summary: null,
   status: "ready",
   pauseReason: null,
   roomId: "r",
