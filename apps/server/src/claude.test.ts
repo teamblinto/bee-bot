@@ -361,6 +361,12 @@ describe("a turn", () => {
           "mcp__bee__memory_get",
           "mcp__bee__memory_propose",
           "mcp__bee__memory_forget",
+          "mcp__bee__send_message",
+          "mcp__bee__notify",
+          "mcp__bee__delegate",
+          "mcp__bee__handoff",
+          "mcp__bee__ask_user",
+          "mcp__bee__create_routine",
         ],
       },
     });

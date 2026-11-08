@@ -30,6 +30,7 @@ import { createApprovals } from "./approvals.ts";
 import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
+import { callBotTool } from "./botTools.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
@@ -483,6 +484,7 @@ export async function startServer({
       body,
       (args, closed) => approvals.approve(run, args, closed),
       (name, args) => callMemoryTool(store, run, name, args),
+      (name, args) => callBotTool(store, run, name, args),
       mcpKeepaliveMs,
     );
   }
