@@ -1,13 +1,17 @@
+import * as NodeHttp from "node:http";
+import type { Duplex } from "node:stream";
+
 import type { HandoffInput } from "@beebot/contracts";
+import { WebSocket } from "ws";
 import { z } from "zod";
 
 import type { BrowserRuntime, BrowserSession, PageSnapshot } from "./browserRuntime.ts";
 
-// Where the broker reaches one bot's sidecar. Nothing else may reach `http`: Chromium's DevTools has
-// no authentication of its own, so the network is the boundary.
+// Where the broker reaches one bot's sidecar. Chromium's DevTools has no authentication of its own,
+// so each `connect` is a private byte stream to it and nothing listens on the host.
 // `collect` copies a finished download, which Chromium names by its GUID, out of the sidecar.
 export type SidecarEndpoint = {
-  http: string;
+  connect: () => Promise<Duplex>;
   downloadsDir: string;
   collect?: (file: string, name: string) => Promise<void>;
 };
@@ -23,11 +27,26 @@ const Message = z.object({
 
 type Listener = (params: Record<string, unknown>, sessionId: string | undefined) => void;
 
-async function connectCdp(url: string) {
-  const socket = new WebSocket(url);
+// Over a stream from `SidecarEndpoint.connect`: the host in the URL is never dialled.
+export async function fetchJson(stream: Duplex, path: string) {
+  const response = await new Promise<NodeHttp.IncomingMessage>((resolve, reject) => {
+    NodeHttp.get({ host: "127.0.0.1", path, createConnection: () => stream }, resolve).on(
+      "error",
+      reject,
+    );
+  });
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return JSON.parse(String(Buffer.concat(chunks))) as unknown;
+}
+
+async function connectCdp(url: string, stream: Duplex) {
+  const socket = new WebSocket(url, { createConnection: () => stream, perMessageDeflate: false });
   await new Promise<void>((resolve, reject) => {
-    socket.addEventListener("open", () => resolve(), { once: true });
-    socket.addEventListener("error", () => reject(new Error("cdp_unreachable")), { once: true });
+    socket.once("open", resolve);
+    socket.on("error", () => reject(new Error("cdp_unreachable")));
   });
   let nextId = 1;
   const pending = new Map<
@@ -204,14 +223,11 @@ export function inputCommand(input: HandoffInput) {
 }
 
 async function openSession(
-  { http, downloadsDir, collect: copyOut }: SidecarEndpoint,
+  { connect, downloadsDir, collect: copyOut }: SidecarEndpoint,
   onDownload: (name: string) => boolean,
 ): Promise<BrowserSession> {
-  const response = await fetch(new URL("/json/version", http));
-  // Chromium names itself by its own address inside the sidecar.
-  const url = new URL(Version.parse(await response.json()).webSocketDebuggerUrl);
-  url.host = new URL(http).host;
-  const cdp = await connectCdp(url.href);
+  const { webSocketDebuggerUrl } = Version.parse(await fetchJson(await connect(), "/json/version"));
+  const cdp = await connectCdp(webSocketDebuggerUrl, await connect());
 
   await cdp.send("Browser.setDownloadBehavior", {
     behavior: "allowAndName",

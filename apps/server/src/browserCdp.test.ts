@@ -1,6 +1,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
@@ -109,7 +110,7 @@ describe.skipIf(!available)("sidecar Chromium over CDP", { timeout: 120_000 }, (
       await sleep(500);
     }
     const runtime = createCdpBrowserRuntime(async () => ({
-      http,
+      connect: async () => NodeNet.connect(Number(port), "127.0.0.1"),
       downloadsDir: "/home/browser/downloads",
     }));
     session = await runtime.open("bot", (name) => {
