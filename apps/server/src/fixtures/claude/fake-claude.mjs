@@ -268,9 +268,12 @@ if (early === "no_conversation") {
     const frame = JSON.parse(line);
     if (frame.type === "control_request") {
       log({ control: frame.request.subtype });
+      // A logged-in CLI answers `get_usage`. Left silent, the probe holds the account for its timeout.
       const reply =
         frame.request.subtype === "get_usage"
-          ? scenario.usage?.()
+          ? "usage" in scenario
+            ? scenario.usage()
+            : usageReply
           : scenario.init
             ? scenario.init()
             : passingInit;
