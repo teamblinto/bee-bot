@@ -700,8 +700,9 @@ describe("restart", () => {
       body: "/approve Bash ls",
     });
     await vi.waitFor(() =>
-      expect(query("SELECT status FROM runs")).toEqual([{ status: "Running" }]),
+      expect(query("SELECT status FROM external_effects")).toEqual([{ status: "intended" }]),
     );
+    expect(query("SELECT status FROM runs")).toEqual([{ status: "Running" }]);
     child.kill("SIGKILL");
     await once(child, "exit");
 
