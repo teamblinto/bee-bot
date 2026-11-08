@@ -123,6 +123,7 @@ const memory = (id: string, fields: Partial<MemoryItem>): MemoryItem => ({
   created: "2026-11-06T10:15:00.000Z",
   supersededBy: null,
   text: id,
+  scope: "bot",
   ...fields,
 });
 

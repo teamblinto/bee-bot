@@ -208,6 +208,9 @@ export const MemorySource = z.enum(["user", "agent"]);
 export type MemorySource = z.infer<typeof MemorySource>;
 export const MemoryStatus = z.enum(["pending", "active", "superseded", "forgotten"]);
 export type MemoryStatus = z.infer<typeof MemoryStatus>;
+// Team items are read by every bot and written only by the owner, who promotes a bot's proposal.
+export const MemoryScope = z.enum(["bot", "team"]);
+export type MemoryScope = z.infer<typeof MemoryScope>;
 
 // One limit for the owner and the bot, so one item can never fill the primer.
 export const MemoryText = z.string().trim().min(1).max(2000);
@@ -222,6 +225,7 @@ export const MemoryItem = z.object({
   created: z.string(),
   supersededBy: z.string().nullable(),
   text: z.string(),
+  scope: MemoryScope.default("bot"),
 });
 export type MemoryItem = z.infer<typeof MemoryItem>;
 

@@ -77,6 +77,7 @@ const item = (overrides: Partial<MemoryItem> = {}): MemoryItem => ({
   created: "2026-11-06T10:15:00.000Z",
   supersededBy: null,
   text: "plain text",
+  scope: "bot",
   ...overrides,
 });
 
@@ -510,5 +511,114 @@ describe("the owner's decisions", () => {
     expect(statusOf(memory.id)).toBe("active");
     const nobody = { botId: NodeCrypto.randomUUID(), text: "x", type: "user" } as const;
     expect(store.addMemory(nobody)).toBeUndefined();
+  });
+});
+
+describe("team memory", () => {
+  const proposeTeam = (run: ReturnType<typeof startRun>, text: string) => {
+    const sent = callMemoryTool(store, run, "memory_propose", {
+      text,
+      type: "project",
+      scope: "team",
+    });
+    return /as (.+)\.$/.exec(sent)?.[1] ?? "";
+  };
+  const teamFiles = () => {
+    try {
+      return NodeFS.readdirSync(NodePath.join(dataDir, "shared", "memory"));
+    } catch {
+      return [];
+    }
+  };
+
+  it("takes a bot's proposal only through the owner, then every bot reads it", () => {
+    const ada = addBot("Ada");
+    const ben = addBot("Ben");
+    const run = startRun(ada);
+    const id = proposeTeam(run, "the staging server is called hive");
+    expect(statusOf(id)).toBe("pending");
+    expect(teamFiles()).toEqual([]);
+    expect(callMemoryTool(store, run, "memory_search", { query: "hive" })).not.toContain(id);
+    finish(run.id);
+
+    expect(store.decideMemory(id, "approve")).toBe(true);
+    expect(teamFiles()).toEqual([`${id}.md`]);
+    expect(NodeFS.readdirSync(memoryDir(dataDir, ada.id))).not.toContain(`${id}.md`);
+    const benRun = startRun(ben);
+    expect(callMemoryTool(store, benRun, "memory_search", { query: "hive" })).toContain(
+      `[memory ${id} | team, read-only |`,
+    );
+    expect(callMemoryTool(store, benRun, "memory_get", { id })).toContain("hive");
+    reboot();
+    expect(store.visibleMemory(ben.id, id)?.scope).toBe("team");
+  });
+
+  it("can't be changed by a bot, in a clean session or by a file in its folder", () => {
+    const ada = addBot("Ada");
+    const run = startRun(ada);
+    const id = proposeTeam(run, "release on fridays");
+    store.decideMemory(id, "approve");
+    const readOnly = /^Refused: team memory is read-only/;
+    expect(callMemoryTool(store, run, "memory_forget", { id, reason: "no" })).toMatch(readOnly);
+    const supersede = { text: "release daily", type: "project", supersedes: id };
+    expect(callMemoryTool(store, run, "memory_propose", supersede)).toMatch(readOnly);
+    const withScope = { ...supersede, scope: "team" };
+    expect(callMemoryTool(store, run, "memory_propose", withScope)).toMatch(readOnly);
+    expect(statusOf(id)).toBe("active");
+
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const forged = item({ botId: ada.id, scope: "team", text: "forged team fact" });
+    const path = NodePath.join(memoryDir(dataDir, ada.id), `${forged.id}.md`);
+    NodeFS.writeFileSync(path, formatMemory(forged));
+    reboot();
+    expect(statusOf(forged.id)).toBeUndefined();
+  });
+
+  it("finishes a promotion cut off before the proposal file went", () => {
+    const ada = addBot("Ada");
+    const run = startRun(ada);
+    const id = proposeTeam(run, "the wiki lives at docs");
+    const proposal = NodeFS.readFileSync(NodePath.join(memoryDir(dataDir, ada.id), `${id}.md`));
+    store.decideMemory(id, "approve");
+    NodeFS.writeFileSync(NodePath.join(memoryDir(dataDir, ada.id), `${id}.md`), proposal);
+    reboot();
+    expect(statusOf(id)).toBe("active");
+  });
+});
+
+describe("the rebuild", () => {
+  it("gives the same search results from the files and messages alone", () => {
+    const ada = addBot("Ada");
+    const ben = addBot("Ben");
+    add(ada, "Ada's owner drinks green tea");
+    const old = add(ada, "the tea shop closes at five");
+    store.addMemory({
+      botId: ada.id,
+      text: "the tea shop closes at six",
+      type: "user",
+      supersedes: old.id,
+    });
+    add(ben, "Ben keeps a tea log");
+    const run = startRun(ada);
+    const id = callMemoryTool(store, run, "memory_propose", {
+      text: "every bot may suggest tea",
+      type: "project",
+      scope: "team",
+    }).replace(/^.* as (.+)\.$/, "$1");
+    finish(run.id);
+    store.decideMemory(id, "approve");
+    const search = () => [ada, ben].map((bot) => store.searchMemory(bot.id, "tea shop hello"));
+    const before = search();
+    expect(before.flat().length).toBeGreaterThan(4);
+
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec("DELETE FROM memory_items; DELETE FROM memory_fts;");
+    db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')");
+    db.close();
+    expect(search().flat()).toEqual([]);
+    store.rebuildIndex();
+    expect(search()).toEqual(before);
+    reboot();
+    expect(search()).toEqual(before);
   });
 });
