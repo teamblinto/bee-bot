@@ -6,11 +6,12 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { type NewContinuation, openContinuations } from "./continuations.ts";
 import { migrate } from "./store.ts";
 
+let db: DatabaseSync;
 let events: EventBody[];
 let repo: ReturnType<typeof openContinuations>;
 
 beforeEach(() => {
-  const db = new DatabaseSync(":memory:");
+  db = new DatabaseSync(":memory:");
   migrate(db);
   events = [];
   repo = openContinuations(db, {
@@ -22,7 +23,6 @@ beforeEach(() => {
 const fields: NewContinuation = {
   botId: "bot",
   runId: "run",
-  sessionId: "session",
   toolUseId: "tool-use",
   kind: "approval",
   tool: "send_mail",
@@ -42,8 +42,8 @@ describe("continuations", () => {
     expect(repo.claimContinuation(id)).toBeUndefined();
     expect(repo.finishContinuation(id, "succeeded", "sent")?.status).toBe("succeeded");
     expect(repo.unresumedContinuations().map((row) => row.id)).toEqual([id]);
-    expect(repo.markResumed(id, "run-2")?.resumeRunId).toBe("run-2");
-    expect(repo.markResumed(id, "run-3")).toBeUndefined();
+    expect(repo.markResumed(id)?.resumedAt).toBeTruthy();
+    expect(repo.markResumed(id)).toBeUndefined();
     expect(repo.unresumedContinuations()).toEqual([]);
   });
 
@@ -79,9 +79,34 @@ describe("continuations", () => {
     expect(repo.claimContinuation(id)).toBeUndefined();
   });
 
-  it("keeps the payload out of its events", () => {
+  it("keeps the payload out of its events and the audit log", () => {
     repo.openContinuation(fields);
     expect(JSON.stringify(events)).not.toContain('"to"');
     expect(events[0]).toMatchObject({ type: "continuation.changed" });
+    const audit = db.prepare("SELECT status, tool, digest FROM audit_log").all();
+    expect(audit).toEqual([{ status: "continuation_waiting", tool: "send_mail", digest: "d1" }]);
+  });
+
+  it("hands back the open one when the same action is asked again", () => {
+    const first = repo.openContinuation(fields);
+    expect(repo.openContinuation({ ...fields, runId: "run-2" }).id).toBe(first.id);
+    repo.decideContinuation(first.id, "d1", "approve");
+    repo.claimContinuation(first.id);
+    expect(repo.openContinuation(fields).id).toBe(first.id);
+    repo.finishContinuation(first.id, "succeeded", "sent");
+    expect(repo.openContinuation(fields).id).not.toBe(first.id);
+  });
+
+  it("closes what a stop cuts off, and sends nothing back for it", () => {
+    const waiting = repo.openContinuation(fields);
+    const approved = repo.openContinuation({ ...fields, digest: "d2" });
+    repo.decideContinuation(approved.id, "d2", "approve");
+    expect(repo.stopContinuations("bot").map(({ reason }) => reason)).toEqual([
+      "stopped",
+      "stopped",
+    ]);
+    expect(repo.claimContinuation(approved.id)).toBeUndefined();
+    expect(repo.getContinuation(waiting.id)?.status).toBe("denied");
+    expect(repo.unresumedContinuations()).toEqual([]);
   });
 });

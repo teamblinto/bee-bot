@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Continuation, type ContinuationReason } from "@beebot/contracts";
 import { z } from "zod";
 
+import { openAudit } from "./audit.ts";
 import type { StoreTx } from "./store.ts";
 
 const waitingPrefix = "waiting: ";
@@ -26,19 +27,40 @@ const ContinuationRow = Continuation.extend({
 });
 export type ContinuationRow = z.infer<typeof ContinuationRow>;
 
+// What the bot is told once a continuation is final. An unknown outcome says so, and is never
+// retried.
+export function outcomeText({ kind, status, reason, shown, result }: ContinuationRow) {
+  if (status === "succeeded") {
+    return kind === "hand_off"
+      ? `The owner did this themselves:\n${shown}`
+      : `Approved and done:\n${shown}\n\nResult:\n${result ?? ""}`;
+  }
+  if (status === "failed") {
+    return `Approved, but it failed:\n${shown}\n\n${result ?? ""}`;
+  }
+  if (status === "unknown") {
+    return `Outcome unknown: Bee stopped while running this and did not retry it. Check before trying again:\n${shown}`;
+  }
+  if (status === "expired") {
+    return `No answer in time, so this was not run:\n${shown}`;
+  }
+  if (reason === "payload_changed") {
+    return `Not run, because it changed after the owner saw it:\n${shown}`;
+  }
+  return kind === "hand_off" ? `The owner did not do this:\n${shown}` : `Denied:\n${shown}`;
+}
+
 export type NewContinuation = Pick<
   ContinuationRow,
-  | "botId"
-  | "runId"
-  | "sessionId"
-  | "toolUseId"
-  | "kind"
-  | "tool"
-  | "request"
-  | "payload"
-  | "shown"
-  | "digest"
+  "botId" | "runId" | "toolUseId" | "kind" | "tool" | "request" | "payload" | "shown" | "digest"
 > & { ttlMs: number };
+
+// Where an outcome goes back: the room of the run that asked, as a reply to the bot's last word.
+const DeliveryTarget = z.object({
+  roomId: z.string(),
+  replyToId: z.string().nullable(),
+  attended: z.number().transform(Boolean),
+});
 
 export type ContinuationRepository = ReturnType<typeof openContinuations>;
 
@@ -52,15 +74,28 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
   const insert = db.prepare(
     `INSERT INTO continuations (id, bot_id, run_id, session_id, tool_use_id, kind, tool, request,
        payload, shown, digest, status, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?) RETURNING ${columns}`,
+     VALUES (?, ?, ?, COALESCE((SELECT s.session_id FROM runs r JOIN scopes s ON s.id = r.scope_id
+       WHERE r.id = ?), ''), ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?) RETURNING ${columns}`,
   );
   const selectOne = db.prepare(`SELECT ${columns} FROM continuations WHERE id = ?`);
+  const selectOpen = db.prepare(
+    `SELECT ${columns} FROM continuations WHERE bot_id = ? AND digest = ?
+       AND status IN ('waiting', 'approved', 'claimed') ORDER BY rowid LIMIT 1`,
+  );
   const selectWaiting = db.prepare(
     `SELECT ${columns} FROM continuations WHERE status = 'waiting' ORDER BY rowid`,
   );
   const selectUnresumed = db.prepare(
     `SELECT ${columns} FROM continuations WHERE resumed_at IS NULL
      AND status IN ('denied', 'expired', 'succeeded', 'failed', 'unknown') ORDER BY rowid`,
+  );
+  const selectTarget = db.prepare(
+    `SELECT s.room_id AS roomId, w.attended,
+       (SELECT m.id FROM messages m WHERE m.room_id = s.room_id AND m.bot_id = c.bot_id
+         ORDER BY m.event_seq DESC LIMIT 1) AS replyToId
+     FROM continuations c JOIN runs r ON r.id = c.run_id JOIN scopes s ON s.id = r.scope_id
+       JOIN wakes w ON w.id = r.wake_id
+     WHERE c.id = ?`,
   );
   // An owner's "approve" on a hand_off means they did it themselves.
   const decideOne = db.prepare(
@@ -74,6 +109,11 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
   const denyOne = db.prepare(
     `UPDATE continuations SET status = 'denied', reason = ?, finished_at = ?
      WHERE id = ? AND status IN ('waiting', 'approved') RETURNING ${columns}`,
+  );
+  // A stop ends the chain, so nothing is delivered back for these.
+  const stopForBot = db.prepare(
+    `UPDATE continuations SET status = 'denied', reason = 'stopped', finished_at = ?, resumed_at = ?
+     WHERE bot_id = ? AND status IN ('waiting', 'approved') RETURNING ${columns}`,
   );
   const claimOne = db.prepare(
     `UPDATE continuations SET status = 'claimed', claimed_at = ?
@@ -92,14 +132,27 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
      WHERE status = 'claimed' RETURNING ${columns}`,
   );
   const resumeOne = db.prepare(
-    `UPDATE continuations SET resumed_at = ?, resume_run_id = ?
-     WHERE id = ? AND resumed_at IS NULL RETURNING ${columns}`,
+    `UPDATE continuations SET resumed_at = ? WHERE id = ? AND resumed_at IS NULL
+     RETURNING ${columns}`,
   );
+  const { appendAudit } = openAudit(db);
 
   const parse = (row: unknown) => (row === undefined ? undefined : ContinuationRow.parse(row));
 
+  // The digest only, never the payload or what was shown: both can hold the owner's data.
   function changed(row: unknown) {
     const parsed = ContinuationRow.parse(row);
+    const { runId, botId, status, reason, tool, digest } = parsed;
+    const initiator = status === "waiting" ? "bot" : reason === "owner" ? "human" : "system";
+    appendAudit({
+      runId,
+      botId,
+      status: `continuation_${status}`,
+      reason,
+      tool,
+      digest,
+      initiator,
+    });
     emit({ type: "continuation.changed", continuation: Continuation.parse(parsed) });
     return parsed;
   }
@@ -108,17 +161,22 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
   const now = () => new Date().toISOString();
 
   return {
+    // A bot asking again for what already waits gets the same one back, so a repeat can't make a
+    // second card the owner could also approve.
     openContinuation: ({ ttlMs, ...fields }: NewContinuation) =>
       transaction(() => {
+        const open = parse(selectOpen.get(fields.botId, fields.digest));
+        if (open) {
+          return open;
+        }
         const createdAt = now();
         const expiresAt = new Date(Date.parse(createdAt) + ttlMs).toISOString();
-        const { botId, runId, sessionId, toolUseId, kind, tool, request, payload, shown, digest } =
-          fields;
+        const { botId, runId, toolUseId, kind, tool, request, payload, shown, digest } = fields;
         const row = insert.get(
           NodeCrypto.randomUUID(),
           botId,
           runId,
-          sessionId,
+          runId,
           toolUseId,
           kind,
           tool,
@@ -134,6 +192,7 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
     getContinuation: (id: string) => parse(selectOne.get(id)),
     waitingContinuations: () => z.array(Continuation).parse(selectWaiting.all()),
     unresumedContinuations: () => z.array(ContinuationRow).parse(selectUnresumed.all()),
+    deliveryTarget: (id: string) => DeliveryTarget.optional().parse(selectTarget.get(id)),
     // Bound to the digest of what the owner saw. Past its expiry it is closed, so a late answer
     // changes nothing.
     decideContinuation: (id: string, digest: string, decision: "approve" | "deny") =>
@@ -153,9 +212,14 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
       id: string,
       reason: Extract<ContinuationReason, "no_surface" | "payload_changed" | "stopped">,
     ) => transaction(() => one(denyOne.get(reason, now(), id))),
+    stopContinuations: (botId: string) =>
+      transaction(() => {
+        const at = now();
+        return stopForBot.all(at, at, botId).map(changed);
+      }),
     // Durable before the action runs: from here a crash means `unknown`, and nothing retries it.
     claimContinuation: (id: string) => transaction(() => one(claimOne.get(now(), id))),
-    finishContinuation: (id: string, status: "succeeded" | "failed", result: string) =>
+    finishContinuation: (id: string, status: "succeeded" | "failed" | "unknown", result: string) =>
       transaction(() => one(finishOne.get(status, result, now(), id))),
     expireContinuations: () =>
       transaction(() => {
@@ -168,7 +232,6 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
         const at = now();
         return [...claimedToUnknown.all(at), ...expireDue.all(at, at)].map(changed);
       }),
-    markResumed: (id: string, runId: string) =>
-      transaction(() => parse(resumeOne.get(now(), runId, id))),
+    markResumed: (id: string) => transaction(() => parse(resumeOne.get(now(), id))),
   };
 }

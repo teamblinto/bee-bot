@@ -26,7 +26,8 @@ import {
 import { type WebSocket, WebSocketServer } from "ws";
 
 import serverPackage from "../package.json" with { type: "json" };
-import { createApprovals } from "./approvals.ts";
+import { createApprovals, type Execute } from "./approvals.ts";
+import type { Decide } from "./broker.ts";
 import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
@@ -64,6 +65,9 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   usageRefreshGapMs?: number | undefined;
   turnTimeoutMs?: number | undefined;
   approvalTimeoutMs?: number | undefined;
+  continuationTtlMs?: number | undefined;
+  decide?: Decide | undefined;
+  executors?: ReadonlyMap<string, Execute> | undefined;
   mcpKeepaliveMs?: number | undefined;
   heartbeatMs?: number | undefined;
   clock?: AwakeClock | undefined;
@@ -137,6 +141,9 @@ export async function startServer({
   usageRefreshGapMs,
   turnTimeoutMs,
   approvalTimeoutMs,
+  continuationTtlMs,
+  decide,
+  executors,
   mcpKeepaliveMs,
   heartbeatMs = 30_000,
   clock = createAwakeClock(),
@@ -232,6 +239,11 @@ export async function startServer({
     dataDir,
     timeoutMs: approvalTimeoutMs,
     clock,
+    decide,
+    executors,
+    continuationTtlMs,
+    hasSurface: () => subscribers.size > 0,
+    onSettled: () => supervisor.pump(),
     onChange: () => {
       broadcast({ type: "pending-approvals", approvals: approvals.pending() });
       supervisor.syncClocks();
@@ -473,6 +485,8 @@ export async function startServer({
       }
       case "decide-approval":
         return approvals.decide(command);
+      case "decide-continuation":
+        return approvals.decideContinuation(command);
       case "acknowledge-notice":
         store.acknowledgeNotice();
         return ok;

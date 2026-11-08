@@ -336,25 +336,28 @@ it("upserts live tools by id and marks how they ended", () => {
   ]);
 });
 
-it("moves a finished turn's tools onto its reply, in memory", () => {
-  const working = {
-    ...state(3, { bots: [bot], runs: [run("Running")] }),
-    liveTools: { run: [tool("a", { detail: "notes.md" })] },
-  };
-  const reply = { ...message("reply"), author: "bot" as const };
-  const replied = applyServerMessage(working, {
-    type: "event",
-    event: { seq: 4, createdAt: "now", type: "message.created", message: reply },
-  });
-  const ended = applyServerMessage(replied, {
-    type: "event",
-    event: { seq: 5, createdAt: "now", type: "run.changed", run: run("Completed") },
-  });
-  expect(ended.liveTools).toEqual({});
-  expect(ended.finishedTools).toEqual({
-    reply: [tool("a", { detail: "notes.md", status: "done" })],
-  });
-});
+it.each(["Completed", "WaitingUser"] as const)(
+  "moves the tools of a turn that ends %s onto its reply, in memory",
+  (status) => {
+    const working = {
+      ...state(3, { bots: [bot], runs: [run("Running")] }),
+      liveTools: { run: [tool("a", { detail: "notes.md" })] },
+    };
+    const reply = { ...message("reply"), author: "bot" as const };
+    const replied = applyServerMessage(working, {
+      type: "event",
+      event: { seq: 4, createdAt: "now", type: "message.created", message: reply },
+    });
+    const ended = applyServerMessage(replied, {
+      type: "event",
+      event: { seq: 5, createdAt: "now", type: "run.changed", run: run(status) },
+    });
+    expect(ended.liveTools).toEqual({});
+    expect(ended.finishedTools).toEqual({
+      reply: [tool("a", { detail: "notes.md", status: "done" })],
+    });
+  },
+);
 
 it("keeps the tools of a turn with no reply until the bot's next run", () => {
   const working = {

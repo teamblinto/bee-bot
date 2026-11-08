@@ -115,7 +115,14 @@ export function ChatView({
   const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
   const run = chat.runs.find(({ botId }) => botId === bot.id);
   const account = chat.accounts.find(({ id }) => id === bot.engineAccountId);
-  const items = buildTranscript(messages, approvals, pending, openCards(chat, bot.id));
+  const continuations = chat.continuations.filter(({ botId }) => botId === bot.id);
+  const items = buildTranscript(
+    messages,
+    approvals,
+    pending,
+    openCards(chat, bot.id),
+    continuations,
+  );
   const active = isActive(run);
   const limited = run?.reason === "limited";
   const draft = run && drafts[run.id];

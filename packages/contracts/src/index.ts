@@ -712,6 +712,13 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("delete-routine"), routineId: z.uuid() }),
   z.object({ type: z.literal("start-firing"), firingId: z.uuid() }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
+  // Box mode (R17). On a hand_off, "approve" means the owner did it themselves.
+  z.object({
+    type: z.literal("decide-continuation"),
+    continuationId: z.uuid(),
+    digest: z.string(),
+    decision: z.enum(["approve", "deny"]),
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 

@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type Bot,
   type Command,
+  type Continuation,
   type PendingApproval,
   protocolVersion,
   ServerMessage,
@@ -16,7 +17,14 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
-import { createApprovals, inputDigest, writeAction } from "./approvals.ts";
+import {
+  boxVerdict,
+  createApprovals,
+  type Execute,
+  inputDigest,
+  writeAction,
+} from "./approvals.ts";
+import type { Decide } from "./broker.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
@@ -71,6 +79,9 @@ type BootOptions = {
   approvalTimeoutMs?: number;
   turnTimeoutMs?: number;
   mcpKeepaliveMs?: number;
+  continuationTtlMs?: number;
+  decide?: Decide;
+  executors?: ReadonlyMap<string, Execute>;
 };
 
 async function boot(options: BootOptions = {}) {
@@ -1279,5 +1290,254 @@ describe("a bot with a project folder", () => {
     const { turn } = await atLevel("full");
     const answer = await mcp(turn.permissions, write(NodePath.join(project, ".npmrc")));
     expect(await decisionOf(answer)).toMatchObject({ behavior: "allow" });
+  });
+});
+
+describe("a Box bot's verdict", () => {
+  const can = { surface: true, executable: true };
+
+  it("waits only when someone could answer and Bee could act on it", () => {
+    expect(boxVerdict({ kind: "approve" }, can)).toEqual({ answer: "wait", kind: "approval" });
+    expect(boxVerdict({ kind: "approve" }, { ...can, surface: false })).toEqual({
+      answer: "deny",
+      message: "Denied: nobody can approve this right now.",
+    });
+    expect(boxVerdict({ kind: "approve" }, { ...can, executable: false })).toMatchObject({
+      answer: "deny",
+    });
+  });
+
+  it("hands a person's job to the owner, though Bee has no way to do it", () => {
+    const handOff = { kind: "hand_off", reason: "payment" } as const;
+    expect(boxVerdict(handOff, { ...can, executable: false })).toEqual({
+      answer: "wait",
+      kind: "hand_off",
+    });
+    expect(boxVerdict(handOff, { ...can, surface: false })).toMatchObject({ answer: "deny" });
+  });
+
+  it("passes the broker's allow and deny straight through", () => {
+    expect(boxVerdict({ kind: "allow" }, { surface: false, executable: false })).toEqual({
+      answer: "allow",
+    });
+    expect(boxVerdict({ kind: "deny", reason: "not in the manifest" }, can)).toEqual({
+      answer: "deny",
+      message: "Refused: not in the manifest",
+    });
+  });
+});
+
+describe("in Box mode a tool call", () => {
+  const ask: Decide = ({ labels }) => (labels.sideEffect ? { kind: "approve" } : { kind: "allow" });
+  let ran: string[];
+  const execute: Execute = async ({ payload }) => {
+    ran.push(payload);
+    return { ok: true, output: "done" };
+  };
+
+  beforeEach(() => {
+    ran = [];
+  });
+
+  async function boxBoot(options: BootOptions = {}, existing?: Bot) {
+    const executors = new Map([
+      ["Bash", execute],
+      ["Write", execute],
+    ]);
+    const env = await boot({ runTurn: fakeRunTurn, decide: ask, executors, ...options });
+    const bot =
+      existing ??
+      ((await (
+        await env.post({
+          type: "create-bot",
+          name: "Bo",
+          personality: "",
+          engineAccountId: "claude",
+        })
+      ).json()) as Bot);
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.prepare("UPDATE bots SET boundary = 'box' WHERE id = ?").run(bot.id);
+    db.close();
+    const send = (body: string) =>
+      env.post({
+        type: "send-message",
+        messageId: NodeCrypto.randomUUID(),
+        roomId: bot.roomId,
+        body,
+      });
+    const bodies = () =>
+      env.store
+        .state()
+        .messages.filter(({ roomId }) => roomId === bot.roomId)
+        .map(({ body }) => body);
+    const waiting = async () => {
+      await vi.waitFor(() => expect(env.store.state().continuations).toHaveLength(1), {
+        timeout: 3000,
+      });
+      return env.store.state().continuations[0] as Continuation;
+    };
+    const answer = (card: Continuation, decision: "approve" | "deny", digest = card.digest) =>
+      env.post({ type: "decide-continuation", continuationId: card.id, digest, decision });
+    const lastRun = () => env.store.state().runs.find(({ botId }) => botId === bot.id);
+    return { ...env, bot, send, bodies, waiting, answer, lastRun };
+  }
+
+  it("ends the turn, then runs the approved action once and resumes the saved session", async () => {
+    const { store, bot, client, send, bodies, waiting, answer, lastRun } = await boxBoot();
+    await send("/approve Bash echo hi");
+    const card = await waiting();
+    expect(card).toMatchObject({ kind: "approval", tool: "Bash", shown: "Bash: echo hi" });
+    await vi.waitFor(() => expect(lastRun()?.status).toBe("WaitingUser"));
+    expect(store.botBusy(bot.id)).toBe(false);
+    expect(client.cards()).toEqual([]);
+
+    expect((await answer(card, "approve")).status).toBe(200);
+    expect((await answer(card, "approve")).status).toBe(409);
+    await vi.waitFor(() =>
+      expect(bodies().at(-1)).toMatch(/^Test engine reply: Approved and done/),
+    );
+    expect(ran).toHaveLength(1);
+    expect(JSON.parse(ran[0] ?? "")).toMatchObject({ tool: "Bash", input: { command: "echo hi" } });
+    expect(store.state().continuations).toEqual([]);
+
+    await send("/recall");
+    await vi.waitFor(() =>
+      expect(bodies().at(-1)).toBe("Test engine recalls: /approve Bash echo hi | done"),
+    );
+  });
+
+  it("tells the bot when the owner denies, and runs nothing", async () => {
+    const { send, bodies, waiting, answer } = await boxBoot();
+    await send("/approve Bash rm -rf build");
+    await answer(await waiting(), "deny");
+    await vi.waitFor(() =>
+      expect(bodies().slice(-2)).toEqual([
+        "Denied:\nBash: rm -rf build",
+        "Test engine reply: Denied:\nBash: rm -rf build",
+      ]),
+    );
+    expect(ran).toEqual([]);
+  });
+
+  it("refuses an answer to anything but what was shown, and the card stays", async () => {
+    const { store, send, waiting, answer } = await boxBoot();
+    await send("/approve Bash echo hi");
+    const card = await waiting();
+    const response = await answer(card, "approve", "something else");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "digest_mismatch" });
+    expect(store.state().continuations).toEqual([card]);
+  });
+
+  it("is refused at run time when its target changed after the owner saw it", async () => {
+    const { bot, send, bodies, waiting, answer } = await boxBoot();
+    await send("/approve Write notes.txt");
+    const card = await waiting();
+    expect(card.shown).toBe("Write: notes.txt\n(create)\n+ Written by the test engine.");
+    const workspace = workspacePath(dataDir, bot.id);
+    NodeFS.mkdirSync(workspace, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(workspace, "notes.txt"), "the owner's notes\n");
+    await answer(card, "approve");
+    await vi.waitFor(() =>
+      expect(bodies()).toContain(
+        `Not run, because it changed after the owner saw it:\n${card.shown}`,
+      ),
+    );
+    expect(ran).toEqual([]);
+  });
+
+  it("is denied when nobody answers in time, and a late answer changes nothing", async () => {
+    const { send, bodies, waiting, answer } = await boxBoot({ continuationTtlMs: 300 });
+    await send("/approve Bash echo hi");
+    const card = await waiting();
+    await vi.waitFor(
+      () => expect(bodies()).toContain("No answer in time, so this was not run:\nBash: echo hi"),
+      { timeout: 5000 },
+    );
+    expect((await answer(card, "approve")).status).toBe(409);
+    expect(ran).toEqual([]);
+  });
+
+  it("hands a person's job to the owner and never runs it", async () => {
+    const handOff: Decide = () => ({ kind: "hand_off", reason: "payment" });
+    const { send, bodies, waiting, answer } = await boxBoot({
+      decide: handOff,
+      executors: new Map(),
+    });
+    await send("/approve Bash pay invoice 42");
+    const card = await waiting();
+    expect(card.kind).toBe("hand_off");
+    await answer(card, "approve");
+    await vi.waitFor(() =>
+      expect(bodies()).toContain("The owner did this themselves:\nBash: pay invoice 42"),
+    );
+    expect(ran).toEqual([]);
+  });
+
+  it("can't be run or asked twice by an owner message sent while it waits", async () => {
+    const { send, bodies, waiting, answer, lastRun } = await boxBoot();
+    await send("/approve Bash echo hi");
+    const card = await waiting();
+    await vi.waitFor(() => expect(lastRun()?.status).toBe("WaitingUser"));
+    await send("Yes, go ahead.");
+    await vi.waitFor(() => expect(bodies().at(-1)).toBe("Test engine reply: Yes, go ahead."));
+    await send("/approve Bash echo hi");
+    await vi.waitFor(() => expect(bodies().at(-1)).toBe("Test engine: waiting"));
+    expect(ran).toEqual([]);
+    expect(rows("SELECT id FROM continuations")).toEqual([{ id: card.id }]);
+    await answer(card, "approve");
+    await vi.waitFor(() => expect(bodies().at(-1)).toMatch(/^Test engine reply: Approved/));
+    expect(ran).toHaveLength(1);
+  });
+
+  it("keeps waiting through a restart, and runs once approved after it", async () => {
+    const first = await boxBoot();
+    await first.send("/approve Bash echo hi");
+    const card = await first.waiting();
+    await vi.waitFor(() => expect(first.lastRun()?.status).toBe("WaitingUser"));
+    await first.stop();
+
+    const second = await boxBoot({}, first.bot);
+    expect(second.store.state().continuations).toEqual([card]);
+    await second.answer(card, "approve");
+    await vi.waitFor(() => expect(second.bodies().at(-1)).toMatch(/^Test engine reply: Approved/));
+    expect(ran).toHaveLength(1);
+  });
+
+  it("reports an action cut off by a restart as unknown, and never runs it again", async () => {
+    let started = 0;
+    const hang: Execute = () => {
+      started += 1;
+      return new Promise(() => {});
+    };
+    const first = await boxBoot({ executors: new Map([["Bash", hang]]) });
+    await first.send("/approve Bash deploy");
+    const card = await first.waiting();
+    await first.answer(card, "approve");
+    await vi.waitFor(() =>
+      expect(rows("SELECT status FROM continuations")).toEqual([{ status: "claimed" }]),
+    );
+    await first.stop();
+
+    const second = await boxBoot({}, first.bot);
+    await vi.waitFor(() =>
+      expect(second.bodies()).toContain(
+        "Outcome unknown: Bee stopped while running this and did not retry it. Check before trying again:\nBash: deploy",
+      ),
+    );
+    expect(rows("SELECT status FROM continuations")).toEqual([{ status: "unknown" }]);
+    expect(started).toBe(1);
+    expect(ran).toEqual([]);
+  });
+
+  it("is closed by a stop, with nothing sent back", async () => {
+    const { store, bot, post, send, bodies, waiting, answer } = await boxBoot();
+    await send("/approve Bash echo hi");
+    const card = await waiting();
+    await post({ type: "stop-bot", botId: bot.id });
+    await vi.waitFor(() => expect(store.state().continuations).toEqual([]));
+    expect((await answer(card, "approve")).status).toBe(409);
+    expect(bodies().filter((body) => body.startsWith("Denied"))).toEqual([]);
+    expect(ran).toEqual([]);
   });
 });
