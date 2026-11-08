@@ -370,7 +370,7 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       ?.IPAddress;
     expect(sidecarIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     const probe = await inBox(
-      `curl -s --noproxy '*' --max-time 5 http://${sidecarIp}:9223/json/version; echo "direct $?"; curl -s --max-time 5 -x http://proxy.beebot:3128 http://${sidecarIp}:9223/json/version -o /dev/null -w '%{http_code}'; echo " proxied"`,
+      `curl -s --noproxy '*' --max-time 5 http://${sidecarIp}:9222/json/version; echo "direct $?"; curl -s --max-time 5 -x http://proxy.beebot:3128 http://${sidecarIp}:9222/json/version -o /dev/null -w '%{http_code}'; echo " proxied"`,
     );
     expect(probe.output).not.toContain("webSocketDebuggerUrl");
     expect(probe.output).not.toMatch(/direct 0$/m);

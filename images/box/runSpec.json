@@ -31,7 +31,6 @@
     "pidsLimit": 512,
     "hostname": "bee-browser",
     "volumes": { "profile": "/browser" },
-    "cdpPort": 9223,
     "downloadsDir": "/downloads"
   }
 }

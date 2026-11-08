@@ -115,6 +115,16 @@ async function expectConfined(id: string) {
   }
 }
 
+// Listening TCP sockets in the box, as /proc/net/tcp and tcp6 spell them: hex address:port.
+async function listeners(id: string) {
+  const { stdout } = await exec(id, "cat /proc/net/tcp /proc/net/tcp6");
+  return stdout
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields[3] === "0A")
+    .map((fields) => fields[1] ?? "");
+}
+
 async function until<T>(probe: () => Promise<T | undefined>, what: string) {
   for (let attempt = 0; attempt < 60; attempt++) {
     const value = await probe().catch(() => undefined);
@@ -181,6 +191,17 @@ describe.skipIf(!podmanUp)("box image", () => {
 
   it("browser keeps Chromium's sandbox under the shipped seccomp profile", async () => {
     const id = await startBox("browser", ["profile"], ["-p", "127.0.0.1::9223"]);
+
+    // boxd reaches DevTools through `podman exec`, so nothing in the box listens beyond loopback.
+    const listening = await until(async () => {
+      const found = await listeners(id);
+      return found.includes("0100007F:2406") ? found : undefined;
+    }, "DevTools on loopback port 9222");
+    const loopback = /^([0-9A-F]{6}7F|0{24}01000000|0{16}FFFF0000[0-9A-F]{6}7F):/;
+    expect(listening.filter((address) => !loopback.test(address))).toEqual([]);
+
+    // Only for this test: a relay so the WebSocket below can reach DevTools from the host.
+    await podmanOk(["exec", "-d", id, "socat", "TCP-LISTEN:9223,fork", "TCP:127.0.0.1:9222"]);
     const address = (await podmanOk(["port", id, "9223/tcp"])).split("\n")[0];
 
     const version = await until(async () => {
