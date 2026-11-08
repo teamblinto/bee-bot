@@ -257,6 +257,7 @@ export async function startBoxHost({
       return ready.ready(botId);
     },
     egress,
+    applyEgress: egress.apply,
     sidecar: async (botId: string) => sidecarEndpoint(idle.runtime, botId, idle.touch),
     stderr: boxd.stderr,
     closed: boxd.closed,

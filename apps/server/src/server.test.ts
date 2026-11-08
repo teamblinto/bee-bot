@@ -7,7 +7,7 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
 import {
-  type Bot,
+  Bot,
   type ChatState,
   type EngineLane,
   type EngineStatus,
@@ -26,6 +26,7 @@ import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
 import { migrate, migrations, openEventStore, seedFromId } from "./store.ts";
 import type { Summarize } from "./summary.ts";
+import { apiKeyName } from "./vault.ts";
 
 const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
@@ -512,6 +513,44 @@ describe("the notice", () => {
     await command(base, { type: "acknowledge-notice" });
     expect(store.state().noticeAcknowledgedAt).toBe(first);
     expect(store.eventsAfter(0).map(({ type }) => type)).toEqual(["notice.acknowledged"]);
+  });
+});
+
+describe("a boxed bot's egress and lane", () => {
+  it("validates, stores and audits the owner's hosts", async () => {
+    const { base, store } = await start();
+    const bot = Bot.parse(await (await createBot(base)).json());
+    expect(bot.egressHosts).toEqual([]);
+    const set = (hosts: string[]) =>
+      command(base, { type: "set-bot-egress-hosts", botId: bot.id, hosts });
+    for (const bad of ["*.com", "10.0.0.1", "https://pypi.org", "printer.local"]) {
+      expect((await set(["pypi.org", bad])).status).toBe(400);
+    }
+    const saved = Bot.parse(await (await set(["PyPI.org.", "files.pythonhosted.org"])).json());
+    expect(saved.egressHosts).toEqual(["files.pythonhosted.org", "pypi.org"]);
+    expect(store.egress.egressInput(bot.id)?.hosts).toEqual(saved.egressHosts);
+    expect(Bot.parse(await (await set([])).json()).egressHosts).toEqual([]);
+    expect(
+      store.policy.auditPage({ unattended: false, limit: 10 }).entries.map((entry) => entry.status),
+    ).toEqual(["egress_set", "egress_set"]);
+  });
+
+  it("opts into the subscription only after the notice, and keeps the API key otherwise", async () => {
+    const { base, store } = await start();
+    const bot = Bot.parse(await (await createBot(base)).json());
+    store.vaultStore.write(apiKeyName(bot.engineAccountId), Buffer.from("sealed"));
+    expect(bot.unattendedLane).toBe("api_key");
+    const choose = (lane: string) =>
+      command(base, { type: "set-bot-unattended-lane", botId: bot.id, lane });
+    expect((await choose("subscription")).status).toBe(409);
+    expect(store.boxLane(bot.id)).toBe("api_key");
+    await command(base, { type: "acknowledge-automated-access" });
+    expect(store.boxLane(bot.id)).toBe("api_key");
+    const chosen = Bot.parse(await (await choose("subscription")).json());
+    expect(chosen.unattendedLane).toBe("subscription");
+    expect(store.boxLane(bot.id)).toBe("subscription");
+    const entry = store.policy.auditPage({ unattended: false, limit: 1 }).entries[0];
+    expect(entry).toMatchObject({ status: "unattended_lane_set", initiator: "human" });
   });
 });
 

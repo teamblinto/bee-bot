@@ -13,11 +13,28 @@ export const vendorApi: Record<
 };
 
 // On the subscription lane the CLI in the box holds its own login and talks to its vendor
-// directly. Only the API hosts are proven (S1); the OpenAI login hosts are not. No GitHub host.
+// directly, as a plain tunnel with nothing added. Claude Code 2.1.319 exchanges, refreshes and
+// revokes its OAuth token at platform.claude.com and reads the profile at api.anthropic.com (its
+// bundled TOKEN_URL and BASE_API_URL; code.claude.com/docs/en/network-config). The sign-in pages
+// open in the owner's own browser. The OpenAI login hosts are unproven. No GitHub host.
 export const subscriptionHosts: Record<Vendor, string[]> = {
-  anthropic: ["api.anthropic.com"],
+  anthropic: ["api.anthropic.com", "platform.claude.com"],
   openai: ["api.openai.com", "auth.openai.com", "chatgpt.com"],
 };
+
+const vendorHosts = new Set(Object.values(subscriptionHosts).flat());
+
+// What a bot may CONNECT to. Vendor hosts come only from the subscription lane, never from the
+// owner's list: on the API lane the vendor is reached through the key-injecting lane alone, so an
+// unauthenticated tunnel can't carry another credential past it.
+export function connectHosts(granted: readonly string[], subscription: Vendor | null) {
+  return [
+    ...new Set([
+      ...(subscription === null ? [] : subscriptionHosts[subscription]),
+      ...granted.filter((host) => !vendorHosts.has(host)),
+    ]),
+  ];
+}
 
 export type Decision<T> = ({ allow: true } & T) | { allow: false; reason: string };
 

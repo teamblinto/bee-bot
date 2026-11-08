@@ -84,6 +84,8 @@ const bot = {
   profile: "operator",
   boundary: "host",
   manifest: [] as string[],
+  egressHosts: [] as string[],
+  unattendedLane: "api_key",
   avatarSeed: 5,
   projectPath: null,
 } as const;

@@ -256,12 +256,12 @@ describe("egress proxy on real sockets", () => {
     await client.send({
       type: "policy",
       botId: "b1",
-      hosts: ["api.anthropic.com"],
+      hosts: ["pypi.org"],
       subscription: null,
       api: { vendor: "anthropic", key: canary },
     });
     expect((await boxRequest(ports.api, "/anthropic/v1/messages")).status).toBe(200);
-    expect(await boxDns(ports.dns, "api.anthropic.com")).toEqual({ rcode: 0, answers: 1 });
+    expect(await boxDns(ports.dns, "pypi.org")).toEqual({ rcode: 0, answers: 1 });
     expect(await boxDns(ports.dns, "example.com")).toEqual({ rcode: 3, answers: 0 });
 
     const held = boxRequest(ports.api, "/anthropic/v1/hold");
@@ -272,7 +272,7 @@ describe("egress proxy on real sockets", () => {
     await expect(held).rejects.toThrow();
 
     expect(await boxRequest(ports.api, "/anthropic/v1/messages")).toMatchObject({ status: 403 });
-    expect(await boxDns(ports.dns, "api.anthropic.com")).toEqual({ rcode: 3, answers: 0 });
+    expect(await boxDns(ports.dns, "pypi.org")).toEqual({ rcode: 3, answers: 0 });
     expect(await boxConnect(ports.proxy, "api.anthropic.com:443")).toBe("HTTP/1.1 403 Forbidden");
     expect(vendor.seen).toHaveLength(2);
   });

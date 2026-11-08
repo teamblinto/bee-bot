@@ -194,13 +194,15 @@ export async function deleteApiKey(vault: Vault, accountId: ApiKeyAccountId) {
   return { status: 200, body: { ok: true } };
 }
 
-// R7: an unattended run takes the account's API key when the vault holds one. A subscription is
-// the fallback only after the owner read the automated-access notice, and otherwise it doesn't run.
+// R7: an unattended run takes the account's API key when the vault holds one, unless the owner
+// chose the subscription for this bot. A subscription, chosen or as the fallback, needs the
+// automated-access notice read first, and otherwise the run doesn't happen.
 export function unattendedLane(
   hasApiKey: boolean,
   acknowledgedAt: string | null,
+  chosen: EngineLane = "api_key",
 ): EngineLane | null {
-  if (hasApiKey) {
+  if (hasApiKey && !(chosen === "subscription" && acknowledgedAt)) {
     return "api_key";
   }
   return acknowledgedAt ? "subscription" : null;

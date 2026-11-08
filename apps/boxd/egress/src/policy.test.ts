@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   apiTarget,
+  connectHosts,
   decideConnect,
   decideResolved,
   hostAllowed,
@@ -63,6 +64,39 @@ describe("CONNECT targets", () => {
   ])("%j -> %s", (authority, expected) => {
     const decision = decideConnect(allow, authority);
     expect(decision.allow ? "allow" : decision.reason).toBe(expected);
+  });
+});
+
+describe("CONNECT by lane", () => {
+  // The owner granted pypi.org, and also tried vendor hosts, which only a lane can open.
+  const granted = ["pypi.org", "api.anthropic.com", "platform.claude.com", "chatgpt.com"];
+  const lanes = {
+    subscription: connectHosts(granted, "anthropic"),
+    api: connectHosts(granted, null),
+  };
+  it.each([
+    ["subscription", "platform.claude.com:443", "allow"],
+    ["subscription", "api.anthropic.com:443", "allow"],
+    ["subscription", "pypi.org:443", "allow"],
+    ["subscription", "claude.ai:443", "host not allowlisted"],
+    ["subscription", "claude.com:443", "host not allowlisted"],
+    ["subscription", "chatgpt.com:443", "host not allowlisted"],
+    ["subscription", "github.com:443", "host not allowlisted"],
+    ["api", "api.anthropic.com:443", "host not allowlisted"],
+    ["api", "platform.claude.com:443", "host not allowlisted"],
+    ["api", "chatgpt.com:443", "host not allowlisted"],
+    ["api", "pypi.org:443", "allow"],
+    ["api", "github.com:443", "host not allowlisted"],
+  ] as const)("%s lane: %s -> %s", (lane, authority, expected) => {
+    const decision = decideConnect(lanes[lane], authority);
+    expect(decision.allow ? "allow" : decision.reason).toBe(expected);
+  });
+
+  it("adds a key only on the API lane's own host, never to a login host", () => {
+    expect(keyHeader("anthropic", new URL("https://platform.claude.com/v1/oauth/token"), "k")).toBe(
+      null,
+    );
+    expect(apiTarget("anthropic", "/anthropic//platform.claude.com/v1/oauth/token")).toBeNull();
   });
 });
 

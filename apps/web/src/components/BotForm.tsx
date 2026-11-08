@@ -7,7 +7,7 @@ import {
   EngineAccountId,
   EngineLane,
 } from "@beebot/contracts";
-import { Dices } from "lucide-react";
+import { Dices, X } from "lucide-react";
 import {
   type FormEvent,
   type ReactNode,
@@ -82,6 +82,14 @@ export function BotForm({
   const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
   const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? false);
   const [inBox, setInBox] = useState(bot?.boundary === "box");
+  const [egressHosts, setEgressHosts] = useState(bot?.egressHosts ?? []);
+  const [unattendedLane, setUnattendedLane] = useState<EngineLane>(
+    bot?.unattendedLane ?? "api_key",
+  );
+  const automatedAccessRead = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().chat.automatedAccessAcknowledgedAt !== null,
+  );
   const boxes = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().boxAvailability,
@@ -152,9 +160,31 @@ export function BotForm({
       created && created.boundary !== boundary
         ? await postCommand({ type: "set-bot-boundary", botId: created.id, boundary })
         : undefined;
+    const boxed = boundaryResult?.ok ? Bot.safeParse(boundaryResult.body).data : created;
+    const egressResult =
+      boxed &&
+      inBox &&
+      (boxed.egressHosts.length !== egressHosts.length ||
+        boxed.egressHosts.some((host, index) => host !== egressHosts[index]))
+        ? await postCommand({ type: "set-bot-egress-hosts", botId: boxed.id, hosts: egressHosts })
+        : undefined;
+    const unattendedResult =
+      boxed && inBox && boxed.unattendedLane !== unattendedLane
+        ? await postCommand({
+            type: "set-bot-unattended-lane",
+            botId: boxed.id,
+            lane: unattendedLane,
+          })
+        : undefined;
     saving.current = false;
     setBusy(false);
-    const last = boundaryResult ?? manifestResult ?? profileResult ?? result;
+    const last =
+      unattendedResult ??
+      egressResult ??
+      boundaryResult ??
+      manifestResult ??
+      profileResult ??
+      result;
     const saved = last.ok ? Bot.safeParse(last.body).data : undefined;
     if (saved) {
       onSaved(saved);
@@ -288,12 +318,34 @@ export function BotForm({
         </p>
         {inBox && (
           <>
-            <p>
-              {laneAccount && apiKeys.includes(laneAccount)
-                ? "On its own, it uses your saved API key."
-                : "No API key is saved for this engine, so on its own it uses your subscription. You can save a key on the Usage page."}
-            </p>
+            {laneAccount && apiKeys.includes(laneAccount) ? (
+              <label className={labelClass}>
+                On its own, it uses
+                <select
+                  className="field text-ink"
+                  value={unattendedLane}
+                  onChange={(event) => setUnattendedLane(EngineLane.parse(event.target.value))}
+                >
+                  <option value="api_key">Your saved API key</option>
+                  <option value="subscription" disabled={!automatedAccessRead}>
+                    Your subscription, at your own risk
+                  </option>
+                </select>
+              </label>
+            ) : (
+              <p>
+                No API key is saved for this engine, so on its own it uses your subscription. You
+                can save a key on the Usage page.
+              </p>
+            )}
             <AutomatedAccessNotice />
+            <div className={labelClass}>
+              Sites it can reach
+              <HostList hosts={egressHosts} onChange={setEgressHosts} />
+              <p className="text-small">
+                Besides its engine, a boxed bot reaches only these sites. Enter names like pypi.org.
+              </p>
+            </div>
           </>
         )}
       </div>
@@ -324,6 +376,63 @@ export function BotForm({
         </button>
       </div>
     </form>
+  );
+}
+
+function HostList({ hosts, onChange }: { hosts: string[]; onChange: (hosts: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const host = draft.trim().toLowerCase();
+    if (host && !hosts.includes(host)) {
+      onChange([...hosts, host].sort());
+    }
+    setDraft("");
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      {hosts.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {hosts.map((host) => (
+            <li key={host} className="flex items-center justify-between gap-2 text-ink">
+              <span className="min-w-0 truncate">{host}</span>
+              <button
+                type="button"
+                aria-label={`Remove ${host}`}
+                className="button !px-2"
+                onClick={() => onChange(hosts.filter((other) => other !== host))}
+              >
+                <X {...iconProps} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex items-center gap-1">
+        <input
+          aria-label="Site to allow"
+          className="field min-w-0 flex-1 text-ink"
+          placeholder="pypi.org"
+          spellCheck={false}
+          maxLength={253}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              add();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="button button-outline"
+          disabled={!draft.trim()}
+          onClick={add}
+        >
+          Add
+        </button>
+      </div>
+    </div>
   );
 }
 

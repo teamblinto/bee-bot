@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { protocolVersion, type VaultKey } from "@beebot/contracts";
-import { afterEach, beforeEach, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -170,9 +170,23 @@ it("stores and deletes keys and records the notice once, through the commands", 
   }
 });
 
-it("runs an unattended bot on the API key, and on a subscription only after the notice", () => {
-  expect(unattendedLane(true, null)).toBe("api_key");
-  expect(unattendedLane(true, "2026-11-08T00:00:00.000Z")).toBe("api_key");
-  expect(unattendedLane(false, "2026-11-08T00:00:00.000Z")).toBe("subscription");
-  expect(unattendedLane(false, null)).toBeNull();
+describe("an unattended bot's lane", () => {
+  const read = "2026-11-08T00:00:00.000Z";
+  it.each([
+    // [API key saved, notice read, owner's choice, lane]
+    [true, null, "api_key", "api_key"],
+    [true, read, "api_key", "api_key"],
+    [true, null, "subscription", "api_key"],
+    [true, read, "subscription", "subscription"],
+    [false, read, "api_key", "subscription"],
+    [false, read, "subscription", "subscription"],
+    [false, null, "api_key", null],
+    [false, null, "subscription", null],
+  ] as const)("key %s, notice %s, chose %s -> %s", (hasKey, acknowledgedAt, chosen, lane) => {
+    expect(unattendedLane(hasKey, acknowledgedAt, chosen)).toBe(lane);
+  });
+
+  it("defaults to the API key", () => {
+    expect(unattendedLane(true, read)).toBe("api_key");
+  });
 });

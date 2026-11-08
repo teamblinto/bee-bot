@@ -3,9 +3,48 @@ import { Duplex } from "node:stream";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { createEgressControl, egressPolicy, type EgressInput, openEgress } from "./egress.ts";
+import {
+  createEgressControl,
+  egressPolicy,
+  type EgressInput,
+  openEgress,
+  ownerEgressHosts,
+} from "./egress.ts";
 import { migrate } from "./store.ts";
 import { apiKeyName, createMemoryVault } from "./vault.ts";
+
+describe("the owner's egress list", () => {
+  it("normalizes public names", () => {
+    expect(ownerEgressHosts([" PyPI.org. ", "files.pythonhosted.org", "pypi.org"])).toEqual([
+      "files.pythonhosted.org",
+      "pypi.org",
+    ]);
+    expect(ownerEgressHosts([])).toEqual([]);
+  });
+
+  it.each([
+    "*",
+    "*.com",
+    "*.github.com",
+    "10.0.0.1",
+    "169.254.169.254",
+    "[::1]",
+    "::1",
+    "2130706433",
+    "localhost",
+    "printer.local",
+    "db.internal",
+    "1.0.0.10.in-addr.arpa",
+    "https://pypi.org",
+    "pypi.org/simple",
+    "pypi.org:443",
+    "user@pypi.org",
+    "com",
+    "",
+  ])("refuses %j", (host) => {
+    expect(ownerEgressHosts(["pypi.org", host])).toBeNull();
+  });
+});
 
 describe("egress policy", () => {
   it.each([

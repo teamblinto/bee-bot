@@ -27,6 +27,19 @@ export function normalizeEgressHost(raw: string) {
   return valid ? host : null;
 }
 
+// Names that only ever mean something inside a network. The proxy refuses private addresses too,
+// once a public name resolves to one.
+const privateSuffix = /(^|\.)(localhost|local|internal|intranet|lan|home|corp|arpa)$/;
+
+// The owner's list, normalized, or null when any entry isn't one public DNS name.
+export function ownerEgressHosts(raw: readonly string[]) {
+  const hosts = raw.map(normalizeEgressHost);
+  if (hosts.some((host) => host === null || privateSuffix.test(host))) {
+    return null;
+  }
+  return [...new Set(hosts.filter((host) => host !== null))].sort();
+}
+
 export type EgressInput = { engineAccountId: string; lane: EngineLane; hosts: string[] };
 export type EgressPolicy = {
   hosts: string[];

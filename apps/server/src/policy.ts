@@ -6,6 +6,7 @@ import {
   type Bot,
   type BotBoundary,
   BotProfile,
+  type EngineLane,
   type Manifest,
 } from "@beebot/contracts";
 import { z } from "zod";
@@ -57,6 +58,13 @@ export function openPolicy(
   const updateManifest = db.prepare("UPDATE bots SET manifest = ? WHERE id = ?");
   const updateBoundary = db.prepare(
     "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
+  );
+  const clearEgressHosts = db.prepare("DELETE FROM bot_egress_hosts WHERE bot_id = ?");
+  const insertEgressHost = db.prepare(
+    "INSERT INTO bot_egress_hosts (bot_id, host, created_at) VALUES (?, ?, ?)",
+  );
+  const updateUnattendedLane = db.prepare(
+    "UPDATE bots SET unattended_lane = ? WHERE id = ? AND unattended_lane <> ? RETURNING id",
   );
   // A session lives in one boundary's CLI home, so the other side starts a new one.
   const forgetSessions = db.prepare(
@@ -157,6 +165,51 @@ export function openPolicy(
             status: "manifest_set",
             reason: sorted.join(",").slice(0, 200),
           });
+        }
+        return bot;
+      }),
+
+    // `hosts` is already checked and normalized (ownerEgressHosts).
+    setBotEgressHosts: (botId: string, hosts: readonly string[]) =>
+      transaction(() => {
+        if (!getBot(botId)) {
+          return undefined;
+        }
+        clearEgressHosts.run(botId);
+        const now = new Date().toISOString();
+        for (const host of hosts) {
+          insertEgressHost.run(botId, host, now);
+        }
+        appendAudit({
+          runId: null,
+          botId,
+          initiator: "human",
+          attended: true,
+          status: "egress_set",
+          reason: hosts.join(",").slice(0, 200),
+        });
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+        }
+        return bot;
+      }),
+
+    setBotUnattendedLane: (botId: string, lane: EngineLane) =>
+      transaction(() => {
+        if (updateUnattendedLane.get(lane, botId, lane)) {
+          appendAudit({
+            runId: null,
+            botId,
+            initiator: "human",
+            attended: true,
+            status: "unattended_lane_set",
+            reason: lane,
+          });
+        }
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
         }
         return bot;
       }),

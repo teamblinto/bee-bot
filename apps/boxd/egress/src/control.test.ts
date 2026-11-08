@@ -81,7 +81,9 @@ describe("control messages", () => {
           api: null,
         }),
       );
-    expect(parse("anthropic")).toMatchObject({ hosts: ["api.anthropic.com", "pypi.org"] });
+    expect(parse("anthropic")).toMatchObject({
+      hosts: ["api.anthropic.com", "platform.claude.com", "pypi.org"],
+    });
     expect(parse("openai")).toMatchObject({
       hosts: ["api.openai.com", "auth.openai.com", "chatgpt.com", "pypi.org"],
     });

@@ -8,7 +8,8 @@ const { postCommand, models, chat } = vi.hoisted(() => ({
   postCommand: vi.fn(),
   chat: {
     accounts: [{ id: "codex", label: "Codex", lane: "subscription", blockedUntil: null }],
-    vault: { apiKeys: [] },
+    vault: { apiKeys: [] as string[] },
+    automatedAccessAcknowledgedAt: "2026-11-08T00:00:00.000Z" as string | null,
   },
   models: {
     claude: [{ id: "sonnet", label: "Sonnet 5.5", efforts: [] }],
@@ -124,6 +125,8 @@ it("grants the browser on save, keeping the bot's other grants", async () => {
     profile: "operator",
     boundary: "box",
     manifest: ["gmail.read"],
+    egressHosts: [],
+    unattendedLane: "api_key",
     avatarSeed: 7,
     projectPath: null,
   };
@@ -135,6 +138,99 @@ it("grants the browser on save, keeping the bot's other grants", async () => {
     expect.objectContaining({ type: "update-bot" }),
     { type: "set-bot-manifest", botId: bot.id, manifest: ["gmail.read", "browser"] },
   ]);
+});
+
+it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
+  const bot: Bot = {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "Ada",
+    personality: "",
+    summary: null,
+    status: "ready",
+    pauseReason: null,
+    roomId: "r",
+    engineAccountId: "claude",
+    model: "sonnet",
+    effort: null,
+    mode: "build",
+    access: "supervised",
+    profile: "operator",
+    boundary: "box",
+    manifest: [],
+    egressHosts: ["pypi.org"],
+    unattendedLane: "api_key",
+    avatarSeed: 7,
+    projectPath: null,
+  };
+  chat.vault.apiKeys = ["claude"];
+  try {
+    postCommand.mockResolvedValue({ ok: true, body: bot });
+    show(bot);
+    const site = host.querySelector<HTMLInputElement>('input[aria-label="Site to allow"]');
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    act(() => {
+      setValue?.call(site, " Files.PythonHosted.org ");
+      site?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() =>
+      [...host.querySelectorAll("button")]
+        .find(({ textContent }) => textContent === "Add")
+        ?.click(),
+    );
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Remove pypi.org"]')?.click());
+    const lane = [...host.querySelectorAll("label")]
+      .find(({ textContent }) => textContent?.startsWith("On its own, it uses"))
+      ?.querySelector("select");
+    act(() => {
+      if (lane) {
+        lane.value = "subscription";
+        lane.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await act(async () => host.querySelector("form")?.requestSubmit());
+    expect(postCommand.mock.calls.map(([command]) => command)).toEqual([
+      expect.objectContaining({ type: "update-bot" }),
+      { type: "set-bot-egress-hosts", botId: bot.id, hosts: ["files.pythonhosted.org"] },
+      { type: "set-bot-unattended-lane", botId: bot.id, lane: "subscription" },
+    ]);
+  } finally {
+    chat.vault.apiKeys = [];
+  }
+});
+
+it("offers the subscription only after the automated-access notice was read", () => {
+  chat.vault.apiKeys = ["claude"];
+  chat.automatedAccessAcknowledgedAt = null;
+  try {
+    show({
+      id: "b",
+      name: "Ada",
+      personality: "",
+      summary: null,
+      status: "ready",
+      pauseReason: null,
+      roomId: "r",
+      engineAccountId: "claude",
+      model: "sonnet",
+      effort: null,
+      mode: "build",
+      access: "supervised",
+      profile: "operator",
+      boundary: "box",
+      manifest: [],
+      egressHosts: [],
+      unattendedLane: "api_key",
+      avatarSeed: 7,
+      projectPath: null,
+    });
+    const lane = [...host.querySelectorAll("label")]
+      .find(({ textContent }) => textContent?.startsWith("On its own, it uses"))
+      ?.querySelector<HTMLOptionElement>('option[value="subscription"]');
+    expect(lane?.disabled).toBe(true);
+  } finally {
+    chat.vault.apiKeys = [];
+    chat.automatedAccessAcknowledgedAt = "2026-11-08T00:00:00.000Z";
+  }
 });
 
 it("warns when editing a bot that's already on Codex", () => {
@@ -154,6 +250,8 @@ it("warns when editing a bot that's already on Codex", () => {
     profile: "operator",
     boundary: "host",
     manifest: [],
+    egressHosts: [],
+    unattendedLane: "api_key",
     avatarSeed: 7,
     projectPath: null,
   });
