@@ -303,6 +303,13 @@ export type AuditEntry = z.infer<typeof AuditEntry>;
 export const VaultStatus = z.object({ apiKeys: z.array(z.string()) });
 export type VaultStatus = z.infer<typeof VaultStatus>;
 
+// Newest first. brokenRowId is the first row whose hash does not follow from the one before it.
+export const AuditPage = z.object({
+  entries: z.array(AuditEntry),
+  brokenRowId: z.number().nullable(),
+});
+export type AuditPage = z.infer<typeof AuditPage>;
+
 export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
 export type MemoryType = z.infer<typeof MemoryType>;
 export const MemorySource = z.enum(["user", "agent"]);
@@ -712,6 +719,7 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("delete-routine"), routineId: z.uuid() }),
   z.object({ type: z.literal("start-firing"), firingId: z.uuid() }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
+  z.object({ type: z.literal("set-bot-profile"), botId: z.uuid(), profile: BotProfile }),
 ]);
 export type Command = z.infer<typeof Command>;
 

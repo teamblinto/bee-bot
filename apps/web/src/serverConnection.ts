@@ -1,4 +1,5 @@
 import {
+  AuditPage,
   type ChatState,
   type ClientMessage,
   type Command,
@@ -371,6 +372,20 @@ export async function fetchUsage(days: number): Promise<UsageSummary> {
     return UsageSummary.safeParse(await response.json()).data ?? { status: "unavailable" };
   } catch {
     return { status: "unavailable" };
+  }
+}
+
+export async function fetchAudit(filter: { botId: string; unattended: boolean }) {
+  try {
+    const url = endpoint("/audit");
+    if (filter.botId) {
+      url.searchParams.set("botId", filter.botId);
+    }
+    url.searchParams.set("unattended", filter.unattended ? "1" : "0");
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    return AuditPage.safeParse(await response.json()).data;
+  } catch {
+    return undefined;
   }
 }
 

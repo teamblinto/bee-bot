@@ -36,6 +36,7 @@ import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
+import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
 import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
@@ -586,6 +587,20 @@ export const migrations: Array<{
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );`,
+  },
+  {
+    name: "m3_ws4_session_legs",
+    // The Rule of Two legs a session holds, set by the broker. Saving a new session is the one
+    // write that sets tainted to 0, so the trigger clears the legs with it.
+    sql: `ALTER TABLE scopes ADD COLUMN legs_untrusted INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE scopes ADD COLUMN legs_private INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE scopes ADD COLUMN legs_side_effect INTEGER NOT NULL DEFAULT 0;
+    CREATE TRIGGER scopes_new_session_clears_legs AFTER UPDATE OF tainted ON scopes
+      WHEN NEW.tainted = 0
+    BEGIN
+      UPDATE scopes SET legs_untrusted = 0, legs_private = 0, legs_side_effect = 0
+        WHERE id = NEW.id;
+    END;`,
   },
 ];
 
@@ -1831,6 +1846,7 @@ export function openEventStore(dataDir: string) {
     boxes,
     continuations,
     effects: openEffects(db, tx),
+    policy: openPolicy(db, tx, getBot),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);
     },
