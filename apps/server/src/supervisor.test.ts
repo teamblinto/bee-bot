@@ -1172,7 +1172,7 @@ describe("tool activity", () => {
 });
 
 describe("fake engine", () => {
-  const turn = (prompt: string, signal = new AbortController().signal) =>
+  const turn = (prompt: string, signal = new AbortController().signal, onDelivered = () => {}) =>
     fakeRunTurn({
       approve: async () => ({ behavior: "deny", message: "unused" }),
       prompt,
@@ -1197,7 +1197,7 @@ describe("fake engine", () => {
       onThinking: () => {},
       onRateLimit: () => {},
       permissions: { url: "http://127.0.0.1:9/mcp", token: "unused" },
-      onDelivered: () => {},
+      onDelivered,
     });
 
   it("is scripted by the last line of the prompt", async () => {
@@ -1205,6 +1205,15 @@ describe("fake engine", () => {
     expect(await turn("/auth")).toEqual({ kind: "auth_failed" });
     expect(await turn("/limit 5")).toEqual({ kind: "limited", retryAfterMs: 5000 });
     expect(await turn("/fail\n\nhi")).toMatchObject({ kind: "completed" });
+  });
+
+  // Otherwise a restart mid-turn would send the same input to it again.
+  it("takes the prompt like a real engine, except on turns that fail before it", async () => {
+    const delivered: string[] = [];
+    for (const prompt of ["/fail", "/auth", "/limit", "hi"]) {
+      await turn(prompt, undefined, () => delivered.push(prompt));
+    }
+    expect(delivered).toEqual(["hi"]);
   });
 
   it("hangs until aborted", async () => {

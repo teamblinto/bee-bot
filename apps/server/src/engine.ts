@@ -200,6 +200,7 @@ export const fakeRunTurn: RunTurn = async ({
   onToolEnd,
   onThinking,
   permissions,
+  onDelivered,
   onSteerable,
 }) => {
   const line = (prompt.split("\n").at(-1) ?? "").trim();
@@ -211,6 +212,9 @@ export const fakeRunTurn: RunTurn = async ({
       return { kind: "auth_failed" };
     case "/limit":
       return { kind: "limited", retryAfterMs: (Number(argument) || defaultLimitSeconds) * 1000 };
+  }
+  onDelivered();
+  switch (directive) {
     case "/hang":
       if (!signal.aborted) {
         await once(signal, "abort");
