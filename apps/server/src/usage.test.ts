@@ -320,10 +320,10 @@ async function boot(probeUsage = async () => unavailableProbe("probeFailed")) {
     store,
     probeEngine: async () => ({
       cliFound: true,
-      versionOk: true,
-      loggedIn: true,
+      version: "2.1.318",
+      auth: "authenticated" as const,
+      email: null,
       pauseReason: null,
-      testedVersion: "2.1.318",
     }),
     probeUsage,
     projectsDir: NodePath.join(dir, "projects"),

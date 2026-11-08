@@ -588,6 +588,7 @@ const enginePauses = [
   "auth_failed",
   "cli_missing",
   "cli_version",
+  "cli_failed",
   "config_dir",
   "credential_source",
 ] satisfies PauseReason[];

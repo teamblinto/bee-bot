@@ -15,6 +15,7 @@ import { z } from "zod";
 import { patchFileHeader } from "./approvals.ts";
 import {
   type BotLaunch,
+  cliVersion,
   killTree,
   personaText,
   type RunTurn,
@@ -23,8 +24,6 @@ import {
   workingFolder,
   workspacePath,
 } from "./engine.ts";
-
-export const testedCodexVersion = "0.167.0";
 
 const gateTimeoutMs = 30_000;
 const stopGraceMs = 5000;
@@ -47,7 +46,8 @@ const beeTools = [
   "create_routine",
 ];
 
-// Measured on 0.167.0, and version-gated for that reason. `unified_exec_tty` stops stdin smuggling
+// Measured on 0.167.0. A CLI that rejects one fails to start, which pauses the bot as `cli_failed`
+// rather than running it unlocked. `unified_exec_tty` stops stdin smuggling
 // into an approved shell. `code_mode_host` must stay on: disabling it breaks all execution.
 const lockedArgs = [
   "notify=[]",
@@ -384,23 +384,29 @@ function startAppServer({ command, args, cwd, env, onNotification, onRequest }: 
 type AppServer = ReturnType<typeof startAppServer>;
 
 const Initialized = z.object({ userAgent: z.string() });
-const Account = z.object({ account: z.object({ type: loose }).nullish() });
+const Account = z.object({ account: z.object({ type: loose, email: loose }).nullish() });
 
-// The reply also holds the owner's email, which stops here: nothing else may read it. Any other
-// login pauses the bot: the lane is never switched.
-function accountPause(reply: unknown, lane: EngineLane): PauseReason | null {
-  const type = Account.safeParse(reply).data?.account?.type;
-  if (type === loginMethods[lane].account) {
-    return null;
+type Gate = Pick<EngineStatus, "version" | "auth" | "email"> & { pause: PauseReason | null };
+
+// Any other login pauses the bot: the lane is never switched. A CLI that can't read its account
+// still runs under `forced_login_method`, and a failed login surfaces from the turn.
+function accountGate(reply: Frame, lane: EngineLane): Omit<Gate, "version"> {
+  const parsed = Account.safeParse(reply.result).data;
+  if (reply.error || !parsed) {
+    return { pause: null, auth: "unknown", email: null };
   }
-  return type ? "credential_source" : "auth_failed";
+  const type = parsed.account?.type;
+  if (!type) {
+    return { pause: "auth_failed", auth: "unauthenticated", email: null };
+  }
+  const email = typeof parsed.account?.email === "string" ? parsed.account.email : null;
+  const pause = type === loginMethods[lane].account ? null : "credential_source";
+  return { pause, auth: "authenticated", email };
 }
 
-// Null means open. Undefined means no answer came, and what that means is the caller's call.
-async function passGate(
-  server: AppServer,
-  lane: EngineLane,
-): Promise<PauseReason | null | undefined> {
+// Undefined means no answer came, and what that means is the caller's call. The version is only
+// read, never checked.
+async function passGate(server: AppServer, lane: EngineLane): Promise<Gate | undefined> {
   const initialized = await server.request("initialize", {
     clientInfo: { name: "bee", version: "1" },
     capabilities: { experimentalApi: true },
@@ -411,14 +417,11 @@ async function passGate(
   server.notify("initialized");
   // `bee/0.167.0 (Windows ...)`: the app-server's only report of its own version.
   const userAgent = Initialized.safeParse(initialized.result).data?.userAgent;
-  if (userAgent?.split(/[/\s]/)[1] !== testedCodexVersion) {
-    return "cli_version";
-  }
   const account = await server.request("account/read", {});
   if (!account) {
     return undefined;
   }
-  return accountPause(account.result, lane);
+  return { version: userAgent ? cliVersion(userAgent) : null, ...accountGate(account, lane) };
 }
 
 const SkillList = z.object({
@@ -760,10 +763,10 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
         }
         return signal.aborted
           ? { kind: "failed" }
-          : { kind: "auth_failed", pauseReason: "auth_failed" };
+          : { kind: "auth_failed", pauseReason: "cli_failed" };
       }
-      if (gate) {
-        return { kind: "auth_failed", pauseReason: gate };
+      if (gate.pause) {
+        return { kind: "auth_failed", pauseReason: gate.pause };
       }
       const skills = await server.request("skills/list", { cwds: [cwd], forceReload: true });
       const read = await server.request("config/read", { cwd, includeLayers: true });
@@ -839,20 +842,13 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
   };
 }
 
-// Holds the owner's email, so nothing from the account reply may be logged or stored.
+// Holds the owner's email, which goes only to the owner's screen: nothing from the reply may be logged or stored.
 export async function probeCodex(
   command: readonly string[],
   cwd: string,
   lane: EngineLane,
   onModels?: (models: EngineModel[]) => void,
 ): Promise<EngineStatus> {
-  const status = (pauseReason: PauseReason | null, cliFound = true, versionOk = true) => ({
-    cliFound,
-    versionOk,
-    loggedIn: pauseReason === null,
-    pauseReason,
-    testedVersion: testedCodexVersion,
-  });
   const server = startAppServer({
     command,
     args: launchArgs(await NodeFS.realpath(cwd), lane),
@@ -864,19 +860,23 @@ export async function probeCodex(
   try {
     const gate = await passGate(server, lane);
     if (gate === undefined) {
-      return server.spawnFailed() ? status("cli_missing", false, false) : status("auth_failed");
+      const cliFound = !server.spawnFailed();
+      return {
+        cliFound,
+        version: null,
+        auth: "unknown",
+        email: null,
+        pauseReason: cliFound ? "cli_failed" : "cli_missing",
+      };
     }
-    if (gate === "cli_version") {
-      return status(gate, true, false);
+    const { pause, ...status } = gate;
+    if (!pause) {
+      const models = modelsFromList((await server.request("model/list", {}))?.result);
+      if (models) {
+        onModels?.(models);
+      }
     }
-    if (gate) {
-      return status(gate);
-    }
-    const models = modelsFromList((await server.request("model/list", {}))?.result);
-    if (models) {
-      onModels?.(models);
-    }
-    return status(null);
+    return { cliFound: true, ...status, pauseReason: pause };
   } finally {
     await server.shutdown();
   }

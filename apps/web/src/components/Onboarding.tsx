@@ -11,6 +11,7 @@ import {
 } from "../serverConnection";
 import { BotForm } from "./BotForm";
 import { CopyButton } from "./CopyButton";
+import { RedactedText } from "./RedactedText";
 import { iconProps } from "./ui";
 
 function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
@@ -36,22 +37,30 @@ function Step({ number, title, children }: { number: number; title: string; chil
 }
 
 function CheckList({ engine }: { engine: EngineStatus }) {
+  const fixed = !engineFix(engine);
+  const loginUnknown = engine.auth === "unknown" && fixed;
   const checks = [
-    { label: "Claude Code installed", passed: engine.cliFound },
-    { label: "Tested version", passed: engine.versionOk },
-    { label: "Logged in", passed: engine.loggedIn && !engineFix(engine) },
+    {
+      label: engine.version ? `Claude Code ${engine.version} installed` : "Claude Code installed",
+      passed: engine.cliFound && engine.pauseReason !== "cli_failed",
+    },
+    {
+      label: loginUnknown ? "Login is checked when a bot first runs" : "Logged in",
+      passed: engine.auth !== "unauthenticated" && fixed,
+    },
   ];
   const firstFailure = checks.findIndex(({ passed }) => !passed);
   return (
     <ul className="flex flex-col gap-1 text-small">
       {checks.map(({ label, passed }, position) => {
         const blocked = firstFailure !== -1 && position > firstFailure;
+        const pending = blocked || (loginUnknown && position === checks.length - 1);
         return (
           <li
             key={label}
             className={`flex items-center gap-2 ${blocked ? "text-ink-faint" : "text-ink"}`}
           >
-            {blocked ? (
+            {pending ? (
               <Minus {...iconProps} />
             ) : passed ? (
               <Check {...iconProps} />
@@ -60,11 +69,17 @@ function CheckList({ engine }: { engine: EngineStatus }) {
             )}
             {label}
             <span className="sr-only">
-              {blocked ? "Not checked yet" : passed ? "Passed" : "Needs a fix"}
+              {pending ? "Not checked yet" : passed ? "Passed" : "Needs a fix"}
             </span>
           </li>
         );
       })}
+      {engine.email && (
+        <li className="flex min-w-0 items-center gap-2 pl-6 text-ink-secondary">
+          Signed in as
+          <RedactedText value={engine.email} label="account email" />
+        </li>
+      )}
     </ul>
   );
 }

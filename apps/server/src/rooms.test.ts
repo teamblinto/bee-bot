@@ -109,10 +109,10 @@ async function boot() {
     store,
     probeEngine: async () => ({
       cliFound: true,
-      versionOk: true,
-      loggedIn: true,
+      version: "2.1.318",
+      auth: "authenticated" as const,
+      email: null,
       pauseReason: null,
-      testedVersion: "2.1.318",
     }),
     runTurn: engine.runTurn,
   });

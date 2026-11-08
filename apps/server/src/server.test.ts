@@ -32,10 +32,10 @@ const auth = { Authorization: `Bearer ${token}` };
 
 const healthy: EngineStatus = {
   cliFound: true,
-  versionOk: true,
-  loggedIn: true,
+  version: "2.1.318",
+  auth: "authenticated" as const,
+  email: null,
   pauseReason: null,
-  testedVersion: "2.1.318",
 };
 
 let dataDir: string;
@@ -417,10 +417,10 @@ describe("engine status", () => {
   const engine = (base: string) => http(base, "/engine", { headers: auth });
   const paused: EngineStatus = {
     cliFound: true,
-    versionOk: true,
-    loggedIn: false,
+    version: "2.1.318",
+    auth: "unauthenticated",
+    email: null,
     pauseReason: "auth_failed",
-    testedVersion: "2.1.318",
   };
 
   it("sits behind the owner token and the Origin check", async () => {
@@ -439,10 +439,10 @@ describe("engine status", () => {
 
   it("refuses to pass on anything beyond the contract", async () => {
     const { base } = await start();
-    engineStatus = { ...healthy, email: "owner@example.com" } as EngineStatus;
+    engineStatus = { ...healthy, orgName: "Owner Org" } as EngineStatus;
     const response = await engine(base);
     expect(response.status).toBe(500);
-    expect(await response.text()).not.toContain("owner@example.com");
+    expect(await response.text()).not.toContain("Owner Org");
   });
 
   it("pauses ready Claude bots, clears engine pauses, and leaves the owner's alone", async () => {
@@ -1042,7 +1042,7 @@ describe("headless process", () => {
 describe("the Codex account", () => {
   const codexStatus = (pauseReason: EngineStatus["pauseReason"]): EngineStatus => ({
     ...healthy,
-    loggedIn: pauseReason === null,
+    auth: pauseReason === null ? "authenticated" : "unauthenticated",
     pauseReason,
   });
 

@@ -109,7 +109,7 @@ export function ChatView({
   onOpenDrawer: () => void;
 }) {
   const { chat, drafts, liveTools, thinking, finishedTools } = connection;
-  const { pending, engine, status, commandError, lastSeen, models } = connection;
+  const { pending, status, commandError, lastSeen, models } = connection;
   const connected = status === "connected";
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
   const approvals = chat.approvals.filter(({ botId }) => botId === bot.id);
@@ -143,7 +143,7 @@ export function ChatView({
   const empty = items.length === 0 && !active && !systemLine;
   const notices = [
     status !== "connected" && connectionLines[status],
-    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, engine, account?.lane),
+    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane),
     commandError,
   ].filter((line) => typeof line === "string");
 

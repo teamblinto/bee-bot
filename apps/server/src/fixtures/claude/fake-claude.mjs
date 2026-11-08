@@ -183,6 +183,14 @@ const scenarios = {
     init: () => withAccount(subscriber, "9.9.9"),
     frames: () => replay("success.ndjson"),
   },
+  // An older CLI: no login in the `initialize` reply, and no `auth status`.
+  "gate-no-account": {
+    version: "1.0.0",
+    init: () => withAccount(undefined, "1.0.0"),
+    auth: "error: unknown command 'auth'",
+    authExit: 1,
+    frames: () => replay("success.ndjson"),
+  },
   "in-use": {
     frames: () => replay("success.ndjson"),
     onStart: () => (args.includes("--session-id") ? "in_use" : undefined),
@@ -192,6 +200,7 @@ const scenarios = {
   "logged-out-status": { auth: { loggedIn: false }, authExit: 1 },
   "api-key-status": { auth: { ...loggedIn, apiKeySource: "ANTHROPIC_API_KEY" } },
   "console-status": { auth: { ...loggedIn, authMethod: "console", ...consoleKey } },
+  broken: { broken: true },
 };
 
 const scenario = scenarios[scenarioName] ?? {};
@@ -216,11 +225,17 @@ if (args.includes("--mcp-config")) {
 }
 
 if (args[0] === "--version") {
+  if (scenario.broken) {
+    console.error("Error: something inside the CLI broke");
+    process.exit(1);
+  }
   console.log(`${scenario.version ?? "2.1.318"} (Claude Code)`);
   process.exit(0);
 }
 if (args[0] === "auth") {
-  console.log(JSON.stringify(scenario.auth ?? loggedIn));
+  console.log(
+    typeof scenario.auth === "string" ? scenario.auth : JSON.stringify(scenario.auth ?? loggedIn),
+  );
   process.exit(scenario.authExit ?? 0);
 }
 

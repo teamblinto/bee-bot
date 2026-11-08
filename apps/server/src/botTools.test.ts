@@ -122,10 +122,10 @@ describe("async delegation", () => {
       runTurn,
       probeEngine: async () => ({
         cliFound: true,
-        versionOk: true,
-        loggedIn: true,
+        version: "2.1.318",
+        auth: "authenticated" as const,
+        email: null,
         pauseReason: null,
-        testedVersion: "test",
       }),
     });
     cleanups.push(() => server.close());

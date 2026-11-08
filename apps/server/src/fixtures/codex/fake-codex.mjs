@@ -261,6 +261,11 @@ const scenarios = {
   "gate-version": { userAgent: "bee/9.9.9 (Windows; x86_64)", steps: () => message("noted") },
   "gate-no-version": { userAgent: "garbled", steps: () => message("noted") },
   "gate-logged-out": { account: null, steps: () => message("noted") },
+  // An older CLI that has no `account/read`.
+  "gate-no-account-read": {
+    accountError: { code: -32_601, message: "method not found" },
+    steps: () => message("noted"),
+  },
   // The key is planted: the real reply carries none, but nothing Bee keeps may hold it if one did.
   "gate-api-key": {
     account: { type: "apiKey", apiKey: "sk-planted-key-that-must-not-leak" },
@@ -313,12 +318,15 @@ const replies = {
       platformOs: "windows",
     },
   }),
-  "account/read": () => ({
-    result: {
-      account: scenario.account === undefined ? chatgpt : scenario.account,
-      requiresOpenaiAuth: true,
-    },
-  }),
+  "account/read": () =>
+    scenario.accountError
+      ? { error: scenario.accountError }
+      : {
+          result: {
+            account: scenario.account === undefined ? chatgpt : scenario.account,
+            requiresOpenaiAuth: true,
+          },
+        },
   "model/list": () => ({ result: { data: scenario.models ?? models, nextCursor: null } }),
   "thread/inject_items": () =>
     scenario.injectError ? { error: scenario.injectError } : { result: {} },

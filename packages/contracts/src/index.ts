@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 15;
+export const protocolVersion = 16;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -39,7 +39,10 @@ export const PauseReason = z.enum([
   "owner",
   "auth_failed",
   "cli_missing",
+  // No longer set, since no CLI version blocks a bot. Kept so stored pauses still parse and clear.
   "cli_version",
+  // The CLI was found but didn't start or answer.
+  "cli_failed",
   "config_dir",
   // The CLI authenticated with a different credential source than the account's lane.
   "credential_source",
@@ -608,13 +611,16 @@ export const Command = z.discriminatedUnion("type", [
 ]);
 export type Command = z.infer<typeof Command>;
 
-// Strict, because the probe reads output holding the owner's email and organization.
+// Strict, because the probe reads output holding the owner's organization and more. The email goes
+// only to the owner's own screen, and is never logged or stored.
 export const EngineStatus = z.strictObject({
   cliFound: z.boolean(),
-  versionOk: z.boolean(),
-  loggedIn: z.boolean(),
+  // Shown, never required: no CLI version blocks a bot.
+  version: z.string().nullable(),
+  // `unknown` when this CLI version can't report its login. It doesn't block: each run checks again.
+  auth: z.enum(["authenticated", "unauthenticated", "unknown"]),
+  email: z.string().nullable(),
   pauseReason: PauseReason.nullable(),
-  testedVersion: z.string(),
 });
 export type EngineStatus = z.infer<typeof EngineStatus>;
 

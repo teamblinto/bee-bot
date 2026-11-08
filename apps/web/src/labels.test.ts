@@ -3,6 +3,7 @@ import { expect, it } from "vite-plus/test";
 
 import {
   changeLines,
+  engineFix,
   folderName,
   formatElapsed,
   liveStatusLine,
@@ -11,7 +12,6 @@ import {
   pauseLine,
   projectPathValue,
   runLine,
-  testedCodexVersion,
   toolRowLabel,
   visibleDetail,
   workedLine,
@@ -75,21 +75,20 @@ it("announces status changes and takes the newest thought line", () => {
 });
 
 it("sends a paused Codex bot to Codex's own fix, and a Claude bot to Claude's", () => {
-  const claude = { testedVersion: "2.0.0" } as EngineStatus;
   expect(pauseLine("auth_failed", "claude")).toContain("claude auth login");
-  expect(pauseLine("cli_version", "claude", claude)).toContain("version 2.0.0");
+  expect(pauseLine("cli_failed", "claude")).toContain("Claude Code");
 
   expect(pauseLine("auth_failed", "codex")).toContain("codex login");
   expect(pauseLine("cli_missing", "codex")).toContain("Codex CLI");
-  expect(pauseLine("cli_version", "codex", claude)).toBe(
-    `This Codex version is untested. Install version ${testedCodexVersion}, then Resume.`,
-  );
+  expect(pauseLine("cli_failed", "codex")).toContain("Codex");
+  // A pause left by an older Bee Bot never asks for a specific version.
+  expect(pauseLine("cli_version", "codex")).not.toMatch(/install/i);
   expect(pauseLine("owner", "codex")).toBe(pauseLine("owner", "claude"));
 });
 
 it("tells a bot on the wrong login how to log in its account's way", () => {
   const line = (accountId: string, lane: "subscription" | "api_key") =>
-    pauseLine("credential_source", accountId, undefined, lane);
+    pauseLine("credential_source", accountId, lane);
   expect(line("claude", "subscription")).toContain("Claude account");
   expect(line("claude", "api_key")).toContain("Console account");
   expect(line("codex", "subscription")).toContain("sign in with ChatGPT");
@@ -150,4 +149,25 @@ it("says so when the target of a pending request is no longer active", () => {
   expect(supersede.title).toContain("adds this as new");
   expect(supersede.lines.map(({ text }) => text)).toEqual(["s"]);
   expect(forget.title).toContain("changes nothing");
+});
+
+it("lets onboarding through on any version or an unknown login, but not a real problem", () => {
+  const ready: EngineStatus = {
+    cliFound: true,
+    version: "9.9.9",
+    auth: "authenticated",
+    email: "owner@example.com",
+    pauseReason: null,
+  };
+  expect(engineFix(ready)).toBeUndefined();
+  expect(engineFix({ ...ready, version: null, auth: "unknown", email: null })).toBeUndefined();
+  expect(engineFix({ ...ready, pauseReason: "cli_version" })).toBeUndefined();
+  const fixFor = (status: Partial<EngineStatus>) => engineFix({ ...ready, ...status })?.label;
+  expect(fixFor({ cliFound: false, pauseReason: "cli_missing" })).toBe(
+    "Claude Code isn't installed",
+  );
+  expect(fixFor({ pauseReason: "cli_failed" })).toBe("Claude Code didn't start");
+  expect(fixFor({ auth: "unauthenticated", pauseReason: "auth_failed" })).toBe(
+    "Claude isn't logged in",
+  );
 });

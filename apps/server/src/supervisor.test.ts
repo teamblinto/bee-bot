@@ -86,10 +86,10 @@ const reply: TurnOutcome = { kind: "completed", text: "done" };
 
 const probeEngine = async () => ({
   cliFound: true,
-  versionOk: true,
-  loggedIn: true,
+  version: "2.1.318",
+  auth: "authenticated" as const,
+  email: null,
   pauseReason: null,
-  testedVersion: "2.1.318",
 });
 
 function connect(port: number, afterSeq = 0) {

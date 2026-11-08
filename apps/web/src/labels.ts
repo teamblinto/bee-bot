@@ -88,11 +88,11 @@ export function engineFix(engine: EngineStatus) {
         : undefined,
     };
   }
-  if (!engine.versionOk) {
+  if (engine.pauseReason === "cli_failed") {
     return {
-      label: "This Claude Code version is untested",
-      text: `Bee Bot is tested with version ${engine.testedVersion}. Install it from a terminal, then check again.`,
-      command: `claude install ${engine.testedVersion}`,
+      label: "Claude Code didn't start",
+      text: "Bee Bot found Claude Code, but it didn't answer. Run it from a terminal to see what's wrong, then check again.",
+      command: "claude --version",
     };
   }
   if (engine.pauseReason === "config_dir") {
@@ -109,7 +109,7 @@ export function engineFix(engine: EngineStatus) {
       command: "claude auth login",
     };
   }
-  if (!engine.loggedIn || engine.pauseReason === "auth_failed") {
+  if (engine.auth === "unauthenticated" || engine.pauseReason === "auth_failed") {
     return {
       label: "Claude isn't logged in",
       text: "Log in from your own terminal, then check again. Bee Bot never sees your credentials.",
@@ -119,14 +119,13 @@ export function engineFix(engine: EngineStatus) {
   return undefined;
 }
 
-export const testedCodexVersion = "0.167.0";
-
 // config_dir is Claude's alone.
 const codexPauseLines: Partial<Record<NonNullable<Bot["pauseReason"]>, string>> = {
   auth_failed:
     "Codex login couldn't be verified. Run codex login in your own terminal, then Resume.",
   cli_missing: "Codex CLI wasn't found. Install it, then Resume.",
-  cli_version: `This Codex version is untested. Install version ${testedCodexVersion}, then Resume.`,
+  cli_failed:
+    "Codex was found but didn't start. Run codex from a terminal to see what's wrong, then Resume.",
 };
 
 const credentialLines = {
@@ -147,18 +146,19 @@ const credentialLines = {
 export function pauseLine(
   reason: NonNullable<Bot["pauseReason"]>,
   accountId: string,
-  engine?: EngineStatus,
   lane: EngineLane = "subscription",
 ) {
   if (reason === "credential_source") {
     return credentialLines[accountId === "codex" ? "codex" : "claude"][lane];
   }
-  const version = engine ? `version ${engine.testedVersion}` : "the tested version";
   const lines = {
     owner: "Paused. Resume to send messages.",
     auth_failed: "Claude login couldn't be verified. Run claude auth login, then Resume.",
     cli_missing: "Claude Code wasn't found. Install it, then Resume.",
-    cli_version: `This Claude Code version is untested. Install ${version}, then Resume.`,
+    // Only a pause from an older Bee Bot: versions no longer block.
+    cli_version: "Paused by an old version check that no longer applies. Resume to continue.",
+    cli_failed:
+      "Claude Code was found but didn't start. Run claude from a terminal to see what's wrong, then Resume.",
     config_dir:
       "CLAUDE_CONFIG_DIR is set and Bee Bot ignores it, so Claude looks logged out. Run claude auth login, then Resume.",
   };

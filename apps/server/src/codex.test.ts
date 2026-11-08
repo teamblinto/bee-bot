@@ -22,7 +22,6 @@ import {
   createCodexRunTurn,
   probeCodex,
   staticCodexModels,
-  testedCodexVersion,
   unwrapShell,
 } from "./codex.ts";
 import {
@@ -336,14 +335,13 @@ describe("the credential gate", () => {
     expect(await outcome).toEqual({ kind: "completed", text: "noted" });
   });
 
-  it.each(["gate-version", "gate-no-version"])("%s pauses on the version", async (scenario) => {
-    expect(await turn(scenario).outcome).toEqual({
-      kind: "auth_failed",
-      pauseReason: "cli_version",
-    });
-    expect(calls()).not.toContain("account/read");
-    expect(calls()).not.toContain("turn/start");
-  });
+  it.each(["gate-version", "gate-no-version", "gate-no-account-read"])(
+    "%s still runs the turn",
+    async (scenario) => {
+      expect(await turn(scenario).outcome).toEqual({ kind: "completed", text: "noted" });
+      expect(calls()).toContain("turn/start");
+    },
+  );
 
   it("pauses on a missing CLI", async () => {
     const outcome = await createCodexRunTurn({ command: ["beebot-no-such-cli"], dataDir })({
@@ -370,7 +368,7 @@ describe("the credential gate", () => {
       const { outcome, order } = turn("gate-silent");
       await vi.waitFor(() => expect(calls()).toContain("initialize"));
       await vi.advanceTimersByTimeAsync(36_000);
-      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "auth_failed" });
+      expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "cli_failed" });
       expect(order).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -756,50 +754,67 @@ describe("the engine probe", () => {
     lane: EngineLane = "subscription",
   ) => probeCodex(fakeCommand(scenario), dataDir, lane, onModels);
 
-  it("passes and lists models with no thread or prompt, dropping the identity", async () => {
+  it("passes and lists models with no thread or prompt, keeping only the email", async () => {
     const models: unknown[] = [];
     const status = await probe("success", (list) => models.push(...list));
     expect(status).toEqual({
       cliFound: true,
-      versionOk: true,
-      loggedIn: true,
+      version: "0.167.0",
+      auth: "authenticated",
+      email: "owner@example.com",
       pauseReason: null,
-      testedVersion: testedCodexVersion,
     });
     expect(EngineStatus.parse(status)).toEqual(status);
     expect(models).toEqual([{ id: "gpt-6.1-sol", label: "GPT-6.1-Sol", efforts: ["low"] }]);
     expect(calls()).toEqual(["initialize", "initialized", "account/read", "model/list"]);
   });
 
-  it("passes an API-key login on the API-key lane", async () => {
-    expect(await probe("gate-api-key", undefined, "api_key")).toMatchObject({
-      loggedIn: true,
-      pauseReason: null,
-    });
+  it("passes an API-key login on the API-key lane, and never passes on the key", async () => {
+    const status = await probe("gate-api-key", undefined, "api_key");
+    expect(status).toMatchObject({ auth: "authenticated", email: null, pauseReason: null });
+    expect(JSON.stringify(status)).not.toContain("sk-planted");
   });
 
   it.each([
-    ["subscription", "gate-version", "cli_version", true, false],
-    ["subscription", "gate-logged-out", "auth_failed", true, true],
-    ["subscription", "gate-api-key", "credential_source", true, true],
-    ["api_key", "success", "credential_source", true, true],
+    ["gate-version", "9.9.9", "authenticated"],
+    ["gate-no-version", null, "authenticated"],
+    ["gate-no-account-read", "0.167.0", "unknown"],
+  ] as const)("passes %s, reading version %s", async (scenario, version, auth) => {
+    expect(await probe(scenario)).toMatchObject({ version, auth, pauseReason: null });
+  });
+
+  it.each([
+    ["subscription", "gate-logged-out", "auth_failed", "unauthenticated"],
+    ["subscription", "gate-api-key", "credential_source", "authenticated"],
+    ["api_key", "success", "credential_source", "authenticated"],
   ] as const)(
     "on the %s lane, %s pauses with %s and lists nothing",
-    async (lane, scenario, pauseReason, cliFound, versionOk) => {
+    async (lane, scenario, pauseReason, auth) => {
       const onModels = vi.fn();
       expect(await probe(scenario, onModels, lane)).toMatchObject({
         pauseReason,
-        cliFound,
-        versionOk,
-        loggedIn: false,
+        cliFound: true,
+        auth,
       });
       expect(onModels).not.toHaveBeenCalled();
     },
   );
 
+  it("tells a CLI that doesn't answer apart from a missing one", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const status = probe("gate-silent");
+      await vi.waitFor(() => expect(calls()).toContain("initialize"));
+      await vi.advanceTimersByTimeAsync(36_000);
+      expect(await status).toMatchObject({ cliFound: true, pauseReason: "cli_failed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the static list when the reply lists nothing", async () => {
     const onModels = vi.fn();
-    expect((await probe("model-list-empty", onModels)).loggedIn).toBe(true);
+    expect((await probe("model-list-empty", onModels)).pauseReason).toBeNull();
     expect(onModels).not.toHaveBeenCalled();
     expect(staticCodexModels.length).toBeGreaterThan(0);
   });
@@ -830,10 +845,10 @@ describe("through the real server, store and approvals", () => {
       store,
       probeEngine: async () => ({
         cliFound: true,
-        versionOk: true,
-        loggedIn: true,
+        version: "2.1.318",
+        auth: "authenticated" as const,
+        email: null,
         pauseReason: null,
-        testedVersion: testedCodexVersion,
       }),
       runTurn: createCodexRunTurn({ command: fakeCommand(scenario), dataDir }),
     });

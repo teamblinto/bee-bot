@@ -14,10 +14,12 @@ import {
 import { z } from "zod";
 
 import {
+  cliVersion,
   type EngineChoice,
   killTree,
   personaText,
   type RunTurn,
+  spawnMissing,
   type Steer,
   type ThinkingState,
   toolDetail,
@@ -36,7 +38,6 @@ import {
 } from "./usage.ts";
 import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
-export const testedClaudeVersion = "2.1.318";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
 const settingSources = "";
 const toolList = "Read,Write,Edit,Glob,Grep,Bash";
@@ -227,7 +228,6 @@ const Frame = z.object({
       request_id: loose,
       response: z
         .object({
-          claude_code_version: loose,
           models: loose,
           account: z
             .object({
@@ -279,17 +279,18 @@ function resolvedLane({ firstParty, plan, apiKeySource, token }: Credential) {
   return plan && (token ?? "claude.ai") === "claude.ai" ? "subscription" : undefined;
 }
 
+// The CLI's version is never checked. A CLI that doesn't report its login here can't have its lane
+// checked, so the turn goes ahead and a failed login still surfaces from the result.
 function gateRejection(frame: Frame, lane: EngineLane) {
-  const reply = frame.response?.response;
-  if (reply?.claude_code_version !== testedClaudeVersion) {
-    return "cli_version";
+  const account = frame.response?.response?.account;
+  if (!account) {
+    return undefined;
   }
-  const account = reply.account;
   return credentialPause(lane, {
-    firstParty: account?.apiProvider === "firstParty",
-    plan: Boolean(account?.subscriptionType),
-    apiKeySource: account?.apiKeySource,
-    token: account?.tokenSource,
+    firstParty: account.apiProvider === "firstParty",
+    plan: Boolean(account.subscriptionType),
+    apiKeySource: account.apiKeySource,
+    token: account.tokenSource,
   });
 }
 
@@ -846,10 +847,7 @@ export function probeUsage(
         return;
       }
       if (frame.response?.request_id === "init-1") {
-        const rejection = gateRejection(frame, "subscription");
-        if (rejection === "cli_version") {
-          finish(unavailableProbe("probeFailed", "This Claude Code version is untested."));
-        } else if (rejection) {
+        if (gateRejection(frame, "subscription")) {
           finish(unavailableProbe("unsupported"));
         } else {
           const models = modelsFromInitialize(frame.response.response?.models);
@@ -882,21 +880,31 @@ const AuthStatus = z.object({
   authMethod: loose,
   apiProvider: loose,
   apiKeySource: loose,
+  email: loose,
 });
 
-// Holds the owner's email and org, so nothing from either command may be logged or stored.
+// A logged-out CLI exits non-zero but still prints the JSON. Undefined when this CLI version has no
+// `auth status`, or answers in a shape it doesn't know.
+async function readAuthStatus(run: (...args: string[]) => Promise<{ stdout: string }>) {
+  const stdout = await run("auth", "status", "--json").then(
+    (result) => result.stdout,
+    (error: { stdout?: unknown }) => String(error.stdout ?? ""),
+  );
+  try {
+    const auth = AuthStatus.safeParse(JSON.parse(stdout)).data;
+    return auth?.loggedIn === undefined ? undefined : auth;
+  } catch {
+    return undefined;
+  }
+}
+
+// Holds the owner's org, so nothing from either command may be logged or stored. The email goes
+// only to the owner's screen.
 export async function probeEngine(
   command: readonly string[],
   cwd: string,
   lane: EngineLane,
 ): Promise<EngineStatus> {
-  const status = (pauseReason: PauseReason | null, cliFound = true, versionOk = true) => ({
-    cliFound,
-    versionOk,
-    loggedIn: pauseReason === null,
-    pauseReason,
-    testedVersion: testedClaudeVersion,
-  });
   const [file = "", ...prefix] = command;
   const run = (...args: string[]) =>
     execFile(file, [...prefix, ...args], {
@@ -905,25 +913,32 @@ export async function probeEngine(
       timeout: gateTimeoutMs,
       windowsHide: true,
     });
-  let version: string;
+  const unchecked = { version: null, auth: "unknown", email: null } as const;
+  let version: string | null;
   try {
-    version = (await run("--version")).stdout;
-  } catch {
-    return status("cli_missing", false, false);
+    version = cliVersion((await run("--version")).stdout);
+  } catch (error) {
+    return spawnMissing(error)
+      ? { ...unchecked, cliFound: false, pauseReason: "cli_missing" }
+      : { ...unchecked, cliFound: true, pauseReason: "cli_failed" };
   }
-  if (version.trim().split(/\s/)[0] !== testedClaudeVersion) {
-    return status("cli_version", true, false);
+  const auth = await readAuthStatus(run);
+  if (!auth) {
+    return { ...unchecked, cliFound: true, version, pauseReason: null };
   }
-  try {
-    const auth = AuthStatus.parse(JSON.parse((await run("auth", "status", "--json")).stdout));
-    const pause = credentialPause(lane, {
+  const pauseReason =
+    credentialPause(lane, {
       firstParty: auth.apiProvider === "firstParty",
       plan: auth.authMethod === "claude.ai",
       apiKeySource: auth.apiKeySource,
       token: auth.loggedIn === false ? "none" : auth.authMethod,
-    });
-    return status(pause ?? null);
-  } catch {
-    return status(authPause());
-  }
+    }) ?? null;
+  const signedIn = pauseReason === null || pauseReason === "credential_source";
+  return {
+    cliFound: true,
+    version,
+    auth: signedIn ? "authenticated" : "unauthenticated",
+    email: signedIn && typeof auth.email === "string" ? auth.email : null,
+    pauseReason,
+  };
 }

@@ -204,7 +204,6 @@ describe("probeUsage", () => {
   });
 
   it("applies the turn's gate before asking", async () => {
-    expect(await probe("gate-version")).toMatchObject({ unavailable: { reason: "probeFailed" } });
     expect(await probe("gate-api-key")).toMatchObject({ unavailable: { reason: "unsupported" } });
     expect(cliLog().flatMap((entry) => entry.control ?? [])).not.toContain("get_usage");
   });
@@ -582,13 +581,14 @@ describe("the credential gate", () => {
     await vi.waitFor(() => expect(isAlive(spawns()[0]?.pid ?? 0)).toBe(false));
   }, 15_000);
 
-  it("pauses on a CLI that changed version since startup", async () => {
-    expect(await turn("gate-version").outcome).toEqual({
-      kind: "auth_failed",
-      pauseReason: "cli_version",
-    });
-    expect(prompts()).toEqual([]);
-  }, 15_000);
+  it.each(["gate-version", "gate-no-account"])(
+    "runs on %s: no CLI version blocks a turn",
+    async (scenario) => {
+      expect(await turn(scenario).outcome).toMatchObject({ kind: "completed" });
+      expect(prompts()).toEqual([prompt]);
+    },
+    15_000,
+  );
 
   it("pauses on a missing CLI", async () => {
     const outcome = await createClaudeRunTurn({ command: ["beebot-no-such-cli"], dataDir })({
@@ -798,47 +798,66 @@ describe("stopping", () => {
 });
 
 describe("the engine probe", () => {
-  it("passes on the tested version and a subscription login, and drops the identity", async () => {
+  it("passes a subscription login, keeping the email and dropping the org", async () => {
     const status = await probeEngine(fakeCommand("success"), dataDir, "subscription");
     expect(status).toEqual({
       cliFound: true,
-      versionOk: true,
-      loggedIn: true,
+      version: "2.1.318",
+      auth: "authenticated",
+      email: "owner@example.com",
       pauseReason: null,
-      testedVersion: "2.1.318",
     });
     expect(EngineStatus.parse(status)).toEqual(status);
+    expect(JSON.stringify(status)).not.toContain("Owner Org");
   });
 
   it("passes a Console login on the API-key lane", async () => {
     const status = await probeEngine(fakeCommand("console-status"), dataDir, "api_key");
-    expect(status).toMatchObject({ loggedIn: true, pauseReason: null });
+    expect(status).toMatchObject({ auth: "authenticated", pauseReason: null });
+  });
+
+  it("passes any version, reading it only for display", async () => {
+    const status = await probeEngine(fakeCommand("gate-version"), dataDir, "subscription");
+    expect(status).toMatchObject({ version: "9.9.9", auth: "authenticated", pauseReason: null });
+  });
+
+  it("passes a CLI too old to report its login, leaving the check to the run", async () => {
+    const status = await probeEngine(fakeCommand("gate-no-account"), dataDir, "subscription");
+    expect(status).toEqual({
+      cliFound: true,
+      version: "1.0.0",
+      auth: "unknown",
+      email: null,
+      pauseReason: null,
+    });
   });
 
   it.each([
-    ["subscription", "gate-version", "cli_version", true, false],
-    ["subscription", "logged-out-status", "auth_failed", true, true],
-    ["subscription", "api-key-status", "credential_source", true, true],
-    ["subscription", "console-status", "credential_source", true, true],
-    ["api_key", "success", "credential_source", true, true],
-    ["api_key", "api-key-status", "credential_source", true, true],
-    ["api_key", "logged-out-status", "auth_failed", true, true],
-  ] as const)(
-    "on the %s lane, %s pauses with %s",
-    async (lane, scenario, pauseReason, cliFound, versionOk) => {
-      expect(await probeEngine(fakeCommand(scenario), dataDir, lane)).toMatchObject({
-        pauseReason,
-        cliFound,
-        versionOk,
-        loggedIn: false,
-      });
-    },
-  );
+    ["subscription", "logged-out-status", "auth_failed", "unauthenticated"],
+    ["subscription", "api-key-status", "credential_source", "authenticated"],
+    ["subscription", "console-status", "credential_source", "authenticated"],
+    ["api_key", "success", "credential_source", "authenticated"],
+    ["api_key", "api-key-status", "credential_source", "authenticated"],
+    ["api_key", "logged-out-status", "auth_failed", "unauthenticated"],
+  ] as const)("on the %s lane, %s pauses with %s", async (lane, scenario, pauseReason, auth) => {
+    expect(await probeEngine(fakeCommand(scenario), dataDir, lane)).toMatchObject({
+      pauseReason,
+      cliFound: true,
+      auth,
+    });
+  });
 
   it("pauses on a missing CLI", async () => {
     expect(await probeEngine(["beebot-no-such-cli"], dataDir, "subscription")).toMatchObject({
       pauseReason: "cli_missing",
       cliFound: false,
+    });
+  });
+
+  it("tells a CLI that fails apart from a missing one", async () => {
+    expect(await probeEngine(fakeCommand("broken"), dataDir, "subscription")).toMatchObject({
+      pauseReason: "cli_failed",
+      cliFound: true,
     });
   });
 

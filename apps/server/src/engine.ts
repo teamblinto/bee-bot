@@ -60,6 +60,14 @@ export function killTree(pid: number) {
   }
 }
 
+// Reads `2.1.319 (Claude Code)`, `codex-cli 0.167.0` and `bee/0.167.0 (Windows ...)` alike.
+export const cliVersion = (text: string) =>
+  /\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/.exec(text)?.[0] ?? null;
+
+// Only a binary that isn't there. Anything else means the CLI exists but failed.
+export const spawnMissing = (error: unknown) =>
+  (error as { code?: unknown } | undefined)?.code === "ENOENT";
+
 export type ToolStart = { id: string; name: string; detail: string | null };
 export type ThinkingState = { active: boolean; text: string };
 

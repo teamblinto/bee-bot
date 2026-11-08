@@ -10,8 +10,6 @@ import { type Bot, type ChatState, type Command, protocolVersion } from "@beebot
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
-import { openEventStore } from "./store.ts";
-
 // The real `beebotd` on plain Node, driving the stand-in Claude CLI as a child process.
 const entry = NodePath.join(import.meta.dirname, "index.ts");
 const fakeCli = NodePath.join(import.meta.dirname, "fixtures", "claude", "fake-claude.mjs");
@@ -166,23 +164,8 @@ describe("the daemon with a Claude login", () => {
     for (const text of [live, ...files, first.output(), second.output()]) {
       expect(text).not.toContain(secret);
       expect(text).not.toContain(settingsDir);
+      // The startup probe reads it from `auth status`.
+      expect(text).not.toContain("owner@example.com");
     }
   }, 60_000);
-
-  it("pauses a Claude bot when the CLI is outside the tested version", async () => {
-    const seeded = openEventStore(dataDir);
-    seeded.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
-    seeded.close();
-    const daemon = await startDaemon("gate-version");
-    await vi.waitFor(
-      async () =>
-        expect((await daemon.state()).bots[0]).toMatchObject({
-          status: "paused",
-          pauseReason: "cli_version",
-        }),
-      { timeout: 10_000 },
-    );
-    expect(daemon.output()).toContain("Claude bots paused: cli_version");
-    await daemon.stop();
-  }, 30_000);
 });
