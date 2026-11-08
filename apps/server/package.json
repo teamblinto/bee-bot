@@ -9,6 +9,7 @@
     "test": "vp test run"
   },
   "devDependencies": {
+    "@beebot/boxd": "workspace:*",
     "@beebot/contracts": "workspace:*",
     "@types/node": "catalog:",
     "@types/ws": "catalog:",

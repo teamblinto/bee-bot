@@ -1,0 +1,168 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import { createBoxd } from "./boxd.ts";
+import type { Egress } from "./egress.ts";
+import { boxNames } from "./policy.ts";
+import { Kind, type Response, boxToken, frameReader, jsonFrame, frame } from "./protocol.ts";
+import { createFakePodman, testRunSpec } from "./testing.ts";
+
+const secret = Buffer.alloc(32, 3);
+const box = { prefix: "beebot", owner: "env-1", botId: "bot-1" };
+const names = boxNames(box);
+
+function harness(fake = createFakePodman(), egress?: Egress) {
+  const responses = new Map<number, (response: Response) => void>();
+  const output: { channel: number; kind: number; payload: Buffer }[] = [];
+  const read = frameReader((channel, kind, payload) => {
+    if (channel === 0) {
+      const response = JSON.parse(String(payload)) as Response;
+      responses.get(response.id)?.(response);
+    } else {
+      output.push({ channel, kind, payload: Buffer.from(payload) });
+    }
+  });
+  const boxd = createBoxd({
+    podman: fake.podman,
+    egress: egress ?? { start: async () => {}, attach: async () => ({ dns: null, env: {} }) },
+    secret,
+    owner: box.owner,
+    prefix: box.prefix,
+    labels: { "beebot-dev": "1" },
+    runSpec: testRunSpec,
+    seccomp: "/opt/boxd/seccomp-chromium.json",
+    send: read,
+  });
+  let nextId = 1;
+  const call = (verb: string, extra: object = {}, token = boxToken(secret, box.botId)) =>
+    new Promise<Response>((resolve) => {
+      const id = nextId++;
+      responses.set(id, resolve);
+      boxd.onFrame(
+        0,
+        Kind.json,
+        jsonFrame({ id, verb, botId: box.botId, token, ...extra }).subarray(9),
+      );
+    });
+  return { boxd, call, output, fake };
+}
+
+describe("boxd", () => {
+  it("refuses a request without this box's token", async () => {
+    const { call, fake } = harness();
+    expect(await call("create", {}, boxToken(secret, "bot-2"))).toMatchObject({
+      ok: false,
+      error: "bad box token",
+    });
+    expect(await call("create", {}, boxToken(Buffer.alloc(32, 4), box.botId))).toMatchObject({
+      ok: false,
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("creates two containers on two isolated networks with separate volumes", async () => {
+    const egress: Egress = {
+      start: async () => {},
+      attach: async ({ role }) => ({
+        dns: `10.0.${role === "engine" ? 1 : 2}.2`,
+        env: { HTTPS_PROXY: "http://proxy:3128" },
+      }),
+    };
+    const { call, fake } = harness(createFakePodman(), egress);
+    expect(await call("create")).toMatchObject({ ok: true });
+    expect(await call("snapshot")).toMatchObject({ ok: true, state: "stopped" });
+    expect([...fake.resources.network.keys()]).toEqual([
+      names.network.engine,
+      names.network.browser,
+    ]);
+    expect([...fake.resources.volume.keys()]).toEqual([names.volume.engine, names.volume.browser]);
+    for (const network of fake.resources.network.values()) {
+      expect(network.args).toContain("isolate=true");
+      expect(network.labels["beebot-dev"]).toBe("1");
+    }
+    const engine = fake.resources.container.get(names.container.engine)!;
+    expect(engine.args.join(" ")).toContain("--dns 10.0.1.2");
+    const engineCreate = fake.calls.find(
+      (entry) => entry.args.includes(names.container.engine) && entry.args[0] === "create",
+    );
+    expect(engineCreate?.env.HTTPS_PROXY).toBe("http://proxy:3128");
+    expect(await call("create")).toMatchObject({ ok: false, error: "box bot-1 is stopped" });
+  });
+
+  it("rolls back a half-made box", async () => {
+    const { call, fake } = harness(
+      createFakePodman({ failCreate: (name) => name.endsWith("-browser") }),
+    );
+    expect(await call("create")).toMatchObject({ ok: false, error: "Error: image not known" });
+    expect(fake.resources.container.size).toBe(0);
+    expect(await call("snapshot")).toMatchObject({ state: "absent" });
+  });
+
+  it("will not touch containers whose labels it did not sign", async () => {
+    const { call, fake } = harness();
+    for (const name of Object.values(names.container)) {
+      fake.resources.container.set(name, {
+        labels: {
+          "beebot.owner": box.owner,
+          "beebot.bot": box.botId,
+          "beebot.mac": "0".repeat(64),
+        },
+        args: [],
+        running: false,
+      });
+    }
+    expect(await call("start")).toMatchObject({
+      ok: false,
+      error: "box bot-1 is failed: container not owned by this boxd",
+    });
+    expect(fake.resources.container.get(names.container.engine)?.running).toBe(false);
+  });
+
+  it("refuses an existing volume it does not own", async () => {
+    const { call, fake } = harness();
+    fake.resources.volume.set(names.volume.engine, { labels: {}, args: [], running: false });
+    expect(await call("create")).toMatchObject({
+      ok: false,
+      error: `volume ${names.volume.engine} is not owned by this boxd`,
+    });
+  });
+
+  it("streams an exec and kills it when the attach drops", async () => {
+    const { call, output, boxd } = harness();
+    await call("create");
+    expect(await call("exec", { exec: { argv: ["x"], env: {}, channel: 1 } })).toMatchObject({
+      ok: false,
+      error: "box bot-1 is stopped",
+    });
+    await call("start");
+    const exec = (channel: number, script: string) =>
+      call("exec", {
+        exec: {
+          argv: [process.execPath, "-e", script],
+          env: { PATH: process.env.PATH ?? "" },
+          channel,
+        },
+      });
+    expect(await exec(1, "process.stdin.pipe(process.stdout)")).toMatchObject({ ok: true });
+    boxd.onFrame(1, Kind.data, frame(1, Kind.data, "hi").subarray(9));
+    boxd.onFrame(1, Kind.eof, Buffer.alloc(0));
+    expect(await exec(2, "setInterval(() => {}, 1000)")).toMatchObject({ ok: true });
+    boxd.onFrame(2, Kind.kill, Buffer.alloc(0));
+    await expect.poll(() => output.filter((entry) => entry.kind === Kind.exit).length).toBe(2);
+    const of = (channel: number, kind: number) =>
+      output.filter((entry) => entry.channel === channel && entry.kind === kind);
+    expect(String(of(1, Kind.data)[0]?.payload)).toBe("hi");
+    expect(JSON.parse(String(of(1, Kind.exit)[0]?.payload))).toBe(0);
+    expect(JSON.parse(String(of(2, Kind.exit)[0]?.payload))).not.toBe(0);
+  });
+
+  it("kills every attached turn when the server goes away", async () => {
+    const { call, output, boxd } = harness();
+    await call("create");
+    await call("start");
+    await call("exec", {
+      exec: { argv: [process.execPath, "-e", "setInterval(() => {}, 1000)"], env: {}, channel: 1 },
+    });
+    await boxd.close();
+    await expect.poll(() => output.some((entry) => entry.kind === Kind.exit)).toBe(true);
+  });
+});

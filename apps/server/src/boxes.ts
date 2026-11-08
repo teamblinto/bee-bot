@@ -1,8 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import { BoxStatus } from "@beebot/contracts";
+import { type BoxState, BoxStatus } from "@beebot/contracts";
 import { z } from "zod";
 
+import type { BoxRuntime } from "./boxRuntime.ts";
 import type { StoreTx } from "./store.ts";
 
 // The last state the box runtime reported for each bot. A bot with no row has no box.
@@ -24,5 +25,35 @@ export function openBoxes(db: DatabaseSync, { transaction, emit }: StoreTx) {
         return box;
       }),
     listBoxes: () => z.array(BoxStatus).parse(selectAll.all()),
+  };
+}
+
+// Records every lifecycle step in `boxes`, so clients see a box come up, stop or fail.
+export function recordingBoxRuntime(
+  runtime: BoxRuntime,
+  setBox: (botId: string, state: BoxState, reason?: string | null) => unknown,
+): BoxRuntime {
+  async function step(botId: string, during: BoxState | null, work: () => Promise<void>) {
+    if (during !== null) {
+      setBox(botId, during);
+    }
+    try {
+      await work();
+    } catch (error) {
+      const state = await runtime.snapshot(botId).catch((): BoxState => "failed");
+      setBox(
+        botId,
+        state === "absent" ? "failed" : state,
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    }
+    setBox(botId, await runtime.snapshot(botId));
+  }
+  return {
+    ...runtime,
+    create: (botId) => step(botId, "creating", () => runtime.create(botId)),
+    start: (botId) => step(botId, "starting", () => runtime.start(botId)),
+    stop: (botId) => step(botId, null, () => runtime.stop(botId)),
   };
 }
