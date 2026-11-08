@@ -1,3 +1,5 @@
+import * as NodeFs from "node:fs";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -26,13 +28,42 @@ const spec = (role: "engine" | "browser", egress: EgressAttachment = { dns: null
   });
 const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
 
+const imageSpec = NodeFs.readFileSync(
+  new URL("../../../images/box/runSpec.json", import.meta.url),
+  "utf8",
+);
+
 describe("run spec", () => {
+  it("reads the image's own spec", () => {
+    const parsed = parseRunSpec(imageSpec);
+    expect(parsed.engine).toMatchObject({
+      user: "10001:10001",
+      home: "/home/bee",
+      volumes: { home: "/home/bee", workspace: "/work" },
+      seccomp: false,
+    });
+    expect(parsed.browser).toMatchObject({
+      home: "/browser",
+      hostname: "bee-browser",
+      seccomp: true,
+    });
+  });
+
   it("refuses root and malformed users", () => {
-    const text = (user: string) =>
-      JSON.stringify({ ...testRunSpec, browser: { ...testRunSpec.browser, user } });
+    const text = (user: string) => JSON.stringify({ ...JSON.parse(imageSpec), user });
     expect(() => parseRunSpec(text("0:0"))).toThrow("non-root");
     expect(() => parseRunSpec(text("root"))).toThrow("non-root");
-    expect(parseRunSpec(text("10001:10001")).browser.user).toBe("10001:10001");
+    expect(parseRunSpec(text("10002:10002")).browser.user).toBe("10002:10002");
+  });
+
+  it.each([
+    ["capDrop", "chown"],
+    ["readOnly", false],
+    ["securityOpt", ["no-new-privileges", "label=disable"]],
+  ])("refuses a spec that weakens %s", (key, value) => {
+    const json = JSON.parse(imageSpec);
+    json.engine[key] = value;
+    expect(() => parseRunSpec(JSON.stringify(json))).toThrow("must drop all caps");
   });
 });
 
@@ -53,7 +84,7 @@ describe("container specs", () => {
   it("gives the sidecar the Chromium seccomp profile and a fixed hostname", () => {
     const browser = createArgs(spec("browser"));
     expect(browser).toContain("seccomp=/opt/boxd/seccomp-chromium.json");
-    expect(flag(browser, "--hostname")).toBe("browser");
+    expect(flag(browser, "--hostname")).toBe("bee-browser");
     expect(createArgs(spec("engine")).some((arg) => arg.startsWith("seccomp="))).toBe(false);
   });
 
@@ -63,8 +94,9 @@ describe("container specs", () => {
     const browser = createArgs(spec("browser"));
     expect(flag(engine, "--network")).toBe(names.network.engine);
     expect(flag(browser, "--network")).toBe(names.network.browser);
-    expect(engine.join(" ")).not.toContain(names.volume.browser);
-    expect(browser.join(" ")).not.toContain(names.volume.engine);
+    expect(engine).toContain(`${names.volume("engine", "workspace")}:/work`);
+    expect(engine.join(" ")).not.toContain(names.volume("browser", "profile"));
+    expect(browser.join(" ")).not.toContain(names.volume("engine", "home"));
   });
 
   it("isolates every network and gives it no gateway or resolver", () => {
@@ -81,6 +113,22 @@ describe("container specs", () => {
     expect(flag(args, "--dns")).toBe("10.0.0.2");
     expect(args.join(" ")).not.toContain("http://10.0.0.2:3128");
     expect(engine.env.HTTPS_PROXY).toBe("http://10.0.0.2:3128");
+  });
+
+  it("binds host directories without exec or device files", () => {
+    const engine = createArgs(
+      containerSpec("engine", {
+        box,
+        secret,
+        runSpec: testRunSpec,
+        seccomp: "/s.json",
+        egress: { dns: null, env: {}, hosts: { "proxy.beebot": "10.0.0.2" } },
+        labels: {},
+        binds: [{ source: "/state/bots/bot-1/box", target: "/run/bee/bot", readOnly: true }],
+      }),
+    );
+    expect(engine).toContain("/state/bots/bot-1/box:/run/bee/bot:ro,nosuid,nodev,noexec");
+    expect(flag(engine, "--add-host")).toBe("proxy.beebot:10.0.0.2");
   });
 
   it("has no way out without an egress proxy", () => {

@@ -39,11 +39,13 @@ async function recorder(
   return { seen, port: (server.address() as NodeNet.AddressInfo).port };
 }
 
-async function startProxy(vendorPort: number) {
-  const control =
-    process.platform === "win32"
-      ? `\\\\.\\pipe\\beebot-egress-test-${NodeCrypto.randomUUID()}`
-      : NodePath.join(NodeOS.tmpdir(), `beebot-egress-${NodeCrypto.randomUUID()}.sock`);
+const socketPath = (name: string) =>
+  process.platform === "win32"
+    ? `\\\\.\\pipe\\beebot-${name}-${NodeCrypto.randomUUID()}`
+    : NodePath.join(NodeOS.tmpdir(), `beebot-${name}-${NodeCrypto.randomUUID()}.sock`);
+
+async function startProxy(vendorPort: number, bee?: string) {
+  const control = socketPath("egress-test");
   const logs: LogLine[] = [];
   const egress = await startEgress(
     {
@@ -52,6 +54,7 @@ async function startProxy(vendorPort: number) {
       proxyPort: 0,
       apiPort: 0,
       control,
+      ...(bee !== undefined && { bee }),
       testUpstreams: { anthropic: `http://127.0.0.1:${vendorPort}` },
     },
     (line) => logs.push(line),
@@ -136,6 +139,38 @@ async function boxDns(port: number, name: string) {
 }
 
 describe("egress proxy on real sockets", () => {
+  it("carries /bee/* to beebotd for a known box, with its own token and no key", async () => {
+    const vendor = await recorder((_request, response) => response.end("vendor"));
+    const bee = socketPath("bee-test");
+    const seen: Seen[] = [];
+    const beebotd = NodeHttp.createServer((request, response) => {
+      seen.push({ url: request.url ?? "", headers: request.headers });
+      response.end("bee-ok");
+    });
+    beebotd.listen(bee);
+    await once(beebotd, "listening");
+    cleanups.push(() => new Promise((resolve) => beebotd.close(resolve)));
+    const { control, ports } = await startProxy(vendor.port, bee);
+    const auth = { authorization: "Bearer box-token" };
+
+    expect((await boxRequest(ports.api, "/bee/mcp", auth)).status).toBe(403);
+    const client = await controlClient(control);
+    await client.send({ type: "bind", address: "127.0.0.1", botId: "b1" });
+    expect(await boxRequest(ports.api, "/bee//evil", auth)).toMatchObject({ status: 400 });
+    expect(await boxRequest(ports.api, "/bee/mcp?x=1", auth)).toMatchObject({
+      status: 200,
+      body: "bee-ok",
+    });
+    expect(seen).toEqual([
+      expect.objectContaining({
+        url: "/mcp?x=1",
+        headers: expect.objectContaining({ authorization: "Bearer box-token" }),
+      }),
+    ]);
+    expect(seen[0]?.headers["x-api-key"]).toBeUndefined();
+    expect(vendor.seen).toEqual([]);
+  });
+
   it("sends the API key only to the vendor's API host, whatever the box asks", async () => {
     const attacker = await recorder((_request, response) => response.end("stolen"));
     const vendor = await recorder((request, response) => {

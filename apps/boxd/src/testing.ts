@@ -1,4 +1,7 @@
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFs from "node:fs";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
 import { Duplex } from "node:stream";
 
 import { type BoxdOptions, createBoxd } from "./boxd.ts";
@@ -7,20 +10,39 @@ import type { Child, Podman, Result } from "./podman.ts";
 import type { RunSpec } from "./policy.ts";
 import { frameReader, jsonFrame } from "./protocol.ts";
 
+const limits = {
+  tmpfs: ["/tmp:rw,size=256m,mode=1777"],
+  shm: "64m",
+  memory: "2g",
+  memorySwap: "2g",
+  cpus: "2",
+  pids: 512,
+};
+
 export const testRunSpec: RunSpec = {
   engine: {
+    ...limits,
     image: "localhost/box@sha256:00",
     user: "10001:10001",
-    home: "/home/engine",
+    home: "/home/bee",
     command: ["sleep", "infinity"],
+    hostname: "engine",
+    seccomp: false,
+    volumes: { home: "/home/bee", workspace: "/work" },
   },
   browser: {
+    ...limits,
     image: "localhost/box@sha256:00",
     user: "10001:10001",
-    home: "/home/browser",
+    home: "/browser",
     command: ["chromium"],
+    hostname: "bee-browser",
+    seccomp: true,
+    volumes: { profile: "/browser" },
   },
 };
+
+export const testStateDir = () => NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "boxd-state-"));
 
 // boxd in this process behind a byte stream, as the server sees it over stdio. The bootstrap
 // frame is read like main.ts does, minus setup.
@@ -53,6 +75,7 @@ export function serveInProcess(podman: Podman, overrides: Partial<BoxdOptions> =
       labels: bootstrap.labels,
       runSpec: testRunSpec,
       seccomp: "/opt/boxd/seccomp-chromium.json",
+      stateDir: testStateDir(),
       send,
       ...overrides,
     });
@@ -133,6 +156,9 @@ export function createFakePodman({ failCreate }: { failCreate?: (name: string) =
         for (const name of args) {
           resources.container.delete(name);
         }
+        return ok();
+      }
+      if (verb === "unshare") {
         return ok();
       }
       if (verb === "ps") {

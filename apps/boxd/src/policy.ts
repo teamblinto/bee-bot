@@ -5,50 +5,118 @@ import { labelMac, sameHex } from "./protocol.ts";
 export type Role = "engine" | "browser";
 export const roles: Role[] = ["engine", "browser"];
 
-// What the image says about itself (images/box/runSpec.json). Everything about isolation is
-// boxd's own policy below and never comes from this file.
-export type RoleImage = { image: string; user: string; home: string; command: string[] };
+// What the image says about itself (images/box/runSpec.json): who runs, where its volumes go and
+// the run flags it was tested with. boxd refuses a spec that drops an isolation flag, and adds
+// the network, DNS, mounts and ownership itself.
+export type RoleImage = {
+  image: string;
+  user: string;
+  home: string;
+  command: string[];
+  hostname: string;
+  seccomp: boolean;
+  tmpfs: string[];
+  shm: string;
+  memory: string;
+  memorySwap: string;
+  cpus: string;
+  pids: number;
+  // Logical volume name to its mount point.
+  volumes: Record<string, string>;
+};
 export type RunSpec = Record<Role, RoleImage>;
+
+const absolute = /^\/[A-Za-z0-9._/-]+$/;
 
 export function parseRunSpec(text: string): RunSpec {
   const json: unknown = JSON.parse(text);
+  const top = (key: string) =>
+    json && typeof json === "object" ? Reflect.get(json, key) : undefined;
+  const image = top("image");
+  const user = top("user");
+  if (typeof image !== "string" || image === "") {
+    throw new Error("runSpec image missing");
+  }
+  const uid = typeof user === "string" ? /^(\d+):(\d+)$/.exec(user)?.[1] : undefined;
+  if (uid === undefined || Number(uid) === 0) {
+    throw new Error("runSpec user must be a numeric non-root uid:gid");
+  }
   const role = (name: Role): RoleImage => {
-    const value = json && typeof json === "object" ? Reflect.get(json, name) : undefined;
+    const value = top(name);
     const field = (key: string) =>
       value && typeof value === "object" ? Reflect.get(value, key) : undefined;
-    const image = field("image");
-    const user = field("user");
-    const home = field("home");
-    const command = field("command");
-    if (typeof image !== "string" || image === "") {
-      throw new Error(`runSpec ${name}.image missing`);
+    const strings = (key: string) => {
+      const list = field(key);
+      if (!Array.isArray(list) || !list.every((part) => typeof part === "string")) {
+        throw new Error(`runSpec ${name}.${key} must be a list of strings`);
+      }
+      return list as string[];
+    };
+    const size = (key: string) => {
+      const item = field(key);
+      if (typeof item !== "string" || !/^[0-9]+[kmg]?$/.test(item)) {
+        throw new Error(`runSpec ${name}.${key} must be a size`);
+      }
+      return item;
+    };
+    const positive = (key: string) => {
+      const item = field(key);
+      if (typeof item !== "number" || !(item > 0)) {
+        throw new Error(`runSpec ${name}.${key} must be a positive number`);
+      }
+      return item;
+    };
+    if (
+      field("capDrop") !== "all" ||
+      field("readOnly") !== true ||
+      strings("securityOpt").join(",") !== "no-new-privileges"
+    ) {
+      throw new Error(`runSpec ${name} must drop all caps, set no-new-privileges and be read-only`);
     }
-    const uid = typeof user === "string" ? /^(\d+):(\d+)$/.exec(user)?.[1] : undefined;
-    if (uid === undefined || Number(uid) === 0) {
-      throw new Error(`runSpec ${name}.user must be a numeric non-root uid:gid`);
+    const volumes = field("volumes");
+    if (
+      volumes === null ||
+      typeof volumes !== "object" ||
+      !Object.entries(volumes).every(
+        ([key, target]) =>
+          /^[a-z]+$/.test(key) && typeof target === "string" && absolute.test(target),
+      )
+    ) {
+      throw new Error(`runSpec ${name}.volumes must map names to absolute paths`);
     }
-    if (typeof home !== "string" || !/^\/[A-Za-z0-9._/-]+$/.test(home)) {
-      throw new Error(`runSpec ${name}.home must be an absolute path`);
+    const mounts = volumes as Record<string, string>;
+    const home = mounts.home ?? mounts.profile;
+    if (home === undefined) {
+      throw new Error(`runSpec ${name} needs a home or profile volume`);
     }
-    if (!Array.isArray(command) || !command.every((part) => typeof part === "string")) {
-      throw new Error(`runSpec ${name}.command must be a list of strings`);
+    const hostname = field("hostname") ?? name;
+    if (typeof hostname !== "string" || !/^[a-z0-9-]{1,63}$/.test(hostname)) {
+      throw new Error(`runSpec ${name}.hostname is malformed`);
     }
-    return { image, user: user as string, home, command: command as string[] };
+    const tmpfs = strings("tmpfs");
+    if (!tmpfs.every((mount) => absolute.test(mount.split(":")[0] ?? ""))) {
+      throw new Error(`runSpec ${name}.tmpfs must mount absolute paths`);
+    }
+    return {
+      image,
+      user: user as string,
+      home,
+      command: strings("command"),
+      // Chromium's SingletonLock stores the hostname, so a recreated sidecar on a kept profile
+      // volume refuses to start unless the hostname is fixed (S6).
+      hostname,
+      seccomp: field("seccompProfile") !== undefined,
+      tmpfs,
+      shm: size("shmSize"),
+      memory: size("memory"),
+      memorySwap: size("memorySwap"),
+      cpus: String(positive("cpus")),
+      pids: positive("pidsLimit"),
+      volumes: mounts,
+    };
   };
   return { engine: role("engine"), browser: role("browser") };
 }
-
-export const limits = {
-  engine: { memory: "2g", cpus: "2", pids: 512, tmp: "256m", shm: null },
-  browser: { memory: "1g", cpus: "2", pids: 512, tmp: "256m", shm: "1g" },
-} satisfies Record<
-  Role,
-  { memory: string; cpus: string; pids: number; tmp: string; shm: string | null }
->;
-
-// Chromium's SingletonLock stores the hostname, so a recreated sidecar on a kept profile volume
-// refuses to start unless the hostname is fixed (S6).
-const hostnames: Record<Role, string> = { engine: "engine", browser: "browser" };
 
 export type Box = { prefix: string; owner: string; botId: string };
 
@@ -57,8 +125,8 @@ export function boxNames({ prefix, botId }: Box) {
   return {
     container: { engine: `${base}-engine`, browser: `${base}-browser` },
     network: { engine: `${base}-engine-net`, browser: `${base}-browser-net` },
-    volume: { engine: `${base}-engine-home`, browser: `${base}-browser-profile` },
-  } satisfies Record<string, Record<Role, string>>;
+    volume: (role: Role, key: string) => `${base}-${role}-${key}`,
+  };
 }
 
 export function ownershipLabels(secret: Uint8Array, box: Box, role: Role, name: string) {
@@ -84,7 +152,14 @@ export function ownedBy(
 }
 
 // Supplied by the egress proxy when it joins a box network (see egress.ts).
-export type EgressAttachment = { dns: string | null; env: Record<string, string> };
+export type EgressAttachment = {
+  dns: string | null;
+  env: Record<string, string>;
+  hosts?: Record<string, string>;
+};
+
+// A directory in the Linux host bound into the engine.
+export type Bind = { source: string; target: string; readOnly: boolean };
 
 export type ContainerSpec = {
   name: string;
@@ -94,12 +169,15 @@ export type ContainerSpec = {
   command: string[];
   network: string;
   dns: string | null;
+  hosts: Record<string, string>;
   env: Record<string, string>;
-  volume: { name: string; target: string };
-  tmp: string;
-  shm: string | null;
+  volumes: { name: string; target: string }[];
+  binds: Bind[];
+  tmpfs: string[];
+  shm: string;
   seccomp: string | null;
   memory: string;
+  memorySwap: string;
   cpus: string;
   pids: number;
   labels: Record<string, string>;
@@ -114,6 +192,7 @@ export function containerSpec(
     seccomp,
     egress,
     labels,
+    binds = [],
   }: {
     box: Box;
     secret: Uint8Array;
@@ -121,30 +200,36 @@ export function containerSpec(
     seccomp: string;
     egress: EgressAttachment;
     labels: Record<string, string>;
+    binds?: Bind[];
   },
 ): ContainerSpec {
   const names = boxNames(box);
   const image = runSpec[role];
-  const limit = limits[role];
   const name = names.container[role];
   return {
     name,
     image: image.image,
     user: image.user,
-    hostname: hostnames[role],
+    hostname: image.hostname,
     command: image.command,
     network: names.network[role],
     dns: egress.dns,
+    hosts: egress.hosts ?? {},
     env: { ...egress.env, HOME: image.home },
-    volume: { name: names.volume[role], target: image.home },
-    tmp: limit.tmp,
-    shm: limit.shm,
+    volumes: Object.entries(image.volumes).map(([key, target]) => ({
+      name: names.volume(role, key),
+      target,
+    })),
+    binds,
+    tmpfs: image.tmpfs,
+    shm: image.shm,
     // Podman's default profile allows chroot only with CAP_SYS_CHROOT, which Chromium's own
-    // sandbox needs inside its user namespace (S3). The engine keeps the default.
-    seccomp: role === "browser" ? seccomp : null,
-    memory: limit.memory,
-    cpus: limit.cpus,
-    pids: limit.pids,
+    // sandbox needs inside its user namespace (S3).
+    seccomp: image.seccomp ? seccomp : null,
+    memory: image.memory,
+    memorySwap: image.memorySwap,
+    cpus: image.cpus,
+    pids: image.pids,
     labels: { ...labels, ...ownershipLabels(secret, box, role, name) },
   };
 }
@@ -170,13 +255,13 @@ export function createArgs(spec: ContainerSpec) {
     ...(spec.seccomp === null ? [] : ["--security-opt", `seccomp=${spec.seccomp}`]),
     "--read-only",
     "--read-only-tmpfs=false",
-    "--tmpfs",
-    `/tmp:rw,nosuid,nodev,size=${spec.tmp},mode=1777`,
-    ...(spec.shm === null ? [] : ["--shm-size", spec.shm]),
+    ...spec.tmpfs.flatMap((mount) => ["--tmpfs", mount]),
+    "--shm-size",
+    spec.shm,
     "--memory",
     spec.memory,
     "--memory-swap",
-    spec.memory,
+    spec.memorySwap,
     "--cpus",
     spec.cpus,
     "--pids-limit",
@@ -185,8 +270,12 @@ export function createArgs(spec: ContainerSpec) {
     spec.network,
     "--dns",
     spec.dns ?? "none",
-    "-v",
-    `${spec.volume.name}:${spec.volume.target}`,
+    ...Object.entries(spec.hosts).flatMap(([host, ip]) => ["--add-host", `${host}:${ip}`]),
+    ...spec.volumes.flatMap(({ name, target }) => ["-v", `${name}:${target}`]),
+    ...spec.binds.flatMap(({ source, target, readOnly }) => [
+      "-v",
+      `${source}:${target}:${readOnly ? "ro," : ""}nosuid,nodev,noexec`,
+    ]),
     ...labelArgs(spec.labels),
     spec.image,
     ...spec.command,
@@ -246,6 +335,32 @@ export function execKillArgs(container: string, execId: string) {
 // Processes left by a boxd that died with turns attached.
 export function execReapArgs(container: string) {
   return ["exec", container, "sh", "-c", execReap];
+}
+
+// The sidecar's DevTools, which Chromium binds to its own loopback. The server reaches it only
+// through boxd, so no network path to it exists from any box or from the egress proxy.
+export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222"];
+
+// A finished download, named by Chromium's GUID, goes from the sidecar into the engine's
+// workspace under the name the owner saw. Both names are checked here, since they reach a shell.
+export const downloadName = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/;
+export const downloadsDir = "/downloads";
+
+export function copyOutArgs(container: string, file: string) {
+  return ["exec", container, "cat", "--", `${downloadsDir}/${file}`];
+}
+
+export function copyInArgs(container: string, target: string, name: string) {
+  return [
+    "exec",
+    "-i",
+    container,
+    "sh",
+    "-c",
+    'mkdir -p "$0" && cat > "$0/.$1.part" && mv -f "$0/.$1.part" "$0/$1"',
+    target,
+    name,
+  ];
 }
 
 export type ContainerFacts = { owned: boolean; running: boolean; oomKilled: boolean };

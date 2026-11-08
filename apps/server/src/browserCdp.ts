@@ -5,7 +5,12 @@ import type { BrowserRuntime, BrowserSession, PageSnapshot } from "./browserRunt
 
 // Where the broker reaches one bot's sidecar. Nothing else may reach `http`: Chromium's DevTools has
 // no authentication of its own, so the network is the boundary.
-export type SidecarEndpoint = { http: string; downloadsDir: string };
+// `collect` copies a finished download, which Chromium names by its GUID, out of the sidecar.
+export type SidecarEndpoint = {
+  http: string;
+  downloadsDir: string;
+  collect?: (file: string, name: string) => Promise<void>;
+};
 
 const Message = z.object({
   id: z.number().optional(),
@@ -94,6 +99,7 @@ const Evaluated = z.object({
 });
 const Point = z.object({ x: z.number(), y: z.number() }).nullable();
 const Download = z.object({ guid: z.string(), suggestedFilename: z.string() });
+const Progress = z.object({ guid: z.string(), state: z.string() });
 const Frame = z.object({
   data: z.string(),
   sessionId: z.number(),
@@ -198,7 +204,7 @@ export function inputCommand(input: HandoffInput) {
 }
 
 async function openSession(
-  { http, downloadsDir }: SidecarEndpoint,
+  { http, downloadsDir, collect: copyOut }: SidecarEndpoint,
   onDownload: (name: string) => boolean,
 ): Promise<BrowserSession> {
   const response = await fetch(new URL("/json/version", http));
@@ -212,10 +218,23 @@ async function openSession(
     downloadPath: downloadsDir,
     eventsEnabled: true,
   });
+  const allowed = new Map<string, string>();
   cdp.on("Browser.downloadWillBegin", (params) => {
     const download = Download.safeParse(params).data;
     if (download && !onDownload(download.suggestedFilename)) {
       cdp.send("Browser.cancelDownload", { guid: download.guid }).catch(() => {});
+    } else if (download) {
+      allowed.set(download.guid, download.suggestedFilename);
+    }
+  });
+  cdp.on("Browser.downloadProgress", (params) => {
+    const progress = Progress.safeParse(params).data;
+    const name = progress && allowed.get(progress.guid);
+    if (progress && name !== undefined && progress.state !== "inProgress") {
+      allowed.delete(progress.guid);
+      if (progress.state === "completed") {
+        copyOut?.(progress.guid, name).catch(() => {});
+      }
     }
   });
 

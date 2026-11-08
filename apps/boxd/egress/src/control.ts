@@ -5,8 +5,10 @@ import { normalizeHost, subscriptionHosts, type Vendor, vendors } from "./policy
 export type BotPolicy = { hosts: string[]; api: { vendor: Vendor; key: string } | null };
 
 // One JSON object per line on the control socket. `bind` ties a box's source address to a bot;
-// `policy` says where that bot may go and holds the API key in memory.
+// `policy` says where that bot may go and holds the API key in memory. `listen` adds an address
+// the proxy serves on, when it joins a new box network; listeners outlive the connection.
 export type ControlMessage =
+  | { type: "listen"; address: string }
   | { type: "bind"; address: string; botId: string }
   | { type: "unbind"; address: string }
   | { type: "policy"; botId: string; hosts: string[]; api: BotPolicy["api"] }
@@ -33,6 +35,8 @@ export function parseControl(line: string): ControlMessage | string {
   }
   const address = typeof value.address === "string" ? unmapAddress(value.address) : "";
   switch (value.type) {
+    case "listen":
+      return NodeNet.isIP(address) === 0 ? "listen needs address" : { type: "listen", address };
     case "bind":
       if (NodeNet.isIP(address) === 0 || !isId(value.botId)) {
         return "bind needs address and botId";
@@ -88,6 +92,8 @@ export function createPolicyTable() {
     // Returns the bots whose open connections must end.
     apply(owner: object, message: ControlMessage): string[] {
       switch (message.type) {
+        case "listen":
+          return [];
         case "bind": {
           const previous = bindings.get(message.address)?.botId;
           bindings.set(message.address, { botId: message.botId, owner });

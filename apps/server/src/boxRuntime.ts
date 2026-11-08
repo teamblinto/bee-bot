@@ -12,9 +12,14 @@ export type BoxExec = { argv: string[]; env: Record<string, string>; cwd?: strin
 // attach does the same: a turn never outlives its stream.
 export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 
-// `create` takes a bot ID only: boxd derives image, mounts, caps and network itself (R24).
+// `create` takes a bot ID and its engine account: boxd derives image, mounts, caps and network
+// itself (R24). `writeBotFile` fills the bot's read-only directory in the box, `cdp` attaches to
+// the sidecar's DevTools, and `collect` copies a finished download into the workspace.
 export type BoxRuntime = {
-  create: (botId: string) => Promise<void>;
+  create: (botId: string, account?: string) => Promise<void>;
+  writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
+  cdp: (botId: string) => Promise<BoxAttach>;
+  collect: (botId: string, file: string, name: string) => Promise<void>;
   start: (botId: string) => Promise<void>;
   stop: (botId: string) => Promise<void>;
   snapshot: (botId: string) => Promise<BoxState>;
@@ -46,6 +51,11 @@ export function createFakeBoxRuntime(): BoxRuntime {
       states.set(botId, "stopped");
     },
     snapshot: async (botId) => states.get(botId) ?? "absent",
+    writeBotFile: async (botId) => expect(botId, ["stopped", "running"]),
+    cdp: async () => {
+      throw new Error("no sidecar in the fake box runtime");
+    },
+    collect: async (botId) => expect(botId, ["running"]),
     execAttach: async (botId, { argv: [command = "", ...args], env, cwd }) => {
       expect(botId, ["running"]);
       const child = NodeChildProcess.spawn(command, args, {
