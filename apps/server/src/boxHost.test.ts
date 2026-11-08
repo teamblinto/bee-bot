@@ -10,12 +10,14 @@ import * as NodePath from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
-import { boxLayout } from "./boxEngine.ts";
+import { boxLayout, proxyKeyPlaceholder } from "./boxEngine.ts";
 import { boxdFiles, boxdSecret, readyBoxRuntime, startBoxHost, windowsPodman } from "./boxHost.ts";
-import { type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
+import { type BoxExec, type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
 import { createCdpBrowserRuntime, fetchJson } from "./browserCdp.ts";
 import { podmanEnv } from "./boxdRuntime.ts";
+import { createClaudeRunTurn } from "./claude.ts";
 import { apiKeyName, createMemoryVault } from "./vault.ts";
+import { storeApiKey } from "./vaultStore.ts";
 
 describe("box host", () => {
   it("keeps boxd's secret across restarts", async () => {
@@ -407,3 +409,194 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     expect(probe.output).toMatch(/403 proxied$/);
   }, 180_000);
 });
+
+// Opt-in: a real Claude Code turn with a real Anthropic key, which costs money. Point
+// BEEBOT_REAL_ANTHROPIC_KEY_FILE at a file holding the key. Every check compares inside the test,
+// so no failure can put the key in the output.
+const keyFile = process.env.BEEBOT_REAL_ANTHROPIC_KEY_FILE;
+
+describe.skipIf(!available || !keyFile)(
+  "a real Claude turn in a box on the beebot-dev machine",
+  () => {
+    const tag = NodeCrypto.randomBytes(3).toString("hex");
+    const prefix = `beebot-dev-intr-${tag}`;
+    const botId = "real";
+    const temp = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "beebot-intr-"));
+    // Allowed only while the vendor's installer runs.
+    const installerHosts = ["claude.ai", "downloads.claude.ai", "storage.googleapis.com"];
+    let hosts = installerHosts;
+    let key = "";
+    let boxes: Awaited<ReturnType<typeof startBoxHost>> | undefined;
+    let beebotd: NodeHttp.Server | undefined;
+    let port = 0;
+
+    const started = () => {
+      if (boxes === undefined) {
+        throw new Error("boxes did not start");
+      }
+      return boxes;
+    };
+    const inBox = (script: string) => runInBox(started().runtime, botId, script);
+
+    beforeAll(async () => {
+      const { files } = prepareRun(prefix, temp);
+      // The run's MCP and hook endpoint. A one-word reply calls neither.
+      beebotd = NodeHttp.createServer((_request, response) => {
+        response.writeHead(404).end();
+      });
+      beebotd.listen(0, "127.0.0.1");
+      await once(beebotd, "listening");
+      port = (beebotd.address() as NodeNet.AddressInfo).port;
+
+      const vault = createMemoryVault();
+      const stored = await storeApiKey(
+        vault,
+        "claude",
+        NodeFs.readFileSync(keyFile ?? "", "utf8").trim(),
+      );
+      expect(stored.status).toBe(200);
+      key = (await vault.get(apiKeyName("claude"))) ?? "";
+      expect(key.length > 20).toBe(true);
+      boxes = await startBoxHost({
+        host: { kind: "podman-machine", podman: windowsPodman, machine },
+        installDir: `${prefix}/boxd`,
+        owner: prefix,
+        vault,
+        account: () => "claude",
+        egressInput: () => ({ engineAccountId: "claude", lane: "api_key", hosts }),
+        beebotdPort: () => port,
+        setBox: () => {},
+        bootstrap: { prefix, labels: { "beebot-dev": "1" } },
+        files,
+      });
+    }, 900_000);
+
+    afterAll(async () => {
+      beebotd?.close();
+      NodeFs.rmSync(temp, { recursive: true, force: true });
+      await endRun(prefix, async () => boxes?.close());
+    }, 180_000);
+
+    it("installs Claude Code into the box's home with the vendor's installer, through the proxy", async () => {
+      const install = await inBox(
+        'curl -fsSL https://claude.ai/install.sh | bash > /tmp/install.log 2>&1; echo "installer $?"; tail -n 5 /tmp/install.log; claude --version',
+      );
+      expect(install.output).toMatch(/^installer 0\n[\s\S]*\n\d+\.\d+\.\d+ \(Claude Code\)$/);
+      expect((await inBox('readlink -f "$(command -v claude)"')).output).toMatch(/^\/home\/bee\//);
+
+      hosts = [];
+      await started().egress.apply(botId);
+      const closed = await inBox(
+        "curl -s -o /dev/null --max-time 10 -w '%{http_connect}' https://claude.ai/install.sh; echo \" $?\"",
+      );
+      expect(closed.output).toMatch(/^403 [1-9]\d*$/);
+    }, 600_000);
+
+    it("finishes a real turn on the API lane with the key added only by the proxy, while direct egress and DNS fail", async () => {
+      const execs: BoxExec[] = [];
+      const runtime: BoxRuntime = {
+        ...started().runtime,
+        execAttach: (id, exec) => {
+          execs.push(exec);
+          return started().runtime.execAttach(id, exec);
+        },
+      };
+      const runTurn = createClaudeRunTurn({
+        command: ["claude"],
+        dataDir: temp,
+        box: { runtime, layout: boxLayout(temp) },
+      });
+      const { promise: delivered, resolve: markDelivered } = Promise.withResolvers<void>();
+      let reply = "";
+      const turn = runTurn({
+        prompt: "Reply with the word OK and nothing else.",
+        sessionId: NodeCrypto.randomUUID(),
+        resume: false,
+        launch: {
+          botId,
+          name: "Bee",
+          personality: "",
+          memory: "",
+          projectPath: null,
+          engineAccountId: "claude",
+          lane: "api_key",
+          model: "haiku",
+          effort: null,
+          mode: "build",
+        },
+        signal: new AbortController().signal,
+        onDelta: (text) => {
+          reply += text;
+        },
+        onToolStart: () => {},
+        onToolEnd: () => {},
+        onThinking: () => {},
+        onRateLimit: () => {},
+        permissions: {
+          url: `http://127.0.0.1:${port}/mcp`,
+          token: NodeCrypto.randomUUID(),
+        },
+        onDelivered: markDelivered,
+        approve: async () => ({ behavior: "deny", message: "unused" }),
+      });
+      // While the CLI runs: no way out but the proxy, and no resolver but its own.
+      const during = delivered.then(() =>
+        inBox(
+          [
+            "curl -s --noproxy '*' --max-time 5 -o /dev/null https://api.anthropic.com/; echo \"direct-name $?\"",
+            "curl -s --noproxy '*' --max-time 5 -o /dev/null --resolve api.anthropic.com:443:160.79.104.10 https://api.anthropic.com/; echo \"direct-ip $?\"",
+            "curl -s --noproxy '*' --max-time 5 -o /dev/null https://1.1.1.1/; echo \"direct-public $?\"",
+            "getent hosts api.anthropic.com >/dev/null && echo 'dns resolved' || echo 'dns nxdomain'",
+            "timeout 3 bash -c 'echo x > /dev/udp/8.8.8.8/53' 2>/dev/null && echo 'udp sent' || echo 'udp unreachable'",
+          ].join("; "),
+        ),
+      );
+      const [outcome, probes] = await Promise.all([turn, during]);
+      expect(outcome.kind).toBe("completed");
+      expect(reply).toMatch(/OK/);
+      expect(probes.output).toMatch(
+        /^direct-name [1-9]\d*\ndirect-ip [1-9]\d*\ndirect-public [1-9]\d*\ndns nxdomain\nudp unreachable$/,
+      );
+
+      // The CLI got the placeholder and the proxy's lane, and nothing it was given is the key.
+      const cli = execs.find(({ argv }) => argv[0] === "claude");
+      expect(cli?.env.ANTHROPIC_API_KEY).toBe(proxyKeyPlaceholder);
+      expect(cli?.env.ANTHROPIC_BASE_URL).toBe("http://proxy.beebot:8080/anthropic");
+      expect(execs.some((exec) => JSON.stringify(exec).includes(key))).toBe(false);
+      const engine = (await sh(`podman inspect ${prefix}-${botId}-engine`)).stdout;
+      expect(engine.length > 0 && !engine.includes(key)).toBe(true);
+
+      // Every key-shaped string the box could have written or holds in a process environment, by
+      // hash only, so the key never goes into the box to look for it.
+      const scan = await inBox(
+        [
+          "{ grep -rhoaE 'sk-ant-[A-Za-z0-9_-]{16,}' /home/bee /work /tmp /run/bee 2>/dev/null",
+          "  cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -oaE 'sk-ant-[A-Za-z0-9_-]{16,}'; } |",
+          '  sort -u | while read -r found; do printf %s "$found" | sha256sum | cut -c1-64; done',
+          "test -s /home/bee/.claude.json && echo 'cli state written'",
+        ].join("\n"),
+      );
+      expect(scan.output).toMatch(/cli state written$/);
+      const keySha = NodeCrypto.createHash("sha256").update(key).digest("hex");
+      expect(scan.output.includes(keySha)).toBe(false);
+
+      // The proxy's own log: the key went only to api.anthropic.com, and since the installer
+      // finished nothing has left by CONNECT.
+      const log = await sh(`podman logs ${prefix}-egress`);
+      expect(log.code).toBe(0);
+      expect(`${log.stdout}${log.stderr}`.includes(key)).toBe(false);
+      const events = `${log.stdout}\n${log.stderr}`
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const api = events.filter(({ ev, decision }) => ev === "api" && decision === "allow");
+      expect(api.length).toBeGreaterThan(0);
+      expect(new Set(api.map(({ host }) => host))).toEqual(new Set(["api.anthropic.com"]));
+      expect(api.some(({ status }) => status === 200)).toBe(true);
+      const connects = events.filter(
+        ({ ev, decision }) => ev === "connect" && decision === "allow",
+      );
+      expect(connects.every(({ host }) => installerHosts.includes(String(host)))).toBe(true);
+    }, 600_000);
+  },
+);
