@@ -89,7 +89,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
      WHERE id = ? AND status = 'open' RETURNING ${taskColumns}`,
   );
   const moveOwner = db.prepare(
-    `UPDATE tasks SET owner_bot_id = ?, updated_at = ?
+    `UPDATE tasks SET owner_bot_id = ?, hop = ?, updated_at = ?
      WHERE id = ? AND status = 'open' AND owner_bot_id = ? AND owner_bot_id <> ?
      RETURNING ${taskColumns}`,
   );
@@ -222,14 +222,21 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     // Only the current owner can hand off, so two racing handoffs can't both win.
     handoff: (
       id: string,
-      move: { fromBotId: string; toBotId: string; note: string; attended: boolean },
+      move: { fromBotId: string; toBotId: string; hop: number; note: string; attended: boolean },
     ) =>
       transaction((): Task | Refused | undefined => {
         const { fromBotId, toBotId } = move;
         if (selectOwning.get(toBotId)) {
           return { refused: "target_busy" };
         }
-        const row = moveOwner.get(toBotId, new Date().toISOString(), id, fromBotId, toBotId);
+        const row = moveOwner.get(
+          toBotId,
+          move.hop,
+          new Date().toISOString(),
+          id,
+          fromBotId,
+          toBotId,
+        );
         if (!row) {
           return undefined;
         }

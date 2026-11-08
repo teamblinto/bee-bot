@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import type { Bot } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
@@ -71,10 +72,19 @@ describe("candidate memories", () => {
 });
 
 describe("the turn summary", () => {
-  it("records the turn and survives event pruning", () => {
+  it("records the turn and survives event pruning, and the index rebuilds after it", () => {
     const bot = addBot();
+    store.addMemory({ botId: bot.id, text: "the files live on the NAS", type: "user" });
     const runId = turn(bot, "list the files", "Here they are.");
+    const found = store.searchMemory(bot.id, "files");
+    expect(found).toHaveLength(2);
     pruneEvents(store, Date.now() + 31 * 24 * 60 * 60_000);
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.exec("DELETE FROM memory_items; DELETE FROM memory_fts;");
+    db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')");
+    db.close();
+    store.rebuildIndex();
+    expect(store.searchMemory(bot.id, "files")).toEqual(found);
     expect(store.bounds()).toEqual({ oldest: 1, latest: 0 });
     expect(store.turnSummaries(bot.id)).toMatchObject([
       {

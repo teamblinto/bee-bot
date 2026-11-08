@@ -215,7 +215,13 @@ describe("tasks", () => {
       throw new Error("refused");
     }
     const move = (fromBotId: string, toBotId: string) =>
-      open().tasks.handoff(task.id, { fromBotId, toBotId, note: "Over to you", attended: true });
+      open().tasks.handoff(task.id, {
+        fromBotId,
+        toBotId,
+        hop: 2,
+        note: "Over to you",
+        attended: true,
+      });
     expect(move(input.ownerBotId, ben)).toMatchObject({ ownerBotId: ben });
     expect(move(input.ownerBotId, cy)).toBeUndefined();
     expect(move(ben, ben)).toEqual({ refused: "target_busy" });

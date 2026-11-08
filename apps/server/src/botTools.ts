@@ -199,7 +199,7 @@ export function callBotTool(
         return refused("not_in_room");
       }
       const task = owned
-        ? store.tasks.handoff(owned, { ...move, note: data.note })
+        ? store.tasks.handoff(owned, { ...move, hop: grant.hop + 1, note: data.note })
         : store.tasks.createTask(
             {
               kind: "handoff",

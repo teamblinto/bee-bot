@@ -419,7 +419,7 @@ describe("waiting states", () => {
 });
 
 describe("stop-all", () => {
-  it("cancels running, waiting and queued runs, pending wakes and open tasks", async () => {
+  it("cancels running, waiting and queued runs, pending wakes and open tasks across rooms", async () => {
     const engine = scriptedEngine();
     const { store, supervisor, send } = boot(engine.runTurn);
     const asker = createBot(store, "Asker");
@@ -439,8 +439,17 @@ describe("stop-all", () => {
     engine.turns[1]?.finish({ kind: "limited", retryAfterMs: 60_000 });
     await expectStatus(store, limited, "WaitingQuota");
     send(waiting, "deferred by the limit");
-    send(running, "busy");
+    const queued = createBot(store, "Queued", "codex");
+    const room = store.rooms.createGroupRoom({ name: "Team", memberIds: [running.id, queued.id] });
+    if (!room) {
+      throw new Error("no room");
+    }
+    const inRoom = { id: NodeCrypto.randomUUID(), roomId: room.id, attended: true };
+    expect(store.sendMessage({ ...inRoom, body: "@running busy" })).toBe("sent");
+    supervisor.pump();
     await expectStatus(store, running, "Running");
+    send(queued, "behind the gate");
+    await expectStatus(store, queued, "Queued");
 
     const task = store.tasks.createTask(
       {
@@ -459,13 +468,17 @@ describe("stop-all", () => {
       3,
     );
     expect("refused" in task).toBe(false);
+    const turns = engine.turns.length;
 
     supervisor.stopAll();
     await expectStatus(store, running, "Cancelled");
     expect(latestRun(store, asker)?.status).toBe("Cancelled");
     expect(latestRun(store, limited)?.status).toBe("Cancelled");
+    expect(latestRun(store, queued)?.status).toBe("Cancelled");
     expect(latestRun(store, waiting)).toBeUndefined();
     expect(store.state().tasks).toEqual([]);
     expect(store.dueWakes(new Date(Date.now() + 120_000).toISOString())).toEqual([]);
+    await ticks(1);
+    expect(engine.turns).toHaveLength(turns);
   });
 });

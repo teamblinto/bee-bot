@@ -176,6 +176,72 @@ describe("delegation limits", () => {
     expect(store.state().tasks).toHaveLength(3);
   });
 
+  it("never goes deeper than 2, however high the owner raises it", () => {
+    openStore();
+    raised.depth = 10;
+    raised.hop = 10;
+    const [ada, ben, cy, di] = team("Ada", "Ben", "Cy", "Di");
+    if (!ada || !ben || !cy || !di) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    const parent = start(ada.id);
+    call(parent, "delegate", { to: "Ben", goal: "Look" });
+    finish(parent.id, "Asked Ben.");
+    const child = start(ben.id);
+    expect(call(child, "delegate", { to: "Cy", goal: "Deeper" })).toMatchObject({
+      status: "delegated",
+    });
+    finish(child.id, "Asked Cy.");
+    const grandchild = start(cy.id);
+    expect(call(grandchild, "delegate", { to: "Di", goal: "Deeper still" })).toMatchObject({
+      status: "refused",
+      reason: "depth",
+    });
+  });
+
+  // Ben and Cy hand the same task back and forth; each handoff is one hop further on.
+  function handoffLoop() {
+    const [ada, ben, cy] = team("Ada", "Ben", "Cy");
+    if (!ada || !ben || !cy) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    const parent = start(ada.id);
+    call(parent, "delegate", { to: "Ben", goal: "Look" });
+    finish(parent.id, "Asked Ben.");
+    const hops: number[] = [];
+    let [owner, other] = [ben, cy];
+    for (let turn = 0; turn < 10; turn += 1) {
+      const run = start(owner.id);
+      hops.push(store.tasks.runGrant(run.id)?.hop ?? -1);
+      const outcome = call(run, "handoff", { to: other.name, note: "Yours" });
+      finish(run.id, "Handed over.");
+      if (outcome.status !== "handed_off") {
+        return { hops, outcome };
+      }
+      [owner, other] = [other, owner];
+    }
+    return { hops, outcome: null };
+  }
+
+  it("stops a handoff loop at hop 2", () => {
+    openStore();
+    expect(handoffLoop()).toMatchObject({
+      hops: [1, 2],
+      outcome: { status: "refused", reason: "hop" },
+    });
+  });
+
+  it("stops a handoff loop at hop 4, however high the owner raises the limit", () => {
+    openStore();
+    raised.hop = 10;
+    expect(handoffLoop()).toMatchObject({
+      hops: [1, 2, 3, 4],
+      outcome: { status: "refused", reason: "hop" },
+    });
+  });
+
   it("refuses work sent back to an ancestor, even with room to go deeper", () => {
     openStore();
     raised.depth = 2;
@@ -292,7 +358,7 @@ describe("handoff", () => {
     }
     const second = openEventStore(dataDir);
     cleanups.push(() => second.close());
-    const move = { fromBotId: ben.id, note: "Over to you", attended: true };
+    const move = { fromBotId: ben.id, hop: 2, note: "Over to you", attended: true };
     expect(second.tasks.handoff(task.id, { ...move, toBotId: di.id })).toMatchObject({
       ownerBotId: di.id,
     });

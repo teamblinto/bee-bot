@@ -20,18 +20,23 @@ const verdicts = vi.hoisted(() => ({
   botPost: (): Verdict => ({ verdict: "allow" }),
 }));
 const checks = vi.hoisted(() => ({ mention: [] as unknown[], botPost: [] as unknown[] }));
+// When set, the real checks decide, as in production.
+const real = vi.hoisted(() => ({ on: false }));
 
-vi.mock("./limits.ts", async (importOriginal) => ({
-  ...(await importOriginal<typeof LimitsModule>()),
-  checkMentionWake: (_limits: unknown, input: { mentions: number }) => {
-    checks.mention.push(input);
-    return verdicts.mention(input);
-  },
-  checkBotPost: (_limits: unknown, input: unknown) => {
-    checks.botPost.push(input);
-    return verdicts.botPost();
-  },
-}));
+vi.mock("./limits.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof LimitsModule>();
+  return {
+    ...actual,
+    checkMentionWake: (...args: Parameters<typeof actual.checkMentionWake>) => {
+      checks.mention.push(args[1]);
+      return real.on ? actual.checkMentionWake(...args) : verdicts.mention(args[1]);
+    },
+    checkBotPost: (...args: Parameters<typeof actual.checkBotPost>) => {
+      checks.botPost.push(args[1]);
+      return real.on ? actual.checkBotPost(...args) : verdicts.botPost();
+    },
+  };
+});
 
 const token = "t".repeat(43);
 const auth = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
@@ -44,6 +49,7 @@ beforeEach(() => {
   dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-rooms-"));
   verdicts.mention = allow;
   verdicts.botPost = allow;
+  real.on = false;
   checks.mention = [];
   checks.botPost = [];
 });
@@ -254,6 +260,29 @@ describe("a group room", () => {
     await vi.waitFor(() => expect(roomMessages(room)).toHaveLength(3));
     expect(roomMessages(room)[2]).toMatchObject({ botId: ben.id, chainId, hop: 1 });
     expect(query("SELECT bot_posts AS posts FROM room_rounds")).toEqual([{ posts: 1 }]);
+  });
+
+  it("stops two bots mentioning each other at hop 2", async () => {
+    real.on = true;
+    const { createBot, createRoom, send, engine, expectTurns, roomMessages } = await boot();
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    const room = await createRoom([ada, ben], ada);
+    await send(room.id, "plan it");
+    await expectTurns(1);
+    engine.turns[0]?.finish(done("@ben your turn"));
+    await expectTurns(2);
+    engine.turns[1]?.finish(done("@ada your turn"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@ben your turn"));
+    await vi.waitFor(() => expect(roomMessages(room)).toHaveLength(4));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(engine.turns.map(({ botId }) => botId)).toEqual([ada.id, ben.id, ada.id]);
+    expect(roomMessages(room).map(({ hop }) => hop)).toEqual([0, 0, 1, 2]);
+    expect(query("SELECT hop FROM wakes ORDER BY rowid")).toEqual([
+      { hop: 0 },
+      { hop: 1 },
+      { hop: 2 },
+    ]);
   });
 
   it("drops a bot-prompted post once the round's budget is spent", async () => {
