@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { boxLayout } from "./boxEngine.ts";
 import { boxdFiles, boxdSecret, readyBoxRuntime, startBoxHost, windowsPodman } from "./boxHost.ts";
-import { createFakeBoxRuntime } from "./boxRuntime.ts";
+import { type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
 import { createCdpBrowserRuntime, fetchJson } from "./browserCdp.ts";
 import { podmanEnv } from "./boxdRuntime.ts";
 import { apiKeyName, createMemoryVault } from "./vault.ts";
@@ -112,16 +112,111 @@ const nulFiles = () =>
     NodeFs.readdirSync(dir).includes("NUL"),
   );
 
+// A run's box image, egress bundle and run spec, as `pnpm build` makes them. Everything a run
+// creates on the machine is named `<prefix>-*`, and its files live in `$HOME/<prefix>`.
+function prepareRun(prefix: string, temp: string) {
+  const image = `localhost/${prefix}-box:latest`;
+  const build = NodeChildProcess.spawnSync(
+    windowsPodman,
+    ["build", "-q", "--label", "beebot-dev=1", "-t", image, NodePath.join(repo, "images/box")],
+    { encoding: "utf8", env: podmanEnv(), windowsHide: true },
+  );
+  expect(build.status, build.stderr).toBe(0);
+
+  const require = createRequire(import.meta.url);
+  const manifest = require.resolve("vite-plus/package.json");
+  const { bin } = JSON.parse(NodeFs.readFileSync(manifest, "utf8")) as {
+    bin: string | Record<string, string>;
+  };
+  const vp = NodePath.join(
+    NodePath.dirname(manifest),
+    typeof bin === "string" ? bin : (bin.vp ?? ""),
+  );
+  const pack = NodeChildProcess.spawnSync(
+    process.execPath,
+    [vp, "pack", "--out-dir", NodePath.join(temp, "egress")],
+    { cwd: NodePath.join(repo, "apps/boxd/egress"), encoding: "utf8", windowsHide: true },
+  );
+  expect(pack.status, pack.stderr).toBe(0);
+  const runSpec = NodePath.join(temp, "runSpec.json");
+  const spec = JSON.parse(
+    NodeFs.readFileSync(NodePath.join(repo, "images/box/runSpec.json"), "utf8"),
+  );
+  NodeFs.writeFileSync(runSpec, JSON.stringify({ ...spec, image }));
+  const files = boxdFiles(repo, NodePath.join(temp, "egress", "egress.mjs"));
+  return { image, files: { ...files, runSpec } };
+}
+
+const ofRun = (prefix: string) => (name: string) =>
+  name === prefix || name.startsWith(`${prefix}-`);
+
+// Everything still named for the run: containers, volumes, networks, images and its directory.
+async function leftovers(prefix: string) {
+  const { stdout } = await sh(
+    [
+      "podman ps -a --format '{{.Names}}'",
+      "podman volume ls --format '{{.Name}}'",
+      "podman network ls --format '{{.Name}}'",
+      "podman images --format '{{.Repository}}' | sed 's|^localhost/||'",
+      `[ -e "$HOME/${prefix}" ] && echo ${prefix}`,
+      "true",
+    ].join("; "),
+  );
+  return stdout.split("\n").filter(ofRun(prefix));
+}
+
+// Each kind is removed on its own, so one failure leaves nothing else behind. The run's directory
+// holds files the box user owns, so only the user namespace can remove it.
+async function removeRun(prefix: string) {
+  const ids = (list: string) =>
+    `$(${list} | awk -v p='${prefix}' '{ n = $2; sub("^localhost/", "", n) } n == p || index(n, p "-") == 1 { print $1 }')`;
+  await sh(
+    [
+      `for id in ${ids("podman ps -a --format '{{.ID}} {{.Names}}'")}; do podman rm -f -t 0 "$id"; done`,
+      `for id in ${ids("podman volume ls --format '{{.Name}} {{.Name}}'")}; do podman volume rm -f "$id"; done`,
+      `for id in ${ids("podman network ls --format '{{.ID}} {{.Name}}'")}; do podman network rm -f "$id"; done`,
+      `for id in ${ids("podman images --format '{{.ID}} {{.Repository}}'")}; do podman rmi -f "$id"; done`,
+      `podman unshare rm -rf "$HOME/${prefix}"`,
+    ].join("\n"),
+  );
+}
+
+async function runInBox(runtime: BoxRuntime, botId: string, script: string) {
+  const { env, workdir } = boxLayout("");
+  const { stream, exited } = await runtime.execAttach(botId, {
+    argv: ["bash", "-c", script],
+    env,
+    cwd: workdir,
+  });
+  stream.end();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return { output: String(Buffer.concat(chunks)).trim(), code: await exited };
+}
+
+// Runs in `afterAll`, so it runs whether the tests passed or not, and even if `close` throws.
+async function endRun(prefix: string, close: () => Promise<unknown>) {
+  const closed = await close().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await removeRun(prefix);
+  expect(await leftovers(prefix)).toEqual([]);
+  if (closed !== undefined) {
+    throw closed;
+  }
+}
+
 describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
   const tag = NodeCrypto.randomBytes(3).toString("hex");
   const prefix = `beebot-dev-inta-${tag}`;
   const botId = "e2e";
-  const image = `localhost/beebot-dev-inta-box:${tag}`;
-  const installDir = `beebot-dev-inta-${tag}/boxd`;
+  const installDir = `${prefix}/boxd`;
   const canary = `sk-ant-canary-${NodeCrypto.randomUUID()}`;
   const canarySha = NodeCrypto.createHash("sha256").update(canary).digest("hex");
   const temp = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "beebot-inta-"));
-  const layout = boxLayout(temp);
   const nulBefore = nulFiles();
   let mockIp = "";
   let boxes: Awaited<ReturnType<typeof startBoxHost>> | undefined;
@@ -140,51 +235,12 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     }
     return boxes;
   };
-  const inBox = async (script: string) => {
-    const { stream, exited } = await started().runtime.execAttach(botId, {
-      argv: ["bash", "-c", script],
-      env: layout.env,
-      cwd: layout.workdir,
-    });
-    stream.end();
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(Buffer.from(chunk));
-    }
-    return { output: String(Buffer.concat(chunks)).trim(), code: await exited };
-  };
+  const inBox = (script: string) => runInBox(started().runtime, botId, script);
   const inspect = async (name: string) =>
     JSON.parse((await sh(`podman inspect ${name}`)).stdout)[0];
 
   beforeAll(async () => {
-    const build = NodeChildProcess.spawnSync(
-      windowsPodman,
-      ["build", "-q", "--label", "beebot-dev=1", "-t", image, NodePath.join(repo, "images/box")],
-      { encoding: "utf8", env: podmanEnv(), windowsHide: true },
-    );
-    expect(build.status, build.stderr).toBe(0);
-
-    // egress.mjs as `pnpm build` makes it.
-    const require = createRequire(import.meta.url);
-    const manifest = require.resolve("vite-plus/package.json");
-    const { bin } = JSON.parse(NodeFs.readFileSync(manifest, "utf8")) as {
-      bin: string | Record<string, string>;
-    };
-    const vp = NodePath.join(
-      NodePath.dirname(manifest),
-      typeof bin === "string" ? bin : (bin.vp ?? ""),
-    );
-    const pack = NodeChildProcess.spawnSync(
-      process.execPath,
-      [vp, "pack", "--out-dir", NodePath.join(temp, "egress")],
-      { cwd: NodePath.join(repo, "apps/boxd/egress"), encoding: "utf8", windowsHide: true },
-    );
-    expect(pack.status, pack.stderr).toBe(0);
-    const runSpec = NodePath.join(temp, "runSpec.json");
-    const spec = JSON.parse(
-      NodeFs.readFileSync(NodePath.join(repo, "images/box/runSpec.json"), "utf8"),
-    );
-    NodeFs.writeFileSync(runSpec, JSON.stringify({ ...spec, image }));
+    const { image, files } = prepareRun(prefix, temp);
 
     // The vendor stand-in on the proxy's upstream network answers with a hash of the key it got.
     const respond = [
@@ -194,7 +250,7 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       'body=$(printf %s "$key" | sha256sum | cut -c1-64)',
       "printf 'HTTP/1.1 200 OK\\r\\nContent-Length: 64\\r\\nConnection: close\\r\\n\\r\\n%s' \"$body\"",
     ].join("\n");
-    const dir = `$HOME/beebot-dev-inta-${tag}`;
+    const dir = `$HOME/${prefix}`;
     const mock = await sh(
       [
         "set -e",
@@ -220,7 +276,6 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
 
     const vault = createMemoryVault();
     await vault.put(apiKeyName("claude"), canary);
-    const files = boxdFiles(repo, NodePath.join(temp, "egress", "egress.mjs"));
     boxes = await startBoxHost({
       host: { kind: "podman-machine", podman: windowsPodman, machine },
       installDir,
@@ -235,39 +290,14 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
         labels: { "beebot-dev": "1" },
         testUpstreams: { anthropic: `http://${mockIp}:9000` },
       },
-      files: { ...files, runSpec },
+      files,
     });
   }, 900_000);
 
   afterAll(async () => {
-    await boxes?.close();
     beebotd?.close();
-    // Collected by this run's owner label, then removed by ID.
-    const filter = `--filter label=beebot.owner=${prefix}`;
-    const ids = async (list: string) =>
-      (await sh(`${list} ${filter}`)).stdout.split("\n").filter(Boolean).join(" ");
-    const containers = await ids("podman ps -a --format '{{.ID}}'");
-    if (containers !== "") {
-      await sh(`podman rm -f -t 0 ${containers}`);
-    }
-    const volumes = await ids("podman volume ls -q");
-    if (volumes !== "") {
-      await sh(`podman volume rm -f ${volumes}`);
-    }
-    const networks = await ids("podman network ls --format '{{.ID}}'");
-    if (networks !== "") {
-      await sh(`podman network rm -f ${networks}`);
-    }
-    // The credential directory belongs to the box user, so only the user namespace can remove it.
-    await sh(
-      `podman rmi ${image} >/dev/null; podman unshare rm -rf "$HOME/beebot-dev-inta-${tag}"`,
-    );
-    expect((await sh(`ls -d "$HOME/beebot-dev-inta-${tag}" 2>/dev/null`)).stdout).toBe("");
     NodeFs.rmSync(temp, { recursive: true, force: true });
-    const left = await sh(
-      `podman ps -a -q --filter label=beebot.owner=${prefix}; podman network ls -q --filter label=beebot.owner=${prefix}`,
-    );
-    expect(left.stdout).toBe("");
+    await endRun(prefix, async () => boxes?.close());
     expect(nulFiles()).toEqual(nulBefore);
   }, 180_000);
 
