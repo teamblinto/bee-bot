@@ -85,7 +85,12 @@ export type RunTurn = (turn: {
   // For engines that assign their own session ID. It throws if the ID wasn't stored, and a turn
   // must not send its prompt without one, or the next turn can't resume.
   onSessionId?: (sessionId: string) => void;
+  // Called once the delivered turn can take more input. `steer` resolves true once the engine has
+  // the text and will answer it in this turn, false if the turn is past taking it.
+  onSteerable?: (steer: Steer) => void;
 }) => Promise<TurnOutcome>;
+
+export type Steer = (text: string) => Promise<boolean>;
 
 const wordDelayMs = 40;
 const workStepMs = 700;
@@ -194,6 +199,7 @@ export const fakeRunTurn: RunTurn = async ({
   onToolEnd,
   onThinking,
   permissions,
+  onSteerable,
 }) => {
   const line = (prompt.split("\n").at(-1) ?? "").trim();
   const [directive, argument] = line.split(/\s+/);
@@ -243,13 +249,22 @@ export const fakeRunTurn: RunTurn = async ({
       }
       return { kind: "completed", text: workReply };
     }
+    // Input that steers the turn is answered at the end of the reply.
     default: {
+      const steered: string[] = [];
+      let open = true;
+      onSteerable?.(async (text) => open && steered.push(text) > 0);
       const text = `Test engine reply: ${prompt}`;
       for (const word of text.split(/(?<=\s)/)) {
         await NodeTimers.setTimeout(wordDelayMs, undefined, { signal });
         onDelta(word);
       }
-      return { kind: "completed", text };
+      open = false;
+      const also = steered.map((input) => `\n\nAlso: ${input}`).join("");
+      if (also) {
+        onDelta(also);
+      }
+      return { kind: "completed", text: text + also };
     }
   }
 };

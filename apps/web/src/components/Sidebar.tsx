@@ -1,5 +1,5 @@
-import type { Bot } from "@beebot/contracts";
-import { Gauge, Hexagon, Plus, ShieldOff } from "lucide-react";
+import type { Bot, Room } from "@beebot/contracts";
+import { Gauge, Hexagon, Plus, ShieldOff, Users } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
@@ -85,25 +85,61 @@ function BotRow({
   );
 }
 
+const rowClass =
+  "flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised";
+
+function RoomRow({
+  room,
+  connection,
+  selected,
+  onSelect,
+}: {
+  room: Room;
+  connection: ConnectionState;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const last = connection.chat.messages.findLast(({ roomId }) => roomId === room.id);
+  const line = last?.body.replace(/[`*_~]|^[#>\s]+/gm, "").trim() || `${room.members.length} bots`;
+  return (
+    <button type="button" aria-current={selected} className={rowClass} onClick={onSelect}>
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary">
+        <Users {...iconProps} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-name font-medium">{room.name}</span>
+        <span className="block truncate text-small text-ink-secondary">{line}</span>
+      </span>
+    </button>
+  );
+}
+
 export function Sidebar({
   connection,
   selectedId,
+  selectedRoomId,
   usageOpen,
   open,
   onSelect,
+  onSelectRoom,
   onUsage,
   onNewBot,
+  onNewRoom,
   onClose,
 }: {
   connection: ConnectionState;
   selectedId: string | undefined;
+  selectedRoomId: string | undefined;
   usageOpen: boolean;
   open: boolean;
   onSelect: (botId: string) => void;
+  onSelectRoom: (roomId: string) => void;
   onUsage: () => void;
   onNewBot: () => void;
+  onNewRoom: () => void;
   onClose: () => void;
 }) {
+  const rooms = connection.chat.rooms.filter(({ kind }) => kind === "group");
   const drawer = useRef<HTMLElement>(null);
 
   // The drawer sits outside the page's tab order until it opens, so focus has to move into it.
@@ -156,6 +192,30 @@ export function Sidebar({
                   connection={connection}
                   selected={bot.id === selectedId}
                   onSelect={() => onSelect(bot.id)}
+                />
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 flex items-center justify-between pl-2">
+            <h2 className="text-label text-ink-faint">Rooms</h2>
+            <button
+              type="button"
+              aria-label="New room"
+              className="button !px-2"
+              disabled={connection.chat.bots.length === 0}
+              onClick={onNewRoom}
+            >
+              <Plus {...iconProps} />
+            </button>
+          </div>
+          <ul className="flex flex-col gap-0.5">
+            {rooms.map((room) => (
+              <li key={room.id}>
+                <RoomRow
+                  room={room}
+                  connection={connection}
+                  selected={room.id === selectedRoomId}
+                  onSelect={() => onSelectRoom(room.id)}
                 />
               </li>
             ))}

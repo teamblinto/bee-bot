@@ -365,12 +365,55 @@ export async function startServer({
         return bot ? { status: 200, body: bot } : notFound;
       }
       case "send-message": {
-        const { messageId: id, roomId, body } = command;
-        const result = store.sendMessage({ id, roomId, body, attended });
+        const { messageId: id, roomId, body, replyToId } = command;
+        const result = store.sendMessage({
+          id,
+          roomId,
+          body,
+          attended,
+          ...(replyToId && { replyToId }),
+        });
+        if (result === "sent" || result === "duplicate") {
+          return ok;
+        }
         if (result === "not_found") {
           return notFound;
         }
-        return result === "conflict" ? { status: 409, body: { code: "message_id_reused" } } : ok;
+        return {
+          status: 409,
+          body: { code: result === "conflict" ? "message_id_reused" : result },
+        };
+      }
+      case "create-room": {
+        const { name, memberIds, defaultBotId = null } = command;
+        if (!memberIds.every((botId) => store.getBot(botId))) {
+          return notFound;
+        }
+        const room = store.rooms.createGroupRoom({ name, memberIds, defaultBotId });
+        return room ? { status: 200, body: room } : { status: 400, body: { code: "not_member" } };
+      }
+      case "update-room": {
+        const { roomId, name, defaultBotId } = command;
+        const room = store.rooms.updateGroupRoom(roomId, {
+          ...(name !== undefined && { name }),
+          ...(defaultBotId !== undefined && { defaultBotId }),
+        });
+        if (room === "not_found") {
+          return notFound;
+        }
+        return room === "not_member"
+          ? { status: 400, body: { code: room } }
+          : { status: 200, body: room };
+      }
+      case "add-room-member": {
+        const room = store.getBot(command.botId)
+          ? store.rooms.addMember(command.roomId, command.botId)
+          : undefined;
+        return room ? { status: 200, body: room } : notFound;
+      }
+      case "remove-room-member": {
+        const room = store.rooms.removeMember(command.roomId, command.botId);
+        return room ? { status: 200, body: room } : notFound;
       }
       case "stop-bot":
         supervisor.stopBot(command.botId);

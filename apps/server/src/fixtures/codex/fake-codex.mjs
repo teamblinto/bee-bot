@@ -254,6 +254,8 @@ const scenarios = {
   },
   "exit-silently": { steps: () => [() => process.exit(1)] },
   hang: { steps: () => [...message("partial"), "hang"], honoursInterrupt: true },
+  // Waits for a turn/steer, then answers the steered text in the same turn.
+  steer: { steps: () => [...message("partial"), "await-steer"] },
   "ignores-interrupt": { steps: () => [...message("partial"), "hang"] },
   "linger-after-stdin": { steps: () => message("noted"), ignoresStdinEnd: true },
   "gate-version": { userAgent: "bee/9.9.9 (Windows; x86_64)", steps: () => message("noted") },
@@ -345,6 +347,7 @@ const replies = {
 };
 
 const answers = new Map();
+let awaitSteer;
 let nextAsk = 1000;
 
 function askServer(method, params) {
@@ -363,6 +366,13 @@ async function runTurn() {
   for (const step of scenario.steps?.() ?? []) {
     if (step === "hang") {
       return;
+    }
+    if (step === "await-steer") {
+      const text = await new Promise((resolve) => {
+        awaitSteer = resolve;
+      });
+      message(`heard ${text}`).forEach((emit) => emit());
+      continue;
     }
     if (typeof step === "function") {
       step();
@@ -399,6 +409,13 @@ NodeReadline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     write({ id, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } });
     void runTurn();
+  } else if (method === "turn/steer") {
+    if (turnOver || params.expectedTurnId !== "turn-1") {
+      write({ id, error: { code: -32_600, message: "no active turn" } });
+      return;
+    }
+    write({ id, result: { turnId: "turn-1" } });
+    awaitSteer?.(params.input.map(({ text }) => text).join(""));
   } else if (method === "turn/interrupt") {
     write({ id, result: {} });
     if (scenario.honoursInterrupt) {

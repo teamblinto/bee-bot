@@ -606,6 +606,7 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
     onDelivered,
     approve,
     onSessionId,
+    onSteerable,
   }) => {
     const { projectPath } = launch;
     if (projectPath && !(await isFolder(projectPath))) {
@@ -800,6 +801,18 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
       turnId = turn.id;
       clearTimeout(gateTimer);
       onDelivered();
+      const expectedTurnId = turnId;
+      onSteerable?.(async (text) => {
+        if (seen.ended || signal.aborted) {
+          return false;
+        }
+        const steered = await server.request("turn/steer", {
+          threadId,
+          input: [{ type: "text", text, text_elements: [] }],
+          expectedTurnId,
+        });
+        return steered !== undefined && !steered.error;
+      });
       await Promise.race([turnEnded, server.closed]);
       return mapTurn(seen);
     }

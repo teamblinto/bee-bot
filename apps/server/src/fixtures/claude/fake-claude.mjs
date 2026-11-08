@@ -148,6 +148,13 @@ const scenarios = {
     hang: true,
   },
   linger: { frames: () => replay("success.ndjson"), hang: true },
+  // The first turn hangs until it is killed for a steer, and the resumed one answers.
+  steer: args.includes("--resume")
+    ? { frames: () => replay("success.ndjson") }
+    : {
+        frames: () => replay("success.ndjson").filter(({ type }) => type === "stream_event"),
+        hang: true,
+      },
   "gate-api-key": {
     init: () => withAccount({ ...subscriber, apiKeySource: "ANTHROPIC_API_KEY" }),
     frames: () => replay("success.ndjson"),

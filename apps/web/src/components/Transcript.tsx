@@ -29,11 +29,13 @@ function Item({
   bot,
   connected,
   finishedTools,
+  authorName,
 }: {
   item: TranscriptItem;
-  bot: Bot;
+  bot: Pick<Bot, "name">;
   connected: boolean;
   finishedTools: Record<string, LiveTool[]>;
+  authorName: ((botId: string) => string | undefined) | undefined;
 }) {
   if (item.kind === "approval") {
     const { approval, pending } = item;
@@ -54,8 +56,10 @@ function Item({
       </p>
     );
   }
+  const author = message.botId === null ? undefined : authorName?.(message.botId);
   return (
     <div className="flex flex-col gap-2">
+      {author && <p className="text-label font-medium text-ink-secondary">{author}</p>}
       {message.tools.length > 0 && (
         <WorkGroup
           label={workedLine(message.workedMs, message.tools.length)}
@@ -79,8 +83,9 @@ export function Transcript({
   thought,
   systemLine,
   onContinue,
+  authorName,
 }: {
-  bot: Bot;
+  bot: Pick<Bot, "name">;
   items: TranscriptItem[];
   connected: boolean;
   finishedTools: Record<string, LiveTool[]>;
@@ -94,6 +99,8 @@ export function Transcript({
   thought: string | undefined;
   systemLine: string;
   onContinue: (() => void) | undefined;
+  // Labels each bot message with who wrote it, for rooms with more than one bot.
+  authorName?: (botId: string) => string | undefined;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -204,7 +211,13 @@ export function Transcript({
                   data-message-id={item.kind === "message" ? item.message.id : undefined}
                   className={gap}
                 >
-                  <Item item={item} bot={bot} connected={connected} finishedTools={finishedTools} />
+                  <Item
+                    item={item}
+                    bot={bot}
+                    connected={connected}
+                    finishedTools={finishedTools}
+                    authorName={authorName}
+                  />
                 </li>
               );
             })}
@@ -225,6 +238,7 @@ export function Transcript({
                 bot={bot}
                 connected={connected}
                 finishedTools={finishedTools}
+                authorName={authorName}
               />
             ))}
             {draft && <Markdown text={draft} streaming />}

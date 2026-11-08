@@ -25,7 +25,13 @@ import {
   testedCodexVersion,
   unwrapShell,
 } from "./codex.ts";
-import { type BotLaunch, type ThinkingState, type ToolStart, workspacePath } from "./engine.ts";
+import {
+  type BotLaunch,
+  type Steer,
+  type ThinkingState,
+  type ToolStart,
+  workspacePath,
+} from "./engine.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
 
@@ -126,6 +132,7 @@ type TurnOptions = {
   fields?: Partial<BotLaunch>;
   allow?: boolean;
   onSessionId?: (id: string) => void;
+  onSteerable?: (steer: Steer) => void;
 };
 
 function turn(scenario: string, options: TurnOptions = {}) {
@@ -156,6 +163,7 @@ function turn(scenario: string, options: TurnOptions = {}) {
       ((id) => {
         order.push(`session ${id} after ${calls().join(" ")}`);
       }),
+    ...(options.onSteerable && { onSteerable: options.onSteerable }),
     approve: async (tool, input) => {
       asked.push({ tool, input });
       return allow
@@ -488,6 +496,22 @@ describe("a turn", () => {
     const noId = turn("no-id-item");
     await noId.outcome;
     expect(noId.starts.map(({ name }) => name)).toEqual(["somethingNew"]);
+  });
+});
+
+describe("steering", () => {
+  it("sends input to the live turn, which answers it", async () => {
+    const { promise: steerable, resolve } = Promise.withResolvers<Steer>();
+    const { outcome } = turn("steer", { onSteerable: resolve });
+    const steer = await steerable;
+    expect(await steer("and the tests")).toBe(true);
+    expect(await outcome).toEqual({ kind: "completed", text: "partial\n\nheard and the tests" });
+    expect(called("turn/steer")).toEqual({
+      threadId: "thread-from-codex",
+      input: [{ type: "text", text: "and the tests", text_elements: [] }],
+      expectedTurnId: "turn-1",
+    });
+    expect(await steer("too late")).toBe(false);
   });
 });
 

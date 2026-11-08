@@ -2,7 +2,7 @@ import * as NodeCrypto from "node:crypto";
 
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
-import type { RunTurn, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
+import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 import type { WindowUpdate } from "./usage.ts";
 
@@ -104,6 +104,7 @@ export function createSupervisor({
       ended: Promise<void>;
       pauseClock: () => void;
       resumeClock: () => void;
+      steer: () => void;
     }
   >();
   let closing = false;
@@ -156,6 +157,27 @@ export function createSupervisor({
       }
     };
     resumeClock();
+    // One batch in flight at a time. Whatever lands meanwhile goes in the next one.
+    let steer: Steer | undefined;
+    let steering = false;
+    const steerTurn = () => {
+      const send = steering ? undefined : steer;
+      const input = send && store.steerInput(run.id);
+      if (!send || !input) {
+        return;
+      }
+      steering = true;
+      send(input.text)
+        .then((taken) => {
+          if (taken) {
+            store.markSteered(run.id, input.highSeq);
+          }
+        })
+        .catch((error: unknown) => console.error(`beebotd: steer of run ${run.id} failed`, error))
+        .finally(() => {
+          steering = false;
+        });
+    };
     const attempt = (prompt: string, sessionId: string, resume: boolean) =>
       runTurn({
         prompt,
@@ -204,6 +226,9 @@ export function createSupervisor({
           }
         },
         onSessionId: (sessionId) => store.setSessionId(run.id, sessionId),
+        onSteerable: (send) => {
+          steer = send;
+        },
         approve: (tool, input) =>
           gate
             ? approvals.approve(gate, { tool_name: tool, input }, controller.signal)
@@ -242,7 +267,7 @@ export function createSupervisor({
         }
       })
       .catch((error: unknown) => console.error(error));
-    turns.set(run.id, { controller, ended, pauseClock, resumeClock });
+    turns.set(run.id, { controller, ended, pauseClock, resumeClock, steer: steerTurn });
   }
 
   function startRun(runId: string, botId: string, accountId: string, now: string) {
@@ -273,6 +298,13 @@ export function createSupervisor({
           settleWake(wake, now);
         } catch (error) {
           console.error(`beebotd: wake ${wake.id} failed`, error);
+        }
+      }
+      for (const [runId, { steer }] of turns) {
+        try {
+          steer();
+        } catch (error) {
+          console.error(`beebotd: steer of run ${runId} failed`, error);
         }
       }
       for (const run of store.queuedRuns()) {

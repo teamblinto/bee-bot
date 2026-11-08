@@ -306,6 +306,8 @@ export type UsageSummary = z.infer<typeof UsageSummary>;
 
 const MessageBody = z.string().trim().min(1).max(32_000);
 const RoutineName = z.string().trim().min(1).max(80);
+const RoomName = z.string().trim().min(1).max(80);
+const maxRoomMembers = 12;
 
 export const Routine = z.object({
   id: z.string(),
@@ -338,7 +340,8 @@ export const RoutineFiring = z.object({
 });
 export type RoutineFiring = z.infer<typeof RoutineFiring>;
 
-export const WakeSource = z.enum(["human", "routine", "task", "approval", "continue"]);
+// `mention` is a bot's room message naming another bot.
+export const WakeSource = z.enum(["human", "routine", "task", "approval", "continue", "mention"]);
 export type WakeSource = z.infer<typeof WakeSource>;
 
 export const LimitRefusal = z.enum([
@@ -366,6 +369,10 @@ export const Room = z.object({
   createdAt: z.string(),
 });
 export type Room = z.infer<typeof Room>;
+
+// How an @mention names a room member: the name lowercased, without its spaces. A mention matches
+// the member whose key it equals, or else the one member whose key it starts.
+export const mentionKey = (name: string) => name.toLowerCase().replace(/\s+/g, "");
 
 export const Task = z.object({
   id: z.string(),
@@ -523,7 +530,23 @@ export const Command = z.discriminatedUnion("type", [
     messageId: z.uuid(),
     roomId: z.uuid(),
     body: MessageBody,
+    replyToId: z.uuid().optional(),
   }),
+  z.object({
+    type: z.literal("create-room"),
+    name: RoomName,
+    memberIds: z.array(z.uuid()).min(1).max(maxRoomMembers),
+    defaultBotId: z.uuid().nullable().optional(),
+  }),
+  // Missing keeps the value, and a null default clears it.
+  z.object({
+    type: z.literal("update-room"),
+    roomId: z.uuid(),
+    name: RoomName.optional(),
+    defaultBotId: z.uuid().nullable().optional(),
+  }),
+  z.object({ type: z.literal("add-room-member"), roomId: z.uuid(), botId: z.uuid() }),
+  z.object({ type: z.literal("remove-room-member"), roomId: z.uuid(), botId: z.uuid() }),
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
   z.object({

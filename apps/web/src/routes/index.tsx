@@ -6,6 +6,8 @@ import { useState, useSyncExternalStore } from "react";
 import { BotDialog } from "../components/BotForm";
 import { ChatView } from "../components/ChatView";
 import { Onboarding } from "../components/Onboarding";
+import { RoomDialog } from "../components/RoomDialog";
+import { RoomView } from "../components/RoomView";
 import { Sidebar } from "../components/Sidebar";
 import { iconProps } from "../components/ui";
 import { UsagePage } from "../components/UsagePage";
@@ -17,12 +19,14 @@ function Home() {
   const { chat, loaded, status } = connection;
   const [selectedId, setSelectedId] = useState<string>();
   const [notNow, setNotNow] = useState(false);
-  const [dialog, setDialog] = useState<"new" | Bot>();
+  const [dialog, setDialog] = useState<"new" | "room" | Bot>();
+  const [roomId, setRoomId] = useState<string>();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
   const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
+  const room = chat.rooms.find(({ id, kind }) => id === roomId && kind === "group");
 
   function updateComposerText(botId: string, update: (current: string) => string) {
     setComposerTexts((texts) => ({ ...texts, [botId]: update(texts[botId] ?? "") }));
@@ -60,12 +64,23 @@ function Home() {
     <div className="flex h-dvh bg-background text-ink">
       <Sidebar
         connection={connection}
-        selectedId={usageOpen ? undefined : selected?.id}
+        selectedId={usageOpen || room ? undefined : selected?.id}
+        selectedRoomId={usageOpen ? undefined : room?.id}
         usageOpen={usageOpen}
         open={drawerOpen}
         onSelect={(botId) => {
           setSelectedId(botId);
+          setRoomId(undefined);
           setUsageOpen(false);
+          setDrawerOpen(false);
+        }}
+        onSelectRoom={(id) => {
+          setRoomId(id);
+          setUsageOpen(false);
+          setDrawerOpen(false);
+        }}
+        onNewRoom={() => {
+          setDialog("room");
           setDrawerOpen(false);
         }}
         onUsage={() => {
@@ -81,6 +96,13 @@ function Home() {
       <main className="flex min-w-0 flex-1">
         {usageOpen ? (
           <UsagePage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
+        ) : room ? (
+          <RoomView
+            key={room.id}
+            room={room}
+            connection={connection}
+            onOpenDrawer={() => setDrawerOpen(true)}
+          />
         ) : selected ? (
           <ChatView
             key={selected.id}
@@ -112,7 +134,18 @@ function Home() {
           </div>
         )}
       </main>
-      {dialog && (
+      {dialog === "room" && (
+        <RoomDialog
+          bots={chat.bots}
+          onSaved={(saved) => {
+            setRoomId(saved.id);
+            setUsageOpen(false);
+            setDialog(undefined);
+          }}
+          onClose={() => setDialog(undefined)}
+        />
+      )}
+      {dialog && dialog !== "room" && (
         <BotDialog
           bot={dialog === "new" ? undefined : dialog}
           onSaved={showSavedBot}

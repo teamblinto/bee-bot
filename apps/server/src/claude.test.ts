@@ -19,6 +19,7 @@ import {
 import {
   type BotLaunch,
   type EngineChoice,
+  type Steer,
   type ThinkingState,
   toolDetail,
   type ToolStart,
@@ -106,6 +107,7 @@ function turn(
   memory = "",
   projectPath: string | null = null,
   lane: EngineLane = "subscription",
+  onSteerable?: (steer: Steer) => void,
 ) {
   const deltas: string[] = [];
   const tools: string[] = [];
@@ -137,6 +139,7 @@ function turn(
     onDelivered: () => {
       delivered += 1;
     },
+    ...(onSteerable && { onSteerable }),
   });
   return { outcome, deltas, tools, starts, ends, thinking, rateLimits, delivered: () => delivered };
 }
@@ -713,6 +716,20 @@ describe("session errors", () => {
     expect(spawns()).toHaveLength(2);
     expect(prompts()).toEqual([]);
   });
+});
+
+describe("steering", () => {
+  it("restarts the stopped turn on its session, with the new input", async () => {
+    const { promise: steerable, resolve } = Promise.withResolvers<Steer>();
+    const steered = turn("steer", undefined, false, "", null, "subscription", resolve);
+    const steer = await steerable;
+    expect(await steer("and the tests")).toBe(true);
+    expect(await steered.outcome).toEqual({ kind: "completed", text: "noted" });
+    expect(spawns().map(({ args = [] }) => args.includes("--resume"))).toEqual([false, true]);
+    expect(prompts().at(-1)).toContain("and the tests");
+    expect(steered.delivered()).toBe(1);
+    expect(await steer("too late")).toBe(false);
+  }, 15_000);
 });
 
 describe("stopping", () => {

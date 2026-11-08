@@ -18,6 +18,7 @@ import {
   killTree,
   personaText,
   type RunTurn,
+  type Steer,
   type ThinkingState,
   toolDetail,
   type ToolStart,
@@ -62,6 +63,7 @@ const closeGraceMs = 1000;
 const maxApiRetries = 5;
 const defaultLimitMs = 5 * 60_000;
 const stderrTailChars = 4096;
+const steerNote = "New input arrived, so your turn was stopped. Carry on with this in mind:";
 const usageTimeoutMs = 15_000;
 
 const initializeLine = `${JSON.stringify({
@@ -627,6 +629,7 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
     onThinking,
     onRateLimit,
     onDelivered,
+    onSteerable,
     permissions,
   }) => {
     const { projectPath } = launch;
@@ -641,29 +644,74 @@ export function createClaudeRunTurn({ command, dataDir }: Options): RunTurn {
 
     const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;
     const configPath = NodePath.join(dataDir, "runtime", name);
-    const attempt = (asResume: boolean) =>
+    const attempt = (asResume: boolean, text: string, stop: AbortSignal, delivered: () => void) =>
       runProcess({
         command,
         args: turnArgs(personaPath, sessionId, asResume, launch, configPath),
         cwd,
-        prompt,
+        prompt: text,
         lane: launch.lane,
-        signal,
+        signal: stop,
         onDelta,
         onToolStart,
         onToolEnd,
         onThinking,
         onRateLimit,
-        onDelivered,
+        onDelivered: delivered,
       });
+
+    // `-p` takes no input mid-turn, so a steer stops the attempt and resumes the session with the
+    // new input. A reply that already finished stands, and the steer is refused.
+    let live: AbortController | undefined;
+    let steered: { text: string; taken: (ok: boolean) => void } | undefined;
+    const steer: Steer = (text) =>
+      new Promise((taken) => {
+        if (!live || steered || live.signal.aborted) {
+          taken(false);
+          return;
+        }
+        steered = { text, taken };
+        live.abort();
+      });
+
     if (signal.aborted) {
       return { kind: "failed" };
     }
     try {
       await writeMcpConfig(configPath, permissions.url, permissions.token);
-      const first = await attempt(resume);
-      const outcome = first === "in_use" && !signal.aborted ? await attempt(true) : first;
-      return outcome === "in_use" ? { kind: "failed" } : outcome;
+      let input = prompt;
+      let asResume = resume;
+      let delivered = onDelivered;
+      let taking: ((ok: boolean) => void) | undefined;
+      for (;;) {
+        const controller = new AbortController();
+        const forward = () => controller.abort();
+        signal.addEventListener("abort", forward, { once: true });
+        const onAttemptDelivered = () => {
+          delivered();
+          live = controller;
+          onSteerable?.(steer);
+        };
+        const first = await attempt(asResume, input, controller.signal, onAttemptDelivered);
+        const outcome =
+          first === "in_use" && !controller.signal.aborted
+            ? await attempt(true, input, controller.signal, onAttemptDelivered)
+            : first;
+        signal.removeEventListener("abort", forward);
+        live = undefined;
+        taking?.(false);
+        const next = steered;
+        steered = undefined;
+        const result: TurnOutcome = outcome === "in_use" ? { kind: "failed" } : outcome;
+        if (!next || signal.aborted || result.kind === "completed") {
+          next?.taken(false);
+          return result;
+        }
+        input = `${steerNote}\n\n${next.text}`;
+        asResume = true;
+        taking = next.taken;
+        delivered = () => next.taken(true);
+      }
     } finally {
       // Never fails the turn: the token dies with the run, and the next boot wipes the directory.
       await NodeFS.rm(configPath, { force: true }).catch(() => {});
