@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,11 +11,13 @@ import { buildArgs, imageDir, podman, podmanOk } from "./podman.ts";
 
 const podmanUp = (await podman(["version", "--format", "{{.Server.Version}}"])).code === 0;
 
-const prefix = "beebot-dev-ws1";
+// Unique per run: other worktrees run this file on the same machine at the same time.
+const prefix = `beebot-dev-ws1-${randomBytes(3).toString("hex")}`;
 const image = `localhost/${prefix}-box:test`;
 const label = "beebot-dev=1";
 const containers: string[] = [];
 const volumes: string[] = [];
+let seccompDir: { machine: string; dir: string } | undefined;
 
 // With a Podman machine (Windows, macOS) the profile must live inside the machine: host paths
 // are not mounted there.
@@ -29,6 +32,7 @@ async function seccompPath() {
     ?.replace(/\*$/, "");
   if (!machine) throw new Error("no default Podman machine");
   const dir = `${prefix}-seccomp`;
+  seccompDir = { machine, dir };
   const home = await podmanOk(
     ["machine", "ssh", machine, `mkdir -p ${dir} && cat > ${dir}/seccomp-chromium.json && pwd`],
     await readFile(local, "utf8"),
@@ -128,9 +132,13 @@ describe.skipIf(!podmanUp)("box image", () => {
   afterAll(async () => {
     if (containers.length) await podman(["rm", "-f", "-t", "0", ...containers]);
     if (volumes.length) await podman(["volume", "rm", "-f", ...volumes]);
+    await podman(["rmi", image]);
+    if (seccompDir) {
+      await podman(["machine", "ssh", seccompDir.machine, `rm -rf ${seccompDir.dir}`]);
+    }
     // `podman machine ssh` must not leave the file the MSYS ssh writes for UserKnownHostsFile=NUL.
     expect(readdirSync(process.cwd())).not.toContain("NUL");
-  });
+  }, 120_000);
 
   it("ships no vendor CLI", async () => {
     const scan = await podmanOk([
