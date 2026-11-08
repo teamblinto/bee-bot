@@ -2,7 +2,6 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFs from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
-import { pipeline } from "node:stream";
 
 import type { BoxState } from "@beebot/contracts";
 
@@ -100,39 +99,13 @@ export function readyBoxRuntime(
   };
 }
 
-// Chromium's DevTools has no authentication, and the server reaches it only through boxd. Each
-// bot's endpoint is a loopback listener whose every connection is a fresh attach to its sidecar.
-export function sidecarEndpoints(runtime: BoxRuntime) {
-  const endpoints = new Map<string, Promise<SidecarEndpoint>>();
-  const servers = new Set<NodeNet.Server>();
-  async function open(botId: string): Promise<SidecarEndpoint> {
-    const server = NodeNet.createServer((socket) => {
-      socket.on("error", () => socket.destroy());
-      runtime.cdp(botId).then(
-        ({ stream }) => pipeline(socket, stream, socket, () => {}),
-        () => socket.destroy(),
-      );
-    });
-    servers.add(server);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const { port } = server.address() as NodeNet.AddressInfo;
-    return {
-      http: `http://127.0.0.1:${port}`,
-      downloadsDir: "/downloads",
-      collect: (file, name) => runtime.collect(botId, file, name),
-    };
-  }
+// Chromium's DevTools has no authentication, so the server reaches it only through boxd: every
+// connection is a fresh attach on boxd's own channel, and nothing listens on the host.
+export function sidecarEndpoint(runtime: BoxRuntime, botId: string): SidecarEndpoint {
   return {
-    endpoint: (botId: string) => {
-      const existing = endpoints.get(botId) ?? open(botId);
-      endpoints.set(botId, existing);
-      return existing;
-    },
-    close: () => {
-      for (const server of servers) {
-        server.close();
-      }
-    },
+    connect: async () => (await runtime.cdp(botId)).stream,
+    downloadsDir: "/downloads",
+    collect: (file, name) => runtime.collect(botId, file, name),
   };
 }
 
@@ -171,15 +144,13 @@ export async function startBoxHost({
     account,
     applyEgress: egress.apply,
   });
-  const sidecars = sidecarEndpoints(runtime);
   return {
     runtime,
     egress,
-    sidecar: sidecars.endpoint,
+    sidecar: async (botId: string) => sidecarEndpoint(runtime, botId),
     stderr: boxd.stderr,
     closed: boxd.closed,
     close: async () => {
-      sidecars.close();
       egress.close();
       await boxd.close();
     },

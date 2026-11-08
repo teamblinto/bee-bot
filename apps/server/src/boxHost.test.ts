@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { boxLayout } from "./boxEngine.ts";
 import { boxdFiles, boxdSecret, readyBoxRuntime, startBoxHost, windowsPodman } from "./boxHost.ts";
 import { createFakeBoxRuntime } from "./boxRuntime.ts";
+import { createCdpBrowserRuntime, fetchJson } from "./browserCdp.ts";
 import { podmanEnv } from "./boxdRuntime.ts";
 import { apiKeyName, createMemoryVault } from "./vault.ts";
 
@@ -80,6 +81,31 @@ const available =
   NodeFs.existsSync(windowsPodman) &&
   (await sh("podman info --format '{{.Host.Arch}}' >/dev/null && echo yes")).stdout === "yes";
 
+// Every socket listening on Windows for this process or anything it started, boxd's podman and
+// ssh among them.
+function hostListeners() {
+  const script = [
+    "$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)",
+    `$ids = @{ [uint32]${process.pid} = $true }`,
+    "do { $added = $false; foreach ($p in $all) {",
+    "  if ($ids.ContainsKey([uint32]$p.ParentProcessId) -and -not $ids.ContainsKey([uint32]$p.ProcessId)) { $ids[[uint32]$p.ProcessId] = $true; $added = $true }",
+    "} } while ($added)",
+    'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ids.ContainsKey([uint32]$_.OwningProcess) } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }',
+  ].join("\n");
+  const result = NodeChildProcess.spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  return result.stdout.split(/\r?\n/).filter(Boolean).sort();
+}
+
 // Lists every NUL file left where podman ran: the MSYS ssh writes one for UserKnownHostsFile=NUL.
 const nulFiles = () =>
   [process.cwd(), repo, import.meta.dirname].filter((dir) =>
@@ -100,6 +126,12 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
   let mockIp = "";
   let boxes: Awaited<ReturnType<typeof startBoxHost>> | undefined;
   let beebotd: NodeHttp.Server;
+  let listenersBefore: string[] = [];
+  // boxd's own sockets in the machine; its egress proxy listens only inside its container.
+  const boxdListeners = async () =>
+    sh(
+      `pids=$(pgrep -f '${installDir}/main.ts'); [ -n "$pids" ] || echo 'no boxd'; for p in $pids; do ss -Hltunp | grep "pid=$p,"; done; true`,
+    );
   const seenByBeebotd: { url: string; authorization: string | undefined }[] = [];
 
   const started = () => {
@@ -184,6 +216,7 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     });
     beebotd.listen(0, "127.0.0.1");
     await once(beebotd, "listening");
+    listenersBefore = hostListeners();
 
     const vault = createMemoryVault();
     await vault.put(apiKeyName("claude"), canary);
@@ -308,16 +341,29 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     );
   }, 120_000);
 
-  it("lets the server reach the sidecar's DevTools, and the engine not", async () => {
+  it("lets the server drive the sidecar's DevTools over boxd's channel, and the engine not", async () => {
     const endpoint = await started().sidecar(botId);
     let version: unknown;
     for (let attempt = 0; attempt < 60 && version === undefined; attempt += 1) {
-      version = await fetch(new URL("/json/version", endpoint.http)).then(
-        (response) => response.json(),
+      version = await fetchJson(await endpoint.connect(), "/json/version").catch(
         () => new Promise((resolve) => setTimeout(() => resolve(undefined), 1000)),
       );
     }
     expect(JSON.stringify(version)).toContain("webSocketDebuggerUrl");
+
+    const session = await createCdpBrowserRuntime(started().sidecar).open(botId, () => true);
+    try {
+      await session.navigate(
+        `data:text/html,${encodeURIComponent("<title>Bee page</title><button>Go</button>")}`,
+      );
+      const snapshot = await session.snapshot();
+      expect(snapshot.title).toBe("Bee page");
+      expect(snapshot.elements.map(({ name }) => name)).toContain("Go");
+      expect(hostListeners()).toEqual(listenersBefore);
+      expect((await boxdListeners()).stdout).toBe("");
+    } finally {
+      await session.close();
+    }
 
     const browser = await inspect(`${prefix}-${botId}-browser`);
     const sidecarIp = Object.values<{ IPAddress: string }>(browser.NetworkSettings.Networks)[0]
