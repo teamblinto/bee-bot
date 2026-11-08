@@ -55,6 +55,7 @@ export function createWatchdog(clock: AwakeClock, silenceMs: number) {
       inFlight.delete(id);
       touch();
     },
+    busy: () => inFlight.size > 0,
     stalled: () => inFlight.size === 0 && clock.awakeNow() - lastActivity >= silenceMs,
   };
 }

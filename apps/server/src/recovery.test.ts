@@ -347,6 +347,32 @@ describe("waiting states", () => {
     engine.turns[2]?.finish(reply);
     await expectStatus(store, ada, "Completed");
   });
+  it("routes the owner's answer in a group room back to the bot that asked", async () => {
+    const engine = scriptedEngine();
+    const { store, supervisor } = boot(engine.runTurn);
+    const [ada, ben] = [createBot(store, "Ada"), createBot(store, "Ben")];
+    const room = store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.id, ben.id] });
+    if (!room) {
+      throw new Error("no room");
+    }
+    const asked = { id: NodeCrypto.randomUUID(), roomId: room.id, attended: true };
+    expect(store.sendMessage({ ...asked, body: "@ada ship it" })).toBe("sent");
+    supervisor.pump();
+    await expectTurns(engine, 1);
+    const id = latestRun(store, ada)?.id ?? "";
+    engine.turns[0]?.deliver();
+    expect(supervisor.parkWaitingUser(id)).toBe(true);
+    engine.turns[0]?.finish({ kind: "completed", text: "Which branch?" });
+    await expectStatus(store, ada, "WaitingUser");
+
+    expect(supervisor.resumeFromUser(id, "main")).toBe("resumed");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]).toMatchObject({ resume: true });
+    expect(engine.turns[1]?.prompt).toContain("Owner: main");
+    expect(latestRun(store, ada)).toMatchObject({ id, status: "Running" });
+    expect(store.state().runs.filter(({ botId }) => botId === ben.id)).toEqual([]);
+  });
+
   it("parks a run that calls ask_user until the owner replies, then continues it once", async () => {
     const engine = scriptedEngine();
     const { store, supervisor, send } = boot(engine.runTurn);

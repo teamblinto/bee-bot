@@ -227,12 +227,15 @@ describe("delegation limits", () => {
       parent_run_id: "other",
     };
     expect(call(parent, "delegate", spoofed)).toMatchObject({ status: "delegated" });
+    // The owner's message started the chain the run carries.
+    const chainId = store.state().messages[0]?.chainId;
+    expect(chainId).toEqual(expect.any(String));
     expect(store.state().tasks).toMatchObject([
       {
         requesterBotId: ada.id,
         ownerBotId: ben.id,
         parentRunId: parent.id,
-        chainId: parent.id,
+        chainId,
         hop: 1,
         depth: 1,
       },
