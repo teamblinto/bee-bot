@@ -132,6 +132,7 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
   seq,
   chat: { ...emptyChat, ...chat },
   models: undefined,
+  boxAvailability: undefined,
   drafts: {},
   liveTools: {},
   thinking: {},

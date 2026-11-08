@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFs from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import type { BoxState } from "@beebot/contracts";
 
@@ -66,10 +67,18 @@ export function readyBoxRuntime(
     account: (botId: string) => string | undefined;
     applyEgress: (botId: string) => Promise<void>;
   },
-): BoxRuntime {
+): BoxRuntime & { ready: (botId: string) => Promise<void> } {
   const queues = new Map<string, Promise<unknown>>();
+  function serially(botId: string, work: () => Promise<void>) {
+    const run = (queues.get(botId) ?? Promise.resolve()).then(work, work);
+    queues.set(
+      botId,
+      run.catch(() => {}),
+    );
+    return run;
+  }
   function ready(botId: string) {
-    const work = async () => {
+    return serially(botId, async () => {
       const state: BoxState = await runtime.snapshot(botId);
       if (state === "absent") {
         await runtime.create(botId, account(botId));
@@ -78,16 +87,12 @@ export function readyBoxRuntime(
         await runtime.start(botId);
       }
       await applyEgress(botId);
-    };
-    const run = (queues.get(botId) ?? Promise.resolve()).then(work, work);
-    queues.set(
-      botId,
-      run.catch(() => {}),
-    );
-    return run;
+    });
   }
   return {
     ...runtime,
+    // In the same queue, so a use right after an idle stop starts the box again.
+    stop: (botId) => serially(botId, () => runtime.stop(botId)),
     execAttach: async (botId, exec) => {
       await ready(botId);
       return runtime.execAttach(botId, exec);
@@ -96,14 +101,113 @@ export function readyBoxRuntime(
       await ready(botId);
       return runtime.cdp(botId);
     },
+    ready,
   };
+}
+
+// R16 makes a box two containers, so an idle one is stopped. Its volumes stay, and its next use
+// starts it again.
+export const boxQuietMs = 15 * 60_000;
+
+export type BoxUse = { attached: number; lastUsedAt: number };
+
+// Idle: nothing attached to the engine, and no byte through the sidecar's DevTools, for `quietMs`.
+export function idleBoxes(uses: ReadonlyMap<string, BoxUse>, now: number, quietMs: number) {
+  return [...uses]
+    .filter(([, use]) => use.attached === 0 && now - use.lastUsedAt >= quietMs)
+    .map(([botId]) => botId);
+}
+
+export function stopIdleBoxes(
+  runtime: BoxRuntime,
+  { quietMs = boxQuietMs, everyMs = 60_000, now = Date.now } = {},
+) {
+  const uses = new Map<string, BoxUse>();
+  function use(botId: string) {
+    const entry = uses.get(botId) ?? { attached: 0, lastUsedAt: now() };
+    uses.set(botId, entry);
+    entry.lastUsedAt = now();
+    return entry;
+  }
+  const timer = setInterval(() => {
+    for (const botId of idleBoxes(uses, now(), quietMs)) {
+      uses.delete(botId);
+      runtime.stop(botId).catch((error: unknown) => {
+        console.error(`beebotd: idle box ${botId} didn't stop: ${(error as Error)?.message}`);
+      });
+    }
+  }, everyMs);
+  timer.unref();
+  return {
+    runtime: {
+      ...runtime,
+      execAttach: async (botId, exec) => {
+        use(botId).attached += 1;
+        const release = () => {
+          use(botId).attached -= 1;
+        };
+        try {
+          const attach = await runtime.execAttach(botId, exec);
+          void attach.exited.finally(release);
+          return attach;
+        } catch (error) {
+          release();
+          throw error;
+        }
+      },
+    } satisfies BoxRuntime,
+    touch: (botId: string) => {
+      use(botId);
+    },
+    close: () => clearInterval(timer),
+  };
+}
+
+// Idle stop counts DevTools bytes; this passes every one of them on to the caller.
+function touching(stream: NodeStream.Duplex, touch: () => void) {
+  const tapped = new NodeStream.Duplex({
+    read: () => {
+      stream.resume();
+    },
+    write: (chunk, encoding, done) => {
+      touch();
+      stream.write(chunk, encoding, done);
+    },
+    final: (done) => {
+      stream.end(done);
+    },
+    destroy: (error, done) => {
+      stream.destroy(error ?? undefined);
+      done(error);
+    },
+  });
+  stream.on("data", (chunk) => {
+    touch();
+    if (!tapped.push(chunk)) {
+      stream.pause();
+    }
+  });
+  stream.on("end", () => tapped.push(null));
+  NodeStream.finished(stream, (error) => {
+    if (error) {
+      tapped.destroy(error);
+    }
+  });
+  return tapped;
 }
 
 // Chromium's DevTools has no authentication, so the server reaches it only through boxd: every
 // connection is a fresh attach on boxd's own channel, and nothing listens on the host.
-export function sidecarEndpoint(runtime: BoxRuntime, botId: string): SidecarEndpoint {
+export function sidecarEndpoint(
+  runtime: BoxRuntime,
+  botId: string,
+  touch: (botId: string) => void = () => {},
+): SidecarEndpoint {
   return {
-    connect: async () => (await runtime.cdp(botId)).stream,
+    connect: async () => {
+      touch(botId);
+      return touching((await runtime.cdp(botId)).stream, () => touch(botId));
+    },
     downloadsDir: "/downloads",
     collect: (file, name) => runtime.collect(botId, file, name),
   };
@@ -140,17 +244,24 @@ export async function startBoxHost({
     hooks: { relay: () => NodeNet.connect(beebotdPort(), "127.0.0.1") },
   });
   const egress = createEgressControl({ connect: boxd.egressControl, vault, egressInput });
-  const runtime = readyBoxRuntime(recordingBoxRuntime(boxd.runtime, setBox), {
+  const ready = readyBoxRuntime(recordingBoxRuntime(boxd.runtime, setBox), {
     account,
     applyEgress: egress.apply,
   });
+  const idle = stopIdleBoxes(ready);
   return {
-    runtime,
+    runtime: idle.runtime,
+    // Brings a box up ahead of its first turn.
+    prepare: (botId: string) => {
+      idle.touch(botId);
+      return ready.ready(botId);
+    },
     egress,
-    sidecar: async (botId: string) => sidecarEndpoint(runtime, botId),
+    sidecar: async (botId: string) => sidecarEndpoint(idle.runtime, botId, idle.touch),
     stderr: boxd.stderr,
     closed: boxd.closed,
     close: async () => {
+      idle.close();
       egress.close();
       await boxd.close();
     },

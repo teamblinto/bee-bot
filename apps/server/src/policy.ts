@@ -1,7 +1,13 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { type AuditPage, type Bot, BotProfile, type Manifest } from "@beebot/contracts";
+import {
+  type AuditPage,
+  type Bot,
+  type BotBoundary,
+  BotProfile,
+  type Manifest,
+} from "@beebot/contracts";
 import { z } from "zod";
 
 import { type AuditQuery, openAudit } from "./audit.ts";
@@ -49,6 +55,13 @@ export function openPolicy(
   const selectBotPolicy = db.prepare("SELECT profile, manifest FROM bots WHERE id = ?");
   const updateProfile = db.prepare("UPDATE bots SET profile = ? WHERE id = ?");
   const updateManifest = db.prepare("UPDATE bots SET manifest = ? WHERE id = ?");
+  const updateBoundary = db.prepare(
+    "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
+  );
+  // A session lives in one boundary's CLI home, so the other side starts a new one.
+  const forgetSessions = db.prepare(
+    "UPDATE scopes SET session_id = NULL, session_started = 0 WHERE bot_id = ?",
+  );
   const selectLegs = db.prepare(
     `SELECT s.legs_untrusted AS readsUntrusted, s.legs_private AS readsPrivate,
        s.legs_side_effect AS sideEffect
@@ -144,6 +157,26 @@ export function openPolicy(
             status: "manifest_set",
             reason: sorted.join(",").slice(0, 200),
           });
+        }
+        return bot;
+      }),
+
+    setBotBoundary: (botId: string, boundary: BotBoundary) =>
+      transaction(() => {
+        if (updateBoundary.get(boundary, botId, boundary)) {
+          forgetSessions.run(botId);
+          appendAudit({
+            runId: null,
+            botId,
+            initiator: "human",
+            attended: true,
+            status: "boundary_set",
+            reason: boundary,
+          });
+        }
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
         }
         return bot;
       }),

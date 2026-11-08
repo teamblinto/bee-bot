@@ -1,5 +1,6 @@
 import {
   Bot,
+  type BoxAvailability,
   BotProfile,
   browserGrant,
   defaultBotModel,
@@ -20,6 +21,7 @@ import { codexRulesWarning, laneLabels, projectPathValue } from "../labels";
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { ModelPicker } from "./ModelPicker";
+import { AutomatedAccessNotice } from "./VaultPanel";
 import { iconProps } from "./ui";
 
 const randomSeed = () => crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
@@ -41,6 +43,18 @@ const profileLabels: Record<BotProfile, { name: string; help: string }> = {
 };
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
+
+function boxUnavailableReason(boxes: BoxAvailability | undefined) {
+  if (!boxes) {
+    return "This server can't run boxes.";
+  }
+  if (boxes.available) {
+    return undefined;
+  }
+  return boxes.settingUp
+    ? "Boxes are being set up. Try again when that's done."
+    : "Boxes aren't set up. Set them up on the Usage page.";
+}
 
 export function BotForm({
   bot,
@@ -67,6 +81,15 @@ export function BotForm({
   const [laneChoice, setLaneChoice] = useState<EngineLane>();
   const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
   const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? false);
+  const [inBox, setInBox] = useState(bot?.boundary === "box");
+  const boxes = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().boxAvailability,
+  );
+  const apiKeys = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().chat.vault.apiKeys,
+  );
   const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -76,6 +99,7 @@ export function BotForm({
   const lane = laneChoice ?? savedLane ?? "subscription";
   const laneAccount = accountId === "claude" || accountId === "codex" ? accountId : undefined;
   const lanes = laneAccount && laneLabels[laneAccount];
+  const boxProblem = boxUnavailableReason(boxes);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -123,9 +147,14 @@ export function BotForm({
               : created.manifest.filter((grant) => grant !== browserGrant),
           })
         : undefined;
+    const boundary = inBox ? "box" : "host";
+    const boundaryResult =
+      created && created.boundary !== boundary
+        ? await postCommand({ type: "set-bot-boundary", botId: created.id, boundary })
+        : undefined;
     saving.current = false;
     setBusy(false);
-    const last = manifestResult ?? profileResult ?? result;
+    const last = boundaryResult ?? manifestResult ?? profileResult ?? result;
     const saved = last.ok ? Bot.safeParse(last.body).data : undefined;
     if (saved) {
       onSaved(saved);
@@ -240,6 +269,34 @@ export function BotForm({
       <p id="browser-help" className="text-small text-ink-secondary">
         Lets the bot open web pages in its own browser. Every page counts as untrusted content.
       </p>
+      <label className="flex items-center gap-2 text-label text-ink-secondary">
+        <input
+          type="checkbox"
+          aria-describedby="box-help"
+          checked={inBox}
+          // A bot in a box can always leave it.
+          disabled={!inBox && boxProblem !== undefined}
+          onChange={(event) => setInBox(event.target.checked)}
+        />
+        Run in a box
+      </label>
+      <div id="box-help" className="flex flex-col gap-2 text-small text-ink-secondary">
+        <p>
+          {!inBox && boxProblem
+            ? boxProblem
+            : "The bot works in its own container, away from your files, so it can run on its own: on a schedule or while you're away."}
+        </p>
+        {inBox && (
+          <>
+            <p>
+              {laneAccount && apiKeys.includes(laneAccount)
+                ? "On its own, it uses your saved API key."
+                : "No API key is saved for this engine, so on its own it uses your subscription. You can save a key on the Usage page."}
+            </p>
+            <AutomatedAccessNotice />
+          </>
+        )}
+      </div>
       <label className={labelClass}>
         Project folder (optional)
         <input

@@ -46,7 +46,7 @@ import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import { openVaultEntries } from "./vault.ts";
-import { openVaultStore } from "./vaultStore.ts";
+import { openVaultStore, unattendedLane } from "./vaultStore.ts";
 import {
   buildMemory,
   ftsQuery,
@@ -606,6 +606,11 @@ export const migrations: Array<{
         WHERE id = NEW.id;
     END;`,
   },
+  {
+    name: "m3_box_machine",
+    // The Podman machine boxes run in. Null takes the default.
+    sql: "ALTER TABLE settings ADD COLUMN box_machine TEXT",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1120,6 +1125,8 @@ export function openEventStore(dataDir: string) {
   const selectAutomatedAccess = db.prepare(
     "SELECT automated_access_acknowledged_at AS acknowledgedAt FROM settings",
   );
+  const selectBoxMachine = db.prepare("SELECT box_machine AS machine FROM settings");
+  const updateBoxMachine = db.prepare("UPDATE settings SET box_machine = ?");
   const { environmentId } = z
     .object({ environmentId: z.string().min(1) })
     .parse(db.prepare("SELECT environment_id AS environmentId FROM settings").get());
@@ -1240,6 +1247,10 @@ export function openEventStore(dataDir: string) {
      RETURNING ${firingColumns}`,
   );
   const selectFiring = db.prepare(`SELECT ${firingColumns} FROM routine_firings WHERE id = ?`);
+  const selectReadyFirings = db.prepare(
+    `SELECT f.id, r.bot_id AS botId FROM routine_firings f JOIN routines r ON r.id = f.routine_id
+     WHERE f.status = 'ready' ORDER BY f.rowid`,
+  );
   const selectSlot = db.prepare("SELECT 1 FROM routine_firings WHERE routine_id = ? AND slot = ?");
   const selectLatestFirings = db.prepare(
     `SELECT ${firingColumns} FROM routine_firings
@@ -1843,6 +1854,53 @@ export function openEventStore(dataDir: string) {
   const boxes = openBoxes(db, tx);
   const continuations = openContinuations(db, tx);
   const { vaultStatus } = openVaultEntries(db);
+  const automatedAccessAt = () =>
+    z.object({ acknowledgedAt: z.string().nullable() }).parse(selectAutomatedAccess.get())
+      .acknowledgedAt;
+  const laneOfBox = (engineAccountId: string) =>
+    unattendedLane(vaultStatus().apiKeys.includes(engineAccountId), automatedAccessAt());
+
+  // `automatic`: the routine runs on its own, so no person's click is needed.
+  const startFiring = (id: string, attended: boolean, automatic: boolean) =>
+    transaction(() => {
+      const row = selectFiring.get(id);
+      if (!row) {
+        return "not_found";
+      }
+      const firing = RoutineFiring.parse(row);
+      if (firing.status !== "ready") {
+        return "firing_closed";
+      }
+      if (!attended && !automatic) {
+        return "not_attended";
+      }
+      const routine = RoutineRow.parse(selectRoutine.get(firing.routineId));
+      const lateMs = Math.max(Date.now() - Date.parse(firing.slot), 0);
+      const { skipIfLaterMins } = routine;
+      if (skipIfLaterMins !== null && lateMs > skipIfLaterMins * 60_000) {
+        endOpenFiring(routine.id, "skipped", "too_late");
+        return "too_late";
+      }
+      const { id: botId, roomId, status } = BotRow.parse(selectBot.get(routine.botId));
+      if (status === "paused") {
+        return "bot_paused";
+      }
+      if (selectActiveRun.get(botId)) {
+        return "bot_busy";
+      }
+      const now = new Date().toISOString();
+      // A retry needs its own message, and the first attempt keeps the firing's ID.
+      const messageId = firing.attempts === 0 ? id : NodeCrypto.randomUUID();
+      const started = RoutineFiring.parse(startAttempt.get(now, messageId, id));
+      emit({ type: "firing.changed", firing: started });
+      markRoutineAttempt.run(now, routine.id);
+      emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
+      const body = routineBody(routine, firing.slot, lateMs);
+      if (postMessage({ id: messageId, roomId, body, attended }, "routine") !== "sent") {
+        throw new Error(`firing ${id} could not post its message`);
+      }
+      return "started";
+    });
 
   return {
     rooms,
@@ -1891,10 +1949,19 @@ export function openEventStore(dataDir: string) {
       boxes: boxes.listBoxes(),
       continuations: continuations.waitingContinuations(),
       vault: vaultStatus(),
-      automatedAccessAcknowledgedAt: z
-        .object({ acknowledgedAt: z.string().nullable() })
-        .parse(selectAutomatedAccess.get()).acknowledgedAt,
+      automatedAccessAcknowledgedAt: automatedAccessAt(),
     }),
+
+    // R7, for a box bot: the lane an unattended run may take, or null when the owner allowed none.
+    boxLane: (botId: string) => {
+      const bot = getBot(botId);
+      return bot ? laneOfBox(bot.engineAccountId) : null;
+    },
+    boxMachine: () =>
+      z.object({ machine: z.string().nullable() }).parse(selectBoxMachine.get()).machine,
+    setBoxMachine: (machine: string) => {
+      updateBoxMachine.run(machine);
+    },
 
     createBot: ({
       name,
@@ -2070,7 +2137,9 @@ export function openEventStore(dataDir: string) {
     // Row by row, so one bad row can't block the others. A slot is decided only by comparing the
     // wall clock with the stored time, so a laptop's sleep is just a catch-up on the next tick.
     // Slots first, so a retry whose routine has a newer slot is no longer the latest firing.
-    fireDueRoutines: (now: string) => {
+    // A ready firing of a bot `runsItself` approves starts unattended, and is tried again each tick
+    // while its bot is busy. Every other firing is a card that waits for a person.
+    fireDueRoutines: (now: string, runsItself: (botId: string) => boolean = () => false) => {
       for (const row of selectDueRoutines.all(now)) {
         try {
           fireRoutine(row, now);
@@ -2087,50 +2156,21 @@ export function openEventStore(dataDir: string) {
       } catch (error) {
         console.error("beebotd: routine retries failed", error);
       }
+      const ready = z.array(z.object({ id: z.string(), botId: z.string() }));
+      for (const { id, botId } of ready.parse(selectReadyFirings.all())) {
+        try {
+          if (runsItself(botId)) {
+            startFiring(id, false, true);
+          }
+        } catch (error) {
+          console.error(`beebotd: firing ${id} failed to start`, error);
+        }
+      }
     },
 
     // Only a person's click reaches this. `attended` can't stand in for one: it says a client is
     // connected, not that anybody decided anything.
-    startFiring: (id: string, attended: boolean) =>
-      transaction(() => {
-        const row = selectFiring.get(id);
-        if (!row) {
-          return "not_found";
-        }
-        const firing = RoutineFiring.parse(row);
-        if (firing.status !== "ready") {
-          return "firing_closed";
-        }
-        if (!attended) {
-          return "not_attended";
-        }
-        const routine = RoutineRow.parse(selectRoutine.get(firing.routineId));
-        const lateMs = Math.max(Date.now() - Date.parse(firing.slot), 0);
-        const { skipIfLaterMins } = routine;
-        if (skipIfLaterMins !== null && lateMs > skipIfLaterMins * 60_000) {
-          endOpenFiring(routine.id, "skipped", "too_late");
-          return "too_late";
-        }
-        const { id: botId, roomId, status } = BotRow.parse(selectBot.get(routine.botId));
-        if (status === "paused") {
-          return "bot_paused";
-        }
-        if (selectActiveRun.get(botId)) {
-          return "bot_busy";
-        }
-        const now = new Date().toISOString();
-        // A retry needs its own message, and the first attempt keeps the firing's ID.
-        const messageId = firing.attempts === 0 ? id : NodeCrypto.randomUUID();
-        const started = RoutineFiring.parse(startAttempt.get(now, messageId, id));
-        emit({ type: "firing.changed", firing: started });
-        markRoutineAttempt.run(now, routine.id);
-        emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
-        const body = routineBody(routine, firing.slot, lateMs);
-        if (postMessage({ id: messageId, roomId, body, attended }, "routine") !== "sent") {
-          throw new Error(`firing ${id} could not post its message`);
-        }
-        return "started";
-      }),
+    startFiring: (id: string, attended: boolean) => startFiring(id, attended, false),
     skipFiring: (id: string) =>
       transaction(() => {
         const row = selectFiring.get(id);
@@ -2188,6 +2228,8 @@ export function openEventStore(dataDir: string) {
           selectActiveRun.get(wake.botId) !== undefined ||
           selectEarlierInChain.get(wake.id) !== undefined,
         hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
+        boundary: bot.boundary,
+        unattendedLane: laneOfBox(bot.engineAccountId),
         botStatus: bot.status,
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
