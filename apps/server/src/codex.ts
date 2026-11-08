@@ -34,7 +34,18 @@ const invalidRequestCode = -32_600;
 
 const tokenVariable = "BEE_MCP_TOKEN";
 // Exact names, so `approve` stays off the model's tool list. A new one must be added on purpose.
-const memoryTools = ["memory_search", "memory_get", "memory_propose", "memory_forget"];
+const beeTools = [
+  "memory_search",
+  "memory_get",
+  "memory_propose",
+  "memory_forget",
+  "send_message",
+  "notify",
+  "delegate",
+  "handoff",
+  "ask_user",
+  "create_routine",
+];
 
 // Measured on 0.167.0, and version-gated for that reason. `unified_exec_tty` stops stdin smuggling
 // into an approved shell. `code_mode_host` must stay on: disabling it breaks all execution.
@@ -95,7 +106,7 @@ const beeArgs = (url: string) =>
   [
     `mcp_servers.bee.url=${JSON.stringify(url)}`,
     `mcp_servers.bee.bearer_token_env_var="${tokenVariable}"`,
-    `mcp_servers.bee.enabled_tools=${JSON.stringify(memoryTools)}`,
+    `mcp_servers.bee.enabled_tools=${JSON.stringify(beeTools)}`,
     // Otherwise every memory call raises an elicitation, which is refused like any other.
     'mcp_servers.bee.default_tools_approval_mode="approve"',
     `shell_environment_policy.exclude=["${tokenVariable}"]`,

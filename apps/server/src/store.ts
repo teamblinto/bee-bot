@@ -32,7 +32,7 @@ import { z } from "zod";
 import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openRooms } from "./rooms.ts";
-import { openTasks } from "./tasks.ts";
+import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { catchUpWindowMs, dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import {
@@ -461,7 +461,20 @@ const Scope = z.object({
   sessionStarted: z.number().transform(Boolean),
 });
 type Scope = z.infer<typeof Scope>;
-const Input = z.object({ body: z.string(), seq: z.number() });
+const Input = z.object({
+  id: z.string(),
+  body: z.string(),
+  seq: z.number(),
+  botName: z.string().nullable(),
+  chainId: z.string().nullable(),
+  hop: z.number(),
+});
+const Origin = z.object({
+  chainId: z.string().nullable(),
+  hop: z.number(),
+  depth: z.number(),
+  taskId: z.string().nullable(),
+});
 const MessageRow = ChatMessage.extend({
   tools: z.string().transform((text) => z.array(z.string()).parse(JSON.parse(text))),
 });
@@ -517,6 +530,7 @@ export type FinishedRun = {
   pauseBot?: PauseReason;
 };
 
+const settledAs = { Completed: "done", Failed: "failed", Cancelled: "cancelled" } as const;
 const continuationNote =
   "Your previous turn was cut off before it finished. Continue from where you left off.";
 const approvalsInState = 500;
@@ -721,12 +735,16 @@ export function openEventStore(dataDir: string) {
     `INSERT INTO messages (id, room_id, author, body, tools, worked_ms, bot_id, reply_to_id,
        chain_id, hop, event_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  // Another bot's message is input too. Bot rows from before bot_id are the scope's own bot.
   const selectInput = db.prepare(
-    `SELECT body, event_seq AS seq FROM messages
-     WHERE room_id = ? AND author = 'human' AND event_seq > ? ORDER BY event_seq`,
+    `SELECT m.id, m.body, m.event_seq AS seq, b.name AS botName, m.chain_id AS chainId, m.hop
+     FROM messages m LEFT JOIN bots b ON b.id = m.bot_id
+     WHERE m.room_id = ? AND m.event_seq > ? AND (m.author = 'human' OR m.bot_id <> ?)
+     ORDER BY m.event_seq`,
   );
   const selectHistory = db.prepare(
-    `SELECT author, body FROM messages WHERE room_id = ? AND (author = 'bot' OR event_seq <= ?)
+    `SELECT author, body FROM messages WHERE room_id = ?
+       AND (event_seq <= ? OR (author = 'bot' AND (bot_id IS NULL OR bot_id = ?)))
      ORDER BY event_seq DESC LIMIT ${digestRows}`,
   );
 
@@ -761,8 +779,8 @@ export function openEventStore(dataDir: string) {
   const wakeColumns = "id, bot_id AS botId, scope_id AS scopeId, attended";
   const insertWake = db.prepare(
     `INSERT OR IGNORE INTO wakes
-     (id, bot_id, scope_id, idempotency_key, attended, source, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+     (id, bot_id, scope_id, idempotency_key, attended, source, chain_id, hop, depth, status,
+       created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
   );
   const selectPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND attended = ? AND status = 'pending'",
@@ -781,6 +799,15 @@ export function openEventStore(dataDir: string) {
     "SELECT id FROM wakes WHERE scope_id = ? AND status = 'pending'",
   );
   const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
+  // A run carries the chain of the task input it answers, even when a human's wake started it,
+  // and works on the one open task its bot owns.
+  const selectOrigin = db.prepare(
+    `SELECT chain_id AS chainId, hop, depth,
+       CASE WHEN source IN ('task', 'continue') THEN (SELECT id FROM tasks
+         WHERE owner_bot_id = wakes.bot_id AND status = 'open') END AS taskId
+     FROM wakes WHERE id = ? OR (scope_id = ? AND status = 'pending' AND source = 'task')
+     ORDER BY source = 'task' DESC, hop DESC LIMIT 1`,
+  );
 
   const runColumns = `id, bot_id AS botId, status, reason, created_at AS createdAt,
     started_at AS startedAt, ended_at AS endedAt, scope_id AS scopeId, wake_id AS wakeId, engine_account_id AS engineAccountId,
@@ -806,8 +833,8 @@ export function openEventStore(dataDir: string) {
   );
   const insertRun = db.prepare(
     `INSERT OR IGNORE INTO runs
-     (id, bot_id, scope_id, wake_id, engine_account_id, status, reason, created_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, bot_id, scope_id, wake_id, engine_account_id, status, reason, chain_id, hop, depth,
+       task_id, created_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const claim = db.prepare(
     `UPDATE runs SET status = 'Running', boot_id = ?, started_at = ?
@@ -914,7 +941,12 @@ export function openEventStore(dataDir: string) {
   );
   const insertRoutine = db.prepare(
     `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, skip_if_later_mins,
-       next_fire_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       next_fire_at, created_by_run_id, approved_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  // An owner enabling a routine a bot made is the approval it waited for.
+  const approveRoutine = db.prepare(
+    "UPDATE routines SET approved_at = COALESCE(approved_at, ?) WHERE id = ? AND enabled = 1",
   );
   const updateRoutineFields = db.prepare(
     `UPDATE routines SET name = ?, prompt = ?, cron = ?, timezone = ?, enabled = ?,
@@ -1013,7 +1045,7 @@ export function openEventStore(dataDir: string) {
   };
   const getScope = (id: string) => Scope.parse(selectScope.get(id));
   const unackedInput = (scope: Scope) =>
-    z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq));
+    z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq, scope.botId));
 
   // Delivered input is already in the engine's transcript, so it is never sent twice. A new session
   // has no transcript, so it opens with the room history that came before this input.
@@ -1021,13 +1053,18 @@ export function openEventStore(dataDir: string) {
     const input = unackedInput(scope).filter(
       ({ seq }) => seq > scope.deliveredEventSeq && seq <= highSeq,
     );
-    const text = input.map(({ body }) => body).join("\n\n") || continuationNote;
+    const text =
+      input
+        .map(({ botName, ...row }) =>
+          botName === null ? row.body : inboundText({ ...row, botName }),
+        )
+        .join("\n\n") || continuationNote;
     if (scope.sessionStarted) {
       return text;
     }
     const history = z
       .array(HistoryRow)
-      .parse(selectHistory.all(scope.roomId, scope.deliveredEventSeq));
+      .parse(selectHistory.all(scope.roomId, scope.deliveredEventSeq, scope.botId));
     const digest = buildDigest(history);
     return digest ? `${digest}\n\n${text}` : text;
   }
@@ -1045,7 +1082,13 @@ export function openEventStore(dataDir: string) {
     emit({ type: "approval.changed", approval });
   }
 
-  function addWake(scope: Scope, key: string, attended: boolean, source: WakeSource) {
+  function addWake(
+    scope: Scope,
+    key: string,
+    attended: boolean,
+    source: WakeSource,
+    { chainId, hop, depth }: ChainPoint = { chainId: null, hop: 0, depth: 0 },
+  ) {
     insertWake.run(
       NodeCrypto.randomUUID(),
       scope.botId,
@@ -1053,6 +1096,9 @@ export function openEventStore(dataDir: string) {
       key,
       attended ? 1 : 0,
       source,
+      chainId,
+      hop,
+      depth,
       new Date().toISOString(),
     );
   }
@@ -1062,6 +1108,7 @@ export function openEventStore(dataDir: string) {
     const id = NodeCrypto.randomUUID();
     const now = new Date().toISOString();
     const endedAt = status === "Refused" ? now : null;
+    const origin = Origin.parse(selectOrigin.get(wake.id, wake.scopeId));
     const { changes } = insertRun.run(
       id,
       wake.botId,
@@ -1070,12 +1117,20 @@ export function openEventStore(dataDir: string) {
       engineAccountId,
       status,
       reason,
+      origin.chainId,
+      origin.hop,
+      origin.depth,
+      origin.taskId,
       now,
       endedAt,
     );
     if (changes > 0) {
       markWakeDone.run(wake.id);
-      recordRun(RunRow.parse(selectRun.get(id)));
+      const run = RunRow.parse(selectRun.get(id));
+      recordRun(run);
+      if (status === "Refused") {
+        tasks.settleRun(run, "refused", "");
+      }
     }
   }
 
@@ -1297,7 +1352,24 @@ export function openEventStore(dataDir: string) {
 
   const tx: StoreTx = { transaction, emit };
   const rooms = openRooms(db, tx);
-  const tasks = openTasks(db, tx);
+  const tasks = openTasks(db, tx, {
+    post: ({ id, roomId, botId, body, chainId, hop }) =>
+      addMessage({
+        id,
+        roomId,
+        author: "bot",
+        body,
+        tools: [],
+        workedMs: null,
+        botId,
+        replyToId: null,
+        chainId,
+        hop,
+        createdAt: new Date().toISOString(),
+      }),
+    wake: (scopeId, key, attended, chain) =>
+      addWake(getScope(scopeId), key, attended, "task", chain),
+  });
 
   return {
     rooms,
@@ -1414,10 +1486,14 @@ export function openEventStore(dataDir: string) {
       transaction(() => postMessage(input)),
 
     getRoutine,
-    createRoutine: (fields: RoutineFields & Pick<Routine, "botId">) =>
+    createRoutine: (
+      fields: RoutineFields &
+        Pick<Routine, "botId"> & { createdByRunId?: string; approvedAt?: string | null },
+    ) =>
       transaction(() => {
         const now = new Date().toISOString();
         const { botId, name, prompt, cron, timezone, enabled, skipIfLaterMins } = fields;
+        const { createdByRunId = null, approvedAt = now } = fields;
         const id = NodeCrypto.randomUUID();
         const next = enabled ? nextSlot(fields, now) : null;
         insertRoutine.run(
@@ -1430,6 +1506,8 @@ export function openEventStore(dataDir: string) {
           enabled ? 1 : 0,
           skipIfLaterMins,
           next,
+          createdByRunId,
+          approvedAt,
           now,
         );
         const routine = RoutineRow.parse(selectRoutine.get(id));
@@ -1460,6 +1538,7 @@ export function openEventStore(dataDir: string) {
           next,
           id,
         );
+        approveRoutine.run(new Date().toISOString(), id);
         const routine = RoutineRow.parse(selectRoutine.get(id));
         emit({ type: "routine.changed", routine });
         return routine;
@@ -1555,7 +1634,8 @@ export function openEventStore(dataDir: string) {
         // A repeat click finds the pending wake or a newer run. Once stopped, the wake is gone,
         // so a fixed key would stop the owner continuing again.
         if (!selectAnyPendingWake.get(scope.id)) {
-          addWake(scope, `continue:${run.id}:${NodeCrypto.randomUUID()}`, attended, "continue");
+          const key = `continue:${run.id}:${NodeCrypto.randomUUID()}`;
+          addWake(scope, key, attended, "continue", run);
         }
         return "continued";
       }),
@@ -1594,7 +1674,9 @@ export function openEventStore(dataDir: string) {
       transaction(() => {
         const row = endQueuedRun.get("Refused", reason, new Date().toISOString(), id);
         if (row) {
-          recordRun(RunRow.parse(row));
+          const run = RunRow.parse(row);
+          recordRun(run);
+          tasks.settleRun(run, "refused", "");
         }
       }),
 
@@ -1685,6 +1767,10 @@ export function openEventStore(dataDir: string) {
           advanceDelivered.run(run.inputHighSeq, run.scopeId);
         }
         recordRun(run);
+        // A limited run's wake reopens, so its task is still being worked on.
+        if (!finished.blockedUntil) {
+          tasks.settleRun(run, settledAs[finished.status], finished.reply ?? "");
+        }
         if (finished.blockedUntil) {
           blockAccount.run(finished.blockedUntil, run.engineAccountId);
           reopenWake.run(finished.blockedUntil, run.wakeId);
@@ -1718,8 +1804,11 @@ export function openEventStore(dataDir: string) {
         if (active.status === "Running") {
           return active.id;
         }
-        const ended = endQueuedRun.get("Cancelled", "stopped", new Date().toISOString(), active.id);
-        recordRun(RunRow.parse(ended));
+        const ended = RunRow.parse(
+          endQueuedRun.get("Cancelled", "stopped", new Date().toISOString(), active.id),
+        );
+        recordRun(ended);
+        tasks.settleRun(ended, "cancelled", "");
         return undefined;
       }),
 

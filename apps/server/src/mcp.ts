@@ -3,6 +3,7 @@ import type * as NodeHttp from "node:http";
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
+import { botToolNames, botTools } from "./botTools.ts";
 import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
@@ -22,6 +23,7 @@ const tools = [
     },
   },
   ...memoryTools,
+  ...botTools,
 ];
 const memoryNames = new Set(memoryTools.map(({ name }) => name));
 
@@ -79,6 +81,7 @@ export async function answerMcp(
   body: string,
   approve: (args: unknown, closed: AbortSignal) => Promise<Decision>,
   memory: (name: string, args: unknown) => string,
+  bot: (name: string, args: unknown) => string,
   keepaliveMs = defaultKeepaliveMs,
 ) {
   const rpc = parseRpc(body);
@@ -116,6 +119,17 @@ export async function answerMcp(
           // The kind only, here and in the answer: the error can quote memory text.
           console.error(`beebotd: memory tool failed: ${(error as Error)?.name}`);
           text = "Memory is unavailable right now.";
+        }
+        answer({ content: [{ type: "text", text }] });
+        return;
+      }
+      if (typeof params?.name === "string" && botToolNames.has(params.name)) {
+        let text: string;
+        try {
+          text = bot(params.name, params.arguments);
+        } catch (error) {
+          console.error(`beebotd: bot tool ${params.name} failed: ${(error as Error)?.name}`);
+          text = "This tool is unavailable right now.";
         }
         answer({ content: [{ type: "text", text }] });
         return;

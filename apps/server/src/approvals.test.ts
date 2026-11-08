@@ -223,6 +223,12 @@ describe("the MCP endpoint", () => {
       "memory_get",
       "memory_propose",
       "memory_forget",
+      "send_message",
+      "notify",
+      "delegate",
+      "handoff",
+      "ask_user",
+      "create_routine",
     ]);
     // A read-only hint would let the CLI run a memory call alongside a tool, ahead of the taint.
     expect(list.result.tools.every(({ annotations }) => annotations === undefined)).toBe(true);

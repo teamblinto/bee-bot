@@ -23,6 +23,13 @@ afterEach(() => {
   NodeFS.rmSync(dataDir, { recursive: true, force: true });
 });
 
+const open = () => {
+  if (!store) {
+    throw new Error("no store");
+  }
+  return store;
+};
+
 const rows = (db: DatabaseSync, sql: string) =>
   db
     .prepare(sql)
@@ -123,6 +130,9 @@ function parentRun(open: EventStore) {
   return { bot, run };
 }
 
+const owner = (open: EventStore, name: string) =>
+  open.createBot({ name, personality: "", engineAccountId: "fake" }).id;
+
 function taskInput(open: EventStore, key: string): TaskInput {
   const { bot, run } = parentRun(open);
   return {
@@ -136,26 +146,31 @@ function taskInput(open: EventStore, key: string): TaskInput {
     roomId: bot.roomId,
     goal: "Look it up",
     deliveryKey: key,
+    attended: true,
   };
 }
 
 describe("tasks", () => {
   it("refuses a run's 4th task, and a repeated key spends nothing", () => {
     store = openEventStore(dataDir);
-    const input = taskInput(store, "k0");
+    const input = { ...taskInput(store, "k0"), ownerBotId: owner(store, "Ben") };
     const first = store.tasks.createTask(input, 3);
     expect(store.tasks.createTask(input, 3)).toEqual(first);
-    store.tasks.createTask({ ...input, deliveryKey: "k1" }, 3);
-    store.tasks.createTask({ ...input, deliveryKey: "k2" }, 3);
-    expect(store.tasks.createTask({ ...input, deliveryKey: "k3" }, 3)).toEqual({
-      refused: "fan_out",
+    expect(store.tasks.createTask({ ...input, deliveryKey: "k1" }, 3)).toEqual({
+      refused: "target_busy",
     });
+    const next = (key: string, name: string) =>
+      open().tasks.createTask({ ...input, deliveryKey: key, ownerBotId: owner(open(), name) }, 3);
+    next("k1", "Cy");
+    next("k2", "Di");
+    expect(next("k3", "Ed")).toEqual({ refused: "fan_out" });
     expect(store.state().tasks).toHaveLength(3);
   });
 
   it("lets only 3 of 8 concurrent writers through", async () => {
     store = openEventStore(dataDir);
     const input = taskInput(store, "unused");
+    const owners = ["B", "C", "D", "E", "F", "G", "H", "I"].map((name) => owner(open(), name));
     const gate = new Int32Array(new SharedArrayBuffer(4));
     const storeUrl = new URL("./store.ts", import.meta.url).href;
     const code = `
@@ -170,7 +185,12 @@ describe("tasks", () => {
     const results = Array.from({ length: 8 }, (_, index) => {
       const worker = new Worker(code, {
         eval: true,
-        workerData: { storeUrl, dataDir, gate, input: { ...input, deliveryKey: `k${index}` } },
+        workerData: {
+          storeUrl,
+          dataDir,
+          gate,
+          input: { ...input, deliveryKey: `k${index}`, ownerBotId: owners[index] },
+        },
       });
       return new Promise<string>((resolve, reject) => {
         worker.once("message", resolve);
@@ -185,18 +205,22 @@ describe("tasks", () => {
     expect(store.state().tasks).toHaveLength(3);
   }, 30_000);
 
-  it("hands an open task to another bot once", () => {
+  it("hands an open task on only from its owner", () => {
     store = openEventStore(dataDir);
     const input = taskInput(store, "k");
-    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ben = owner(store, "Ben");
+    const cy = owner(store, "Cy");
     const task = store.tasks.createTask(input, 3);
     if ("refused" in task) {
       throw new Error("refused");
     }
-    expect(store.tasks.handoff(task.id, ben.id)).toMatchObject({ ownerBotId: ben.id });
-    expect(store.tasks.handoff(task.id, ben.id)).toBeUndefined();
+    const move = (fromBotId: string, toBotId: string) =>
+      open().tasks.handoff(task.id, { fromBotId, toBotId, note: "Over to you", attended: true });
+    expect(move(input.ownerBotId, ben)).toMatchObject({ ownerBotId: ben });
+    expect(move(input.ownerBotId, cy)).toBeUndefined();
+    expect(move(ben, ben)).toEqual({ refused: "target_busy" });
     expect(store.tasks.finishTask(task.id, "done")).toMatchObject({ status: "done" });
-    expect(store.tasks.handoff(task.id, input.ownerBotId)).toBeUndefined();
+    expect(move(ben, cy)).toBeUndefined();
     expect(store.state().tasks).toEqual([]);
   });
 });

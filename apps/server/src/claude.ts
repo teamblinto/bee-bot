@@ -40,16 +40,25 @@ const settingSources = "";
 const toolList = "Read,Write,Edit,Glob,Grep,Bash";
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
-// reaching `approve` would taint the scope. A new memory tool must be added here on purpose.
+// reaching `approve` would taint the scope. A new bee tool must be added here on purpose.
 const askSettings = JSON.stringify({
   // Relative to the workspace. Plan mode writes this file without asking, and the default is under
   // ~/.claude, a path no bot may touch.
   plansDirectory: ".plans",
   permissions: {
     ask: ["Bash", "Read", "Glob", "Grep"],
-    allow: ["memory_search", "memory_get", "memory_propose", "memory_forget"].map(
-      (name) => `mcp__bee__${name}`,
-    ),
+    allow: [
+      "memory_search",
+      "memory_get",
+      "memory_propose",
+      "memory_forget",
+      "send_message",
+      "notify",
+      "delegate",
+      "handoff",
+      "ask_user",
+      "create_routine",
+    ].map((name) => `mcp__bee__${name}`),
   },
 });
 const permissionTool = "mcp__bee__approve";
