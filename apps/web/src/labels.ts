@@ -168,7 +168,12 @@ export function pauseLine(
 }
 
 const reasonLines: Record<RunReason, string> = {
-  unattended: "Refused. No client was connected when this was sent.",
+  unattended:
+    "Refused. Nobody was watching, and only a bot that runs in a box can work on its own.",
+  box_unavailable:
+    "Refused. Nobody was watching, and boxes weren't available. Check them on the Usage page.",
+  automated_access:
+    "Refused. Nobody was watching, and no API key is saved for this bot's engine on the Usage page.",
   bot_paused: "Refused. This bot is paused. Resume it, then send again.",
   daily_cap: "Refused. This bot reached its daily run cap.",
   engine_failed: "The engine couldn't finish this turn. Send again to retry.",

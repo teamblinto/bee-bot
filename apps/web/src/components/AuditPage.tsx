@@ -18,6 +18,7 @@ const statusLabels: Record<string, string> = {
   approve: "Needs approval",
   hand_off: "Owner only",
   profile_set: "Profile set",
+  boundary_set: "Box changed",
 };
 
 const time = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });

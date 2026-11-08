@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 19;
+export const protocolVersion = 20;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -184,6 +184,9 @@ export const RunReason = z.enum([
   "stopped",
   "server_restarted",
   "folder_missing",
+  // Unattended on a box bot while boxes can't run, or with no lane R7 allows.
+  "box_unavailable",
+  "automated_access",
 ]);
 export type RunReason = z.infer<typeof RunReason>;
 
@@ -263,6 +266,24 @@ export const BoxStatus = z.object({
   updatedAt: z.string(),
 });
 export type BoxStatus = z.infer<typeof BoxStatus>;
+
+export const BoxMachineName = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+
+// Whether box bots can run on this computer, and what is missing if not. Never persisted.
+export const BoxAvailability = z.object({
+  machine: z.string(),
+  machineFound: z.boolean(),
+  boxdInstalled: z.boolean(),
+  imageBuilt: z.boolean(),
+  available: z.boolean(),
+  settingUp: z.boolean(),
+  // Plain words for the owner. Null when boxes are available.
+  problem: z.string().nullable(),
+});
+export type BoxAvailability = z.infer<typeof BoxAvailability>;
 
 // Bee never runs a hand_off: the owner does it, and approving records that it was done.
 export const ContinuationKind = z.enum(["approval", "hand_off"]);
@@ -698,6 +719,8 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("pending-approvals"), approvals: z.array(PendingApproval) }),
   // The whole catalog, sent on subscribe and on every change. Never persisted.
   z.object({ type: z.literal("model-catalog"), models: ModelCatalog }),
+  // Sent on subscribe and on every change, by a server that can run boxes.
+  z.object({ type: z.literal("box-availability"), availability: BoxAvailability }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 
@@ -817,6 +840,9 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("delete-api-key"), engineAccountId: ApiKeyAccountId }),
   z.object({ type: z.literal("acknowledge-automated-access") }),
   z.object({ type: z.literal("set-bot-manifest"), botId: z.uuid(), manifest: Manifest }),
+  z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
+  z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
+  z.object({ type: z.literal("set-up-boxes") }),
 ]);
 export type Command = z.infer<typeof Command>;
 

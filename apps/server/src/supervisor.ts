@@ -34,6 +34,8 @@ type Options = {
   silenceMs?: number | undefined;
   outboxHandlers?: ReadonlyMap<string, Deliver> | undefined;
   clock?: AwakeClock | undefined;
+  // Whether a box runtime can run boxes now. Only a box bot may run unattended.
+  boxesReady?: (() => boolean) | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -119,6 +121,7 @@ export function createSupervisor({
   silenceMs = defaultSilenceMs,
   outboxHandlers = new Map(),
   clock = createAwakeClock(),
+  boxesReady = () => false,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
@@ -171,7 +174,7 @@ export function createSupervisor({
   }
 
   function settleWake(wake: Wake, now: string) {
-    const { hasActiveRun, hasInput, ...admission } = store.wakeContext(wake, now);
+    const { hasActiveRun, hasInput, boundary, ...admission } = store.wakeContext(wake, now);
     if (hasActiveRun) {
       return;
     }
@@ -180,7 +183,8 @@ export function createSupervisor({
       store.closeWake(wake.id);
       return;
     }
-    const decision = admit({ ...admission, attended: wake.attended, now });
+    const box = boundary !== "box" ? "none" : boxesReady() ? "ready" : "unavailable";
+    const decision = admit({ ...admission, box, attended: wake.attended, now });
     if (decision.verdict === "refuse") {
       store.refuseWake(wake, decision.reason);
     } else if (decision.verdict === "defer") {
@@ -405,7 +409,10 @@ export function createSupervisor({
     const now = new Date().toISOString();
     try {
       store.clearExpiredBlocks(now);
-      store.fireDueRoutines(now);
+      store.fireDueRoutines(
+        now,
+        (botId) => boxesReady() && store.getBot(botId)?.boundary === "box",
+      );
       store.continuations.expireContinuations();
       deliverOutcomes();
       for (const wake of store.dueWakes(now)) {

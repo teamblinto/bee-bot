@@ -196,7 +196,7 @@ export function ChatView({
         <Avatar seed={bot.avatarSeed} className="size-7" />
         <h2 className="truncate text-name font-medium">{bot.name}</h2>
         <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
-          Attended only
+          {bot.boundary === "box" ? "In a box" : "Attended only"}
         </span>
         {bot.projectPath && (
           <span

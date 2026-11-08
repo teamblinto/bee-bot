@@ -8,6 +8,7 @@ const { postCommand, models, chat } = vi.hoisted(() => ({
   postCommand: vi.fn(),
   chat: {
     accounts: [{ id: "codex", label: "Codex", lane: "subscription", blockedUntil: null }],
+    vault: { apiKeys: [] },
   },
   models: {
     claude: [{ id: "sonnet", label: "Sonnet 5.5", efforts: [] }],

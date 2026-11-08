@@ -34,6 +34,7 @@ import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engin
 import { callBotTool } from "./botTools.ts";
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { boxExecutors } from "./boxExecutors.ts";
+import type { BoxService } from "./boxSetup.ts";
 import {
   browserExecutors,
   createBrowserBroker,
@@ -89,6 +90,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   clock?: AwakeClock | undefined;
   // Box mode: the login terminal attaches through it.
   box?: BoxOptions | undefined;
+  // Setting boxes up and whether they can run. Without it, `box` alone means they can.
+  boxes?: BoxService | undefined;
   browserRuntime?: BrowserRuntime | undefined;
 };
 
@@ -168,8 +171,10 @@ export async function startServer({
   heartbeatMs = 30_000,
   clock = createAwakeClock(),
   box,
+  boxes,
   browserRuntime = noBrowser,
 }: Options) {
+  const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
   const terminals = box && createTerminals({ ...box, dataDir, bot: (id) => store.getBot(id) });
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -264,6 +269,7 @@ export async function startServer({
   // The boot's index rebuild emits nothing, so a cursor from before it can't be caught up by replay.
   const bootSeq = store.bounds().latest;
   store.onEvent((event) => broadcast({ type: "event", event }));
+  boxes?.onChange((availability) => broadcast({ type: "box-availability", availability }));
   const approvals = createApprovals({
     store,
     dataDir,
@@ -290,6 +296,7 @@ export async function startServer({
     permissionsUrl: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
     turnTimeoutMs,
     clock,
+    boxesReady,
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
     onToolStart: (runId, { id, name, detail }) =>
       broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
@@ -581,6 +588,37 @@ export async function startServer({
         const bot = store.policy.setBotManifest(command.botId, command.manifest);
         return bot ? { status: 200, body: bot } : notFound;
       }
+      case "set-bot-boundary": {
+        const { botId, boundary } = command;
+        const current = store.getBot(botId);
+        if (!current) {
+          return notFound;
+        }
+        if (boundary === "box" && !boxesReady()) {
+          return { status: 409, body: { code: "boxes_unavailable" } };
+        }
+        if (boundary !== current.boundary && store.botBusy(botId)) {
+          return { status: 409, body: { code: "bot_busy" } };
+        }
+        const bot = store.policy.setBotBoundary(botId, boundary);
+        if (boundary === "box") {
+          boxes?.prepare(botId).catch((error: unknown) => {
+            console.error(`beebotd: box for ${botId} didn't come up: ${(error as Error)?.message}`);
+          });
+        }
+        return { status: 200, body: bot };
+      }
+      case "set-box-machine":
+        store.setBoxMachine(command.machine);
+        void boxes?.refresh();
+        return ok;
+      case "set-up-boxes":
+        if (!boxes) {
+          return { status: 409, body: { code: "boxes_unsupported" } };
+        }
+        // Building the image takes minutes: progress arrives as box-availability.
+        void boxes.setUp();
+        return ok;
     }
   }
 
@@ -853,6 +891,9 @@ export async function startServer({
           send(client, catchUp(message.afterSeq));
           send(client, { type: "pending-approvals", approvals: approvals.pending() });
           send(client, { type: "model-catalog", models: catalog() });
+          if (boxes) {
+            send(client, { type: "box-availability", availability: boxes.availability() });
+          }
           subscribers.add(client);
         } catch (error) {
           console.error(error);

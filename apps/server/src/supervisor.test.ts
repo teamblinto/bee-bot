@@ -20,6 +20,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import { boxLayout } from "./boxEngine.ts";
+import { createFakeBoxRuntime } from "./boxRuntime.ts";
 import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
 import { startServer } from "./server.ts";
@@ -117,7 +119,7 @@ function postCommand(port: number, command: Command) {
 
 async function boot(
   runTurn: RunTurn = scriptedEngine().runTurn,
-  options: { attended?: boolean; turnTimeoutMs?: number } = {},
+  options: { attended?: boolean; turnTimeoutMs?: number; boxes?: boolean } = {},
 ) {
   const store = openEventStore(dataDir);
   const server = await startServer({
@@ -129,6 +131,9 @@ async function boot(
     probeEngine,
     runTurn,
     turnTimeoutMs: options.turnTimeoutMs,
+    box: options.boxes
+      ? { runtime: createFakeBoxRuntime(), layout: boxLayout(dataDir) }
+      : undefined,
   });
   let open = true;
   const stop = async () => {
@@ -241,6 +246,19 @@ describe("sending", () => {
     expect(run(store, bot)?.reason).toBe("unattended");
     expect(engine.turns).toEqual([]);
     expect(store.state().messages).toHaveLength(1);
+  });
+
+  it("runs an unattended wake for a box bot, once R7 allows it a lane", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot, send } = await boot(engine.runTurn, { attended: false, boxes: true });
+    const bot = await createBot();
+    store.policy.setBotBoundary(bot.id, "box");
+    await send(bot, "hello");
+    await expectStatus(store, bot, "Refused");
+    expect(run(store, bot)?.reason).toBe("automated_access");
+    store.vaultStore.acknowledgeAutomatedAccess();
+    await send(bot, "again");
+    await expectTurns(engine, 1);
   });
 });
 

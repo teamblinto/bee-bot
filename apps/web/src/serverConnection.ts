@@ -1,5 +1,6 @@
 import {
   AuditPage,
+  type BoxAvailability,
   type ChatState,
   type ClientMessage,
   type Command,
@@ -47,6 +48,8 @@ export type ConnectionState = {
   pending: PendingApproval[];
   // Undefined until the server sends it, so no model is called unavailable before then.
   models: ModelCatalog | undefined;
+  // Undefined from a server that can't run boxes.
+  boxAvailability: BoxAvailability | undefined;
   engine: EngineStatus | undefined;
   engineChecking: boolean;
   // Last bot message read, by bot ID. Mirrors localStorage.
@@ -225,6 +228,8 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
       return { ...state, pending: message.approvals };
     case "model-catalog":
       return { ...state, models: message.models };
+    case "box-availability":
+      return { ...state, boxAvailability: message.availability };
     case "replay":
     case "event": {
       const incoming = message.type === "replay" ? message.events : [message.event];
@@ -306,6 +311,7 @@ let state: ConnectionState = {
   finishedTools: {},
   pending: [],
   models: undefined,
+  boxAvailability: undefined,
   engine: undefined,
   engineChecking: false,
   lastSeen: readLastSeen(),
@@ -486,6 +492,8 @@ const errorSentences: Record<string, string> = {
   approval_closed: "This request is already closed.",
   ...routineRefusalLines,
   bot_busy: "This bot is working. Wait for it to finish or stop it, then try again.",
+  boxes_unavailable: "Boxes aren't available. Set them up on the Usage page first.",
+  boxes_unsupported: "This server can't run boxes.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   ambiguous_mention: "More than one bot here goes by that name. Pick one from the @ list.",

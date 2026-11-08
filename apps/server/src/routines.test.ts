@@ -380,6 +380,32 @@ describe("firing", () => {
       expect(store.state().messages).toHaveLength(1);
     });
 
+    it("starts unattended for a bot that runs itself, and stays a card for any other", () => {
+      const other = store.createBot({ name: "Host", personality: "", engineAccountId: "fake" });
+      const boxed = routineDue(slot);
+      const card = routineDue(slot, { name: "Card" }, other);
+      store.fireDueRoutines(justAfter, (botId) => botId === bot.id);
+      expect(latest(boxed)?.status).toBe("ran");
+      expect(latest(card)?.status).toBe("ready");
+      const [wake] = store.dueWakes(justAfter);
+      expect(wake).toMatchObject({ botId: bot.id, attended: false });
+    });
+
+    it("tries a busy bot's routine again on the next tick", () => {
+      store.sendMessage({ id: crypto.randomUUID(), roomId: bot.roomId, body: "x", attended: true });
+      const [first] = store.dueWakes(justAfter);
+      if (first) {
+        store.queueRun(first);
+      }
+      const routine = routineDue(slot);
+      store.fireDueRoutines(justAfter, () => true);
+      expect(latest(routine)?.status).toBe("ready");
+      const [run] = store.queuedRuns();
+      store.refuseQueuedRun(run?.id ?? "", "stopped");
+      store.fireDueRoutines(justAfter, () => true);
+      expect(latest(routine)?.status).toBe("ran");
+    });
+
     it("refuses when no client is connected, and changes nothing", () => {
       const routine = openCard();
       expect(store.startFiring(firingId(routine), false)).toBe("not_attended");

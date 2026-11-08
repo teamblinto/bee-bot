@@ -6,6 +6,7 @@ import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@be
 
 import { boxLayout } from "./boxEngine.ts";
 import { startBoxHost, windowsPodman } from "./boxHost.ts";
+import { createBoxService, defaultBoxMachine, podmanMachine } from "./boxSetup.ts";
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
@@ -76,32 +77,40 @@ async function boot(bootstrap: Bootstrap) {
   // The egress proxy reads API keys from here, so none ever enters a box, argv, env or a log.
   const vault = openVault(store.vaultStore, vaultKey);
 
-  // Box bots run in boxd's containers in this Podman machine (Windows; see boxdRuntime.ts).
+  // Box bots run in boxd's containers in a Podman machine (Windows; see boxdRuntime.ts).
   let port = 0;
-  const machine = process.env.BEEBOT_PODMAN_MACHINE;
-  const boxes =
-    machine === undefined
-      ? undefined
-      : await startBoxHost({
-          host: { kind: "podman-machine", podman: windowsPodman, machine },
-          installDir: "beebot/boxd",
-          owner: store.environmentId,
-          vault,
-          account: (botId) => store.getBot(botId)?.engineAccountId,
-          egressInput: store.egress.egressInput,
-          beebotdPort: () => port,
-          setBox: store.boxes.setBox,
-        }).catch((error: unknown) => {
-          console.error(`beebotd: boxes are unavailable: ${(error as Error)?.message}`);
-          return undefined;
-        });
-  const box = boxes && { runtime: boxes.runtime, layout: boxLayout(dataDir) };
+  const podmanBin = process.platform === "win32" ? windowsPodman : "podman";
+  const installDir = "beebot/boxd";
+  const machine = podmanMachine(podmanBin, installDir);
+  // R7: a box bot's lane, for its turns and its egress alike. Unattended runs without one are
+  // refused at admission, so here an attended turn keeps the account's own lane.
+  const boxLane = (botId: string, accountLane: EngineLane) => store.boxLane(botId) ?? accountLane;
+  const boxes = createBoxService({
+    machine: () => store.boxMachine() ?? process.env.BEEBOT_PODMAN_MACHINE ?? defaultBoxMachine,
+    probe: machine.probe,
+    buildImage: machine.buildImage,
+    startHost: (name) =>
+      startBoxHost({
+        host: { kind: "podman-machine", podman: podmanBin, machine: name },
+        installDir,
+        owner: store.environmentId,
+        vault,
+        account: (botId) => store.getBot(botId)?.engineAccountId,
+        egressInput: (botId) => {
+          const input = store.egress.egressInput(botId);
+          return input && { ...input, lane: boxLane(botId, input.lane) };
+        },
+        beebotdPort: () => port,
+        setBox: store.boxes.setBox,
+      }),
+  });
+  const box = { runtime: boxes.runtime, layout: boxLayout(dataDir) };
   const host = {
     claude: createClaudeRunTurn({ command: claudeCommand, dataDir, clock }),
     codex: createCodexRunTurn({ command: codexCommand, dataDir }),
   };
   // The CLIs as the box sees them, installed into its home by the vendors' installers.
-  const boxed = box && {
+  const boxed = {
     claude: createClaudeRunTurn({ command: ["claude"], dataDir, clock, box }),
     codex: createCodexRunTurn({ command: ["codex"], dataDir, box }),
   };
@@ -110,11 +119,14 @@ async function boot(bootstrap: Bootstrap) {
       return fakeRunTurn(turn);
     }
     // A box bot never falls back to the host.
-    const engines = store.getBot(turn.launch.botId)?.boundary === "box" ? boxed : host;
-    if (engines === undefined) {
-      return { kind: "failed" };
+    if (store.getBot(turn.launch.botId)?.boundary === "box") {
+      const { botId, lane } = turn.launch;
+      const launched = { ...turn, launch: { ...turn.launch, lane: boxLane(botId, lane) } };
+      return turn.launch.engineAccountId === "codex"
+        ? boxed.codex(launched)
+        : boxed.claude(launched);
     }
-    return turn.launch.engineAccountId === "codex" ? engines.codex(turn) : engines.claude(turn);
+    return turn.launch.engineAccountId === "codex" ? host.codex(turn) : host.claude(turn);
   };
   const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
   const server = await startServer({
@@ -133,9 +145,11 @@ async function boot(bootstrap: Bootstrap) {
       lane: () => store.accountLane("claude"),
     }),
     box,
-    browserRuntime: boxes && createCdpBrowserRuntime(boxes.sidecar),
+    boxes,
+    browserRuntime: createCdpBrowserRuntime(boxes.sidecar),
   });
   port = server.port;
+  void boxes.refresh();
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe(store.accountLane("claude"));
   if (pauseReason) {
@@ -156,7 +170,7 @@ async function boot(bootstrap: Bootstrap) {
     stop: async () => {
       clearInterval(pruning);
       await server.close();
-      await boxes?.close();
+      await boxes.close();
       store.close();
     },
   };
