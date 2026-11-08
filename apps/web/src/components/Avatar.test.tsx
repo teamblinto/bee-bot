@@ -80,6 +80,7 @@ const bot = {
   access: "supervised",
   profile: "operator",
   boundary: "host",
+  manifest: [] as string[],
   avatarSeed: 5,
   projectPath: null,
 } as const;

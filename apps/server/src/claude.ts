@@ -22,6 +22,7 @@ import {
   spawnInBox,
   supportsSecureStorageDir,
 } from "./boxEngine.ts";
+import { waitingPattern } from "./continuations.ts";
 import {
   type BotLaunch,
   cliVersion,
@@ -63,6 +64,10 @@ const beeTools = [
   "handoff",
   "ask_user",
   "create_routine",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
 ].map((name) => `mcp__bee__${name}`);
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
@@ -268,7 +273,21 @@ const Block = z.object({
   input: loose,
   tool_use_id: loose,
   is_error: loose,
+  content: loose,
 });
+
+// A tool result that says the call now waits on the owner: a hook's deny or a Bee tool's answer.
+export function waitsOnOwner(content: unknown) {
+  const texts =
+    typeof content === "string"
+      ? [content]
+      : z
+          .array(z.object({ text: z.string() }).catch({ text: "" }))
+          .catch([])
+          .parse(content)
+          .map(({ text }) => text);
+  return texts.some((text) => waitingPattern.test(text));
+}
 
 const Frame = z.object({
   type: z.string(),
@@ -384,6 +403,7 @@ type Seen = {
   assistantError: unknown;
   apiStatus: unknown;
   rateLimit: Frame["rate_limit_info"];
+  waiting: boolean;
 };
 
 function retryAfterMs(rateLimit: Seen["rateLimit"]) {
@@ -392,9 +412,9 @@ function retryAfterMs(rateLimit: Seen["rateLimit"]) {
 }
 
 // Never branch on `subtype`: a failed login reports `subtype:"success"` with `is_error:true`.
-function mapResult({ result, assistantError, apiStatus, rateLimit }: Seen): TurnOutcome {
+function mapResult({ result, assistantError, apiStatus, rateLimit, waiting }: Seen): TurnOutcome {
   if (result?.is_error === false && typeof result.result === "string") {
-    return { kind: "completed", text: result.result };
+    return { kind: waiting ? "waiting" : "completed", text: result.result };
   }
   if (
     assistantError === "authentication_failed" ||
@@ -459,6 +479,7 @@ function runProcess({
       assistantError: undefined,
       apiStatus: undefined,
       rateLimit: undefined,
+      waiting: false,
     };
     const timers = new Set<() => void>();
     let gate: "pending" | "open" | PauseReason = "pending";
@@ -605,8 +626,10 @@ function runProcess({
           }
         }
       } else if (frame.type === "user") {
-        for (const { type, tool_use_id: id, is_error: failed } of frame.message?.content ?? []) {
+        for (const { type, tool_use_id: id, is_error: failed, content } of frame.message?.content ??
+          []) {
           if (type === "tool_result" && typeof id === "string") {
+            seen.waiting ||= waitsOnOwner(content);
             onToolEnd(id, failed === true);
           }
         }
@@ -873,7 +896,8 @@ export function createClaudeRunTurn({
         const next = steered;
         steered = undefined;
         const result: TurnOutcome = outcome === "in_use" ? { kind: "failed" } : outcome;
-        if (!next || signal.aborted || result.kind === "completed") {
+        // A turn that waits on the owner is over: a steer now would run on without the outcome.
+        if (!next || signal.aborted || result.kind === "completed" || result.kind === "waiting") {
           next?.taken(false);
           return result;
         }

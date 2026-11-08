@@ -81,6 +81,23 @@ const scenarios = {
       ...replay("success.ndjson"),
     ],
   },
+  // The shape of a PreToolUse hook's deny is a guess: only the waiting message in it matters.
+  "waiting-hook": {
+    frames: () => [
+      toolStart("Bash", "toolu_1"),
+      toolCall("Bash", "toolu_1", { command: "deploy" }),
+      toolResult("toolu_1", {
+        content: [
+          {
+            type: "text",
+            text: "PreToolUse:Bash hook blocked: waiting: 0b5c2f4e-8d1a-4c3b-9e7f-1a2b3c4d5e6f. The owner has to answer first. End your turn now: you will be resumed with the outcome.",
+          },
+        ],
+        is_error: true,
+      }),
+      ...replay("success.ndjson"),
+    ],
+  },
   "rate-unified": {
     frames: () => [
       rateLimit({

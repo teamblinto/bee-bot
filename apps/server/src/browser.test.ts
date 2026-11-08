@@ -10,7 +10,6 @@ import { createFakeBrowserRuntime, type FakePage } from "./browserRuntime.ts";
 import { migrate } from "./store.ts";
 
 const run = { id: "run-1", botId: "bot-1", attended: true };
-const legs = { readsUntrusted: false, readsPrivate: false, sideEffect: false };
 
 const pages: Record<string, FakePage> = {
   "https://example.com/": {
@@ -44,10 +43,13 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
   const fake = createFakeBrowserRuntime(pages);
   const outbound: unknown[] = [];
   const paused = new Map<string, boolean>();
+  const checked: unknown[] = [];
   const broker = createBrowserBroker({
     runtime: fake.runtime,
-    decide: () => decision,
-    policyContext: () => ({ profile: "researcher", manifest: [], session: legs, attended: true }),
+    check: (_run, tool, args) => {
+      checked.push([tool, args]);
+      return decision;
+    },
     appendAudit: (record) => {
       outbound.push(record);
       appendAudit(record);
@@ -57,8 +59,8 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
       paused.set(botId, value);
     },
     notify: (_run, text) => outbound.push(text),
-    requestApproval: (_run, call) => {
-      outbound.push(call);
+    requestApproval: (_run, tool, args) => {
+      outbound.push({ tool, args });
       return JSON.stringify({ status: "waiting" });
     },
   });
@@ -76,7 +78,7 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
     const lease = () => received.findLast(({ type }) => type === "lease");
     return { received, link, send, lease };
   }
-  return { db, fake, broker, outbound, paused, audit, call, owner };
+  return { db, fake, broker, outbound, checked, paused, audit, call, owner };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -86,24 +88,23 @@ afterEach(() => {
 });
 
 describe("browser tools", () => {
-  it("records an allowed call by digest, then acts and answers with refs", async () => {
-    const { call, audit, fake } = setup();
+  it("asks the broker first, then acts and answers with refs", async () => {
+    const { call, checked, fake } = setup();
     const answer = await call("browser_navigate", { url: "https://example.com/" });
     expect(answer.status).toBe("ok");
     expect(answer.page.elements).toEqual([{ ref: "1:0", role: "a", name: "Sign in" }]);
     expect(fake.received).toEqual(["navigate https://example.com/"]);
-    expect(audit()).toEqual([
-      expect.objectContaining({ status: "allowed", tool: "browser_navigate", initiator: "bot" }),
-    ]);
-    expect(JSON.stringify(audit())).not.toContain("example.com");
+    expect(checked).toEqual([["browser_navigate", { url: "https://example.com/" }]]);
   });
 
-  it("refuses a denied call without touching the browser", async () => {
-    const { call, audit, fake } = setup({ kind: "deny", reason: "not in the manifest" });
+  it("refuses a denied call without opening the browser", async () => {
+    const { call, fake, owner } = setup({ kind: "deny", reason: "not_granted" });
     const answer = await call("browser_navigate", { url: "https://example.com/" });
-    expect(answer).toMatchObject({ status: "refused", reason: "not in the manifest" });
+    expect(answer).toMatchObject({ status: "refused", reason: "not_granted" });
     expect(fake.received).toEqual([]);
-    expect(audit()).toEqual([expect.objectContaining({ status: "denied" })]);
+    expect(fake.opened()).toBe(0);
+    await owner();
+    expect(fake.opened()).toBe(1);
   });
 
   it.each([
@@ -206,11 +207,7 @@ describe("browser tools", () => {
     expect(fake.download(run.botId, "setup.EXE")).toBe(false);
     expect(fake.download(run.botId, "report.pdf")).toBe(true);
     await settle();
-    expect(audit().map(({ status }) => status)).toEqual([
-      "allowed",
-      "download_refused",
-      "download",
-    ]);
+    expect(audit().map(({ status }) => status)).toEqual(["download_refused", "download"]);
     expect(JSON.stringify(audit())).not.toContain("report");
     expect((await call("browser_snapshot")).page.downloads).toEqual(["report.pdf"]);
   });

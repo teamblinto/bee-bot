@@ -28,12 +28,20 @@ import { type WebSocket, WebSocketServer } from "ws";
 import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals, type Execute } from "./approvals.ts";
 import type { BoxOptions } from "./boxEngine.ts";
-import { staticClaudeModels } from "./claude.ts";
+import { preToolUsePath, staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { callBotTool } from "./botTools.ts";
 import { type Decide, decide as policyDecide } from "./broker.ts";
-import { createBrowserBroker, noBrowser, serveHandoff, storeBrowserDeps } from "./browser.ts";
+import { boxExecutors } from "./boxExecutors.ts";
+import {
+  browserExecutors,
+  createBrowserBroker,
+  noBrowser,
+  serveHandoff,
+  storeBrowserDeps,
+} from "./browser.ts";
+import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
@@ -239,8 +247,9 @@ export async function startServer({
   const handoffSockets = new WebSocketServer({ noServer: true, maxPayload: 4096 });
   const browser = createBrowserBroker({
     runtime: browserRuntime,
-    decide: decide ?? policyDecide,
     ...storeBrowserDeps(store),
+    check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
+    requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
   });
 
   // A sleeping laptop or a dropped network leaves a socket that never closes on its own.
@@ -261,7 +270,11 @@ export async function startServer({
     timeoutMs: approvalTimeoutMs,
     clock,
     decide,
-    executors,
+    executors: new Map([
+      ...browserExecutors(browser),
+      ...(box ? boxExecutors(box) : []),
+      ...(executors ?? []),
+    ]),
     continuationTtlMs,
     hasSurface: () => subscribers.size > 0,
     onSettled: () => supervisor.pump(),
@@ -564,6 +577,10 @@ export async function startServer({
         const bot = store.policy.setBotProfile(command.botId, command.profile);
         return bot ? { status: 200, body: bot } : notFound;
       }
+      case "set-bot-manifest": {
+        const bot = store.policy.setBotManifest(command.botId, command.manifest);
+        return bot ? { status: 200, body: bot } : notFound;
+      }
     }
   }
 
@@ -587,25 +604,45 @@ export async function startServer({
   }
 
   // The CLI is the only caller, so an Origin means a browser is trying its luck.
-  async function handleMcp(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
+  async function engineCall(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
     if (request.headers.origin !== undefined) {
       sendJson(response, 403, { code: "origin_refused" });
-      return;
+      return undefined;
     }
     if (request.method !== "POST") {
       sendJson(response, 405, { code: "method_not_allowed" });
-      return;
+      return undefined;
     }
     const run = approvals.authenticate(request.headers.authorization?.replace(/^Bearer /, ""));
     if (!run) {
       sendJson(response, 401, { code: "unauthorized" });
-      return;
+      return undefined;
     }
     const body = await readBody(request, maxMcpBodyBytes);
     if (body === undefined) {
       sendJson(response, 413, { code: "too_large" });
+      return undefined;
+    }
+    return { run, body };
+  }
+
+  // A Box bot's Claude asks here before every tool call. Anything but a 2xx answer blocks the call.
+  async function handleHook(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
+    const call = await engineCall(request, response);
+    if (call) {
+      const { run, body } = call;
+      await answerPreToolUse(response, body, (args, closed) =>
+        approvals.approve(run, args, closed),
+      );
+    }
+  }
+
+  async function handleMcp(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
+    const call = await engineCall(request, response);
+    if (!call) {
       return;
     }
+    const { run, body } = call;
     await answerMcp(
       response,
       body,
@@ -616,6 +653,7 @@ export async function startServer({
         gateTool(store.policy, run, name, args, () =>
           callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
         ),
+      (name, args) => browser.call(run, name, args),
       mcpKeepaliveMs,
     );
   }
@@ -692,6 +730,10 @@ export async function startServer({
 
     if (url.pathname === "/mcp") {
       handleMcp(request, response).catch(() => response.destroy());
+      return;
+    }
+    if (url.pathname === preToolUsePath) {
+      handleHook(request, response).catch(() => response.destroy());
       return;
     }
 
