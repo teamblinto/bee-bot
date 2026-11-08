@@ -27,6 +27,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 
 import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals, type Execute } from "./approvals.ts";
+import type { BoxOptions } from "./boxEngine.ts";
 import type { Decide } from "./broker.ts";
 import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
@@ -42,6 +43,7 @@ import { fallbackSummary, type Summarize } from "./summary.ts";
 import type { Vault } from "./vault.ts";
 import { deleteApiKey, openVault, storeApiKey } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
+import { createTerminals } from "./terminal.ts";
 import {
   createLimitRefresher,
   createUsageHistory,
@@ -75,6 +77,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   mcpKeepaliveMs?: number | undefined;
   heartbeatMs?: number | undefined;
   clock?: AwakeClock | undefined;
+  // Box mode: the login terminal attaches through it.
+  box?: BoxOptions | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -152,7 +156,9 @@ export async function startServer({
   mcpKeepaliveMs,
   heartbeatMs = 30_000,
   clock = createAwakeClock(),
+  box,
 }: Options) {
+  const terminals = box && createTerminals({ ...box, dataDir, bot: (id) => store.getBot(id) });
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
   let claudeModels = staticClaudeModels;
@@ -749,7 +755,8 @@ export async function startServer({
   server.on("upgrade", (request, socket, head) => {
     socket.on("error", () => socket.destroy());
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
-    if (url?.pathname !== "/ws") {
+    const terminal = url?.pathname === "/terminal" && terminals;
+    if (url?.pathname !== "/ws" && !terminal) {
       refuseUpgrade(socket, 404, { code: "not_found" });
       return;
     }
@@ -757,6 +764,13 @@ export async function startServer({
     const refused = refusal(request.headers.origin, url.searchParams.get("token"), url);
     if (refused) {
       refuseUpgrade(socket, refused.status, refused.body);
+      return;
+    }
+    if (terminal) {
+      const notServed = terminal.upgrade(request, socket, head, url);
+      if (notServed) {
+        refuseUpgrade(socket, notServed.status, notServed.body);
+      }
       return;
     }
     sockets.handleUpgrade(request, socket, head, (client) => {
@@ -821,6 +835,7 @@ export async function startServer({
       stopSummaries.abort();
       await summaries;
       heartbeat.cancel();
+      terminals?.close();
       approvals.close();
       await supervisor.close();
       for (const client of sockets.clients) {

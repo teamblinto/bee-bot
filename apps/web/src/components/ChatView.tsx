@@ -15,6 +15,7 @@ import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
+import { TerminalPanel } from "./TerminalPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
 
@@ -28,6 +29,7 @@ function BotMenu({
   onEdit,
   onMemory,
   onRoutines,
+  onLogin,
 }: {
   bot: Bot;
   connected: boolean;
@@ -35,6 +37,7 @@ function BotMenu({
   onEdit: () => void;
   onMemory: () => void;
   onRoutines: () => void;
+  onLogin: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -61,6 +64,17 @@ function BotMenu({
         <button type="button" {...hide} className={menuItemClass} onClick={onRoutines}>
           Routines
         </button>
+        {bot.boundary === "box" && bot.engineAccountId !== "fake" && (
+          <button
+            type="button"
+            {...hide}
+            className={menuItemClass}
+            disabled={!connected}
+            onClick={onLogin}
+          >
+            Log in
+          </button>
+        )}
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
         </button>
@@ -139,6 +153,7 @@ export function ChatView({
   const memories = chat.memories.filter(({ botId }) => botId === bot.id);
   const routines = chat.routines.filter(({ botId }) => botId === bot.id);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
 
   useEffect(() => {
@@ -198,6 +213,7 @@ export function ChatView({
           onEdit={onEdit}
           onMemory={() => setMemoryOpen(true)}
           onRoutines={() => setRoutinesOpen(true)}
+          onLogin={() => setLoginOpen(true)}
         />
       </header>
       {empty ? (
@@ -258,6 +274,7 @@ export function ChatView({
           onClose={() => setMemoryOpen(false)}
         />
       )}
+      {loginOpen && <TerminalPanel bot={bot} onClose={() => setLoginOpen(false)} />}
       {routinesOpen && (
         <RoutinesPanel
           bot={bot}

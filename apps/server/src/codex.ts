@@ -1,4 +1,3 @@
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -14,9 +13,17 @@ import { z } from "zod";
 
 import { patchFileHeader } from "./approvals.ts";
 import {
+  type BoxOptions,
+  createAccountGate,
+  credentialMapping,
+  type EngineProcess,
+  spawnHost,
+  spawnInBox,
+} from "./boxEngine.ts";
+import type { BoxAttach } from "./boxRuntime.ts";
+import {
   type BotLaunch,
   cliVersion,
-  killTree,
   personaText,
   type RunTurn,
   toolDetail,
@@ -49,13 +56,16 @@ const beeTools = [
 // Measured on 0.167.0. A CLI that rejects one fails to start, which pauses the bot as `cli_failed`
 // rather than running it unlocked. `unified_exec_tty` stops stdin smuggling
 // into an approved shell. `code_mode_host` must stay on: disabling it breaks all execution.
-const lockedArgs = [
+const lockedSettings = [
   "notify=[]",
   'web_search="disabled"',
   "project_doc_max_bytes=0",
   "skills.bundled.enabled=false",
-  'model_provider="openai"',
-].flatMap((setting) => ["-c", setting]);
+];
+const lockedArgs = [...lockedSettings, 'model_provider="openai"'].flatMap((setting) => [
+  "-c",
+  setting,
+]);
 const disabledFeatures = [
   "hooks",
   "plugins",
@@ -79,10 +89,8 @@ function ancestors(path: string): string[] {
 
 // A trusted parent repo beats an untrusted cwd, so every ancestor is listed. On win32 a key that
 // isn't lowercase is silently ignored. `projects={}` would merge and do nothing.
-function projectsArg(cwd: string) {
-  const keys = ancestors(cwd).map((path) =>
-    JSON.stringify(process.platform === "win32" ? path.toLowerCase() : path),
-  );
+function projectsArg(cwd: string, fold = process.platform === "win32") {
+  const keys = ancestors(cwd).map((path) => JSON.stringify(fold ? path.toLowerCase() : path));
   return `projects={${keys.map((key) => `${key}={trust_level="untrusted"}`).join(",")}}`;
 }
 
@@ -100,6 +108,44 @@ const launchArgs = (cwd: string, lane: EngineLane) => [
   "-c",
   `forced_login_method="${loginMethods[lane].forced}"`,
   ...disabledFeatures,
+];
+
+// Box mode. The box's paths are Linux paths, so nothing is case-folded. `--ignore-rules` is not an
+// app-server flag: an untrusted project plus a CODEX_HOME holding no rules keeps every rules file
+// out. On the API lane the box talks to the proxy, which injects the key, so the box has no login
+// at all and none is forced.
+export const boxLaunchArgs = (cwd: string, lane: EngineLane, apiLane: string) => [
+  "app-server",
+  "-c",
+  projectsArg(cwd, false),
+  ...[
+    ...lockedSettings,
+    ...(lane === "api_key"
+      ? [
+          'model_provider="bee"',
+          `model_providers.bee={ name = "Bee", base_url = ${JSON.stringify(`${apiLane}/openai/v1`)}, wire_api = "responses" }`,
+        ]
+      : ['model_provider="openai"', `forced_login_method="${loginMethods[lane].forced}"`]),
+  ].flatMap((setting) => ["-c", setting]),
+  ...disabledFeatures,
+];
+
+// Clears everything in CODEX_HOME that could steer the engine and that Bee never writes, rules
+// above all: an approved "always" writes one there. Then links the shared login in, if any.
+const prepareScript = [
+  "set -eu",
+  'mkdir -p "$1"',
+  'rm -rf "$1/rules" "$1/hooks.json" "$1/config.toml" "$1/AGENTS.md"',
+  'if [ -n "$2" ]; then ln -sfn "$2" "$1/auth.json"; fi',
+].join("; ");
+
+export const prepareCodexHome = (codexHome: string, credentialLink: string | undefined) => [
+  "sh",
+  "-c",
+  prepareScript,
+  "sh",
+  codexHome,
+  credentialLink ?? "",
 ];
 
 const beeArgs = (url: string) =>
@@ -250,25 +296,19 @@ function refusal(method: string): Answer {
 }
 
 type Launch = {
-  command: readonly string[];
-  args: string[];
-  cwd: string;
-  env: NodeJS.ProcessEnv;
+  child: EngineProcess;
   onNotification?: (method: string, params: Params) => void;
   onRequest: (method: string, params: Params) => Answer | Promise<Answer>;
 };
 
-function startAppServer({ command, args, cwd, env, onNotification, onRequest }: Launch) {
-  const [file = "", ...prefix] = command;
-  const child = NodeChildProcess.spawn(file, [...prefix, ...args], {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "ignore"],
-    windowsHide: true,
-    // Its own group, so a POSIX stop reaches the whole tree.
-    detached: process.platform !== "win32",
-  });
+const hostProcess = (
+  command: readonly string[],
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+) => spawnHost(command, args, { cwd, env, stderr: false });
 
+function startAppServer({ child, onNotification, onRequest }: Launch) {
   const pending = new Map<number, (frame: Frame | undefined) => void>();
   const timers = new Set<NodeJS.Timeout>();
   const { promise: closed, resolve: markClosed } = Promise.withResolvers<void>();
@@ -311,8 +351,8 @@ function startAppServer({ command, args, cwd, env, onNotification, onRequest }: 
       return;
     }
     killed = true;
-    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      killTree(child.pid);
+    if (child.alive()) {
+      child.kill();
     }
     // A stop must settle the turn even if the kill silently failed.
     after(stopGraceMs, close);
@@ -340,11 +380,9 @@ function startAppServer({ command, args, cwd, env, onNotification, onRequest }: 
     }
   }
 
-  child.once("error", () => {
-    if (child.pid === undefined) {
-      spawnFailed = true;
-      close();
-    }
+  child.events.once("spawnError", () => {
+    spawnFailed = true;
+    close();
   });
   child.stdin.on("error", () => {});
   child.stdout.setEncoding("utf8");
@@ -354,13 +392,15 @@ function startAppServer({ command, args, cwd, env, onNotification, onRequest }: 
     lines.forEach(onLine);
   });
   // A detached grandchild can hold the pipes open forever, so `close` alone can't be awaited.
-  child.once("exit", () => after(closeGraceMs, close));
-  child.once("close", close);
+  child.events.once("exit", () => after(closeGraceMs, close));
+  child.events.once("close", close);
 
   return {
     after,
     kill,
     closed,
+    gone: child.gone,
+    dropped: child.dropped,
     spawnFailed: () => spawnFailed,
     notify: (method: string) => send({ method }),
     // Undefined once the process is gone: it never rejects and never outlives it.
@@ -406,7 +446,12 @@ function accountGate(reply: Frame, lane: EngineLane): Omit<Gate, "version"> {
 
 // Undefined means no answer came, and what that means is the caller's call. The version is only
 // read, never checked.
-async function passGate(server: AppServer, lane: EngineLane): Promise<Gate | undefined> {
+// `proxied`: the box's proxy holds the key, so the box has no account to read.
+async function passGate(
+  server: AppServer,
+  lane: EngineLane,
+  proxied = false,
+): Promise<Gate | undefined> {
   const initialized = await server.request("initialize", {
     clientInfo: { name: "bee", version: "1" },
     capabilities: { experimentalApi: true },
@@ -417,11 +462,15 @@ async function passGate(server: AppServer, lane: EngineLane): Promise<Gate | und
   server.notify("initialized");
   // `bee/0.167.0 (Windows ...)`: the app-server's only report of its own version.
   const userAgent = Initialized.safeParse(initialized.result).data?.userAgent;
+  const version = userAgent ? cliVersion(userAgent) : null;
+  if (proxied) {
+    return { version, pause: null, auth: "unknown", email: null };
+  }
   const account = await server.request("account/read", {});
   if (!account) {
     return undefined;
   }
-  return { version: userAgent ? cliVersion(userAgent) : null, ...accountGate(account, lane) };
+  return { version, ...accountGate(account, lane) };
 }
 
 const SkillList = z.object({
@@ -605,7 +654,58 @@ function threadParams(launch: BotLaunch, cwd: string) {
 
 type Options = { command: readonly string[]; dataDir: string };
 
-export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
+async function exitsCleanly(attach: Promise<BoxAttach>) {
+  try {
+    const { stream, exited } = await attach;
+    stream.resume();
+    stream.end();
+    return (await exited) === 0;
+  } catch {
+    return false;
+  }
+}
+
+// `command` is the CLI as the box sees it. Each box has its own CODEX_HOME, in its own home.
+async function startInBox(
+  { runtime, layout }: BoxOptions,
+  command: readonly string[],
+  dataDir: string,
+  launch: BotLaunch,
+  permissions: { url: string; token: string },
+) {
+  const codexHome = `${layout.home}/.codex`;
+  const mapping =
+    launch.lane === "subscription"
+      ? credentialMapping({
+          engine: "codex",
+          accountId: launch.engineAccountId,
+          dataDir,
+          layout,
+          secureStorageDir: false,
+        })
+      : undefined;
+  const link = mapping?.kind === "shared" ? mapping.link : undefined;
+  const prepare = { argv: prepareCodexHome(codexHome, link), env: layout.env };
+  if (!(await exitsCleanly(runtime.execAttach(launch.botId, prepare)))) {
+    return undefined;
+  }
+  return spawnInBox(runtime, launch.botId, {
+    argv: [
+      ...command,
+      ...boxLaunchArgs(layout.workdir, launch.lane, layout.apiLane),
+      ...beeArgs(layout.beeUrl(permissions.url)),
+    ],
+    env: { ...layout.env, CODEX_HOME: codexHome, [tokenVariable]: permissions.token },
+    cwd: layout.workdir,
+  });
+}
+
+export function createCodexRunTurn({
+  command,
+  dataDir,
+  box,
+}: Options & { box?: BoxOptions | undefined }): RunTurn {
+  const accountGate = createAccountGate();
   return async ({
     prompt,
     sessionId,
@@ -633,7 +733,9 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
     if (signal.aborted) {
       return { kind: "failed" };
     }
-    const cwd = await NodeFS.realpath(workingFolder(dataDir, launch.botId, projectPath));
+    const cwd = box
+      ? box.layout.workdir
+      : await NodeFS.realpath(workingFolder(dataDir, launch.botId, projectPath));
 
     const seen: Seen = { ended: undefined, lastError: undefined, limits: undefined, replies: [] };
     const changes = new Map<string, Change[]>();
@@ -737,14 +839,25 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
       return refusal(method);
     }
 
-    const server = startAppServer({
-      command,
-      args: [...launchArgs(cwd, launch.lane), ...beeArgs(permissions.url)],
-      cwd,
-      env: { ...childEnv(), [tokenVariable]: permissions.token },
-      onNotification,
-      onRequest,
-    });
+    // R5: held until the app-server is gone, which in a box can outlast the turn.
+    let release: (() => void) | undefined;
+    if (box && launch.lane === "subscription") {
+      release = await accountGate(launch.engineAccountId, signal);
+      if (!release) {
+        return { kind: "failed" };
+      }
+    }
+    const child = box
+      ? await startInBox(box, command, dataDir, launch, permissions)
+      : hostProcess(command, [...launchArgs(cwd, launch.lane), ...beeArgs(permissions.url)], cwd, {
+          ...childEnv(),
+          [tokenVariable]: permissions.token,
+        });
+    if (!child) {
+      release?.();
+      return { kind: "failed" };
+    }
+    const server = startAppServer({ child, onNotification, onRequest });
 
     const stop = () => {
       if (threadId && turnId) {
@@ -756,8 +869,11 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
     };
 
     async function drive(): Promise<TurnOutcome> {
-      const gate = await passGate(server, launch.lane);
+      const gate = await passGate(server, launch.lane, Boolean(box) && launch.lane === "api_key");
       if (gate === undefined) {
+        if (server.dropped()) {
+          return { kind: "failed" };
+        }
         if (server.spawnFailed()) {
           return { kind: "auth_failed", pauseReason: "cli_missing" };
         }
@@ -838,6 +954,9 @@ export function createCodexRunTurn({ command, dataDir }: Options): RunTurn {
     } finally {
       signal.removeEventListener("abort", stop);
       await server.shutdown();
+      if (release) {
+        void server.gone.then(release);
+      }
     }
   };
 }
@@ -850,10 +969,7 @@ export async function probeCodex(
   onModels?: (models: EngineModel[]) => void,
 ): Promise<EngineStatus> {
   const server = startAppServer({
-    command,
-    args: launchArgs(await NodeFS.realpath(cwd), lane),
-    cwd,
-    env: childEnv(),
+    child: hostProcess(command, launchArgs(await NodeFS.realpath(cwd), lane), cwd, childEnv()),
     onRequest: refusal,
   });
   server.after(gateTimeoutMs, server.kill);

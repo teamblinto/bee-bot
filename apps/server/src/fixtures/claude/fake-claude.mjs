@@ -160,6 +160,11 @@ const scenarios = {
     init: () => withAccount({ ...subscriber, apiKeySource: "ANTHROPIC_API_KEY" }),
     frames: () => replay("success.ndjson"),
   },
+  // A box on the API lane: the key is the proxy's placeholder in ANTHROPIC_API_KEY.
+  "gate-proxy-key": {
+    init: () => withAccount({ apiProvider: "firstParty", apiKeySource: "ANTHROPIC_API_KEY" }),
+    frames: () => replay("success.ndjson"),
+  },
   "gate-token": {
     init: () => withAccount({ ...subscriber, tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" }),
     frames: () => replay("success.ndjson"),
@@ -221,7 +226,8 @@ function send(frames, code) {
 
 log({ pid: process.pid, args, cwd: process.cwd(), env: Object.keys(process.env) });
 if (args.includes("--mcp-config")) {
-  log({ mcpConfig: NodeFS.readFileSync(args[args.indexOf("--mcp-config") + 1], "utf8") });
+  const config = args[args.indexOf("--mcp-config") + 1];
+  log({ mcpConfig: config.startsWith("{") ? config : NodeFS.readFileSync(config, "utf8") });
 }
 
 if (args[0] === "--version") {
