@@ -161,6 +161,8 @@ export function pauseLine(
       "Claude Code was found but didn't start. Run claude from a terminal to see what's wrong, then Resume.",
     config_dir:
       "CLAUDE_CONFIG_DIR is set and Bee Bot ignores it, so Claude looks logged out. Run claude auth login, then Resume.",
+    browser_session:
+      "A site in this bot's browser needs you. Open Browser from the bot menu and take control.",
   };
   return (accountId === "codex" ? codexPauseLines[reason] : undefined) ?? lines[reason];
 }

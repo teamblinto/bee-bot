@@ -13,6 +13,7 @@ import {
 import { buildTranscript } from "../transcript";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
+import { HandoffView } from "./HandoffView";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
 import { Transcript } from "./Transcript";
@@ -28,6 +29,7 @@ function BotMenu({
   onEdit,
   onMemory,
   onRoutines,
+  onBrowser,
 }: {
   bot: Bot;
   connected: boolean;
@@ -35,6 +37,7 @@ function BotMenu({
   onEdit: () => void;
   onMemory: () => void;
   onRoutines: () => void;
+  onBrowser: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -60,6 +63,15 @@ function BotMenu({
         </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onRoutines}>
           Routines
+        </button>
+        <button
+          type="button"
+          {...hide}
+          className={menuItemClass}
+          disabled={!connected}
+          onClick={onBrowser}
+        >
+          Browser
         </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
@@ -133,6 +145,7 @@ export function ChatView({
   const routines = chat.routines.filter(({ botId }) => botId === bot.id);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   useEffect(() => {
     if (lastBotMessageId && lastBotMessageId !== seenId) {
@@ -191,6 +204,7 @@ export function ChatView({
           onEdit={onEdit}
           onMemory={() => setMemoryOpen(true)}
           onRoutines={() => setRoutinesOpen(true)}
+          onBrowser={() => setBrowserOpen(true)}
         />
       </header>
       {empty ? (
@@ -260,6 +274,7 @@ export function ChatView({
           onClose={() => setRoutinesOpen(false)}
         />
       )}
+      {browserOpen && <HandoffView bot={bot} onClose={() => setBrowserOpen(false)} />}
     </section>
   );
 }

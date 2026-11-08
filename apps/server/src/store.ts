@@ -1830,6 +1830,7 @@ export function openEventStore(dataDir: string) {
     tasks,
     boxes,
     continuations,
+    appendAudit,
     effects: openEffects(db, tx),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);

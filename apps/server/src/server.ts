@@ -31,6 +31,9 @@ import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { callBotTool } from "./botTools.ts";
+import { decide } from "./broker.ts";
+import { createBrowserBroker, noBrowser, serveHandoff, storeBrowserDeps } from "./browser.ts";
+import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
@@ -67,6 +70,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   mcpKeepaliveMs?: number | undefined;
   heartbeatMs?: number | undefined;
   clock?: AwakeClock | undefined;
+  browserRuntime?: BrowserRuntime | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -140,6 +144,7 @@ export async function startServer({
   mcpKeepaliveMs,
   heartbeatMs = 30_000,
   clock = createAwakeClock(),
+  browserRuntime = noBrowser,
 }: Options) {
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -214,6 +219,12 @@ export async function startServer({
   }
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+  const handoffSockets = new WebSocketServer({ noServer: true, maxPayload: 4096 });
+  const browser = createBrowserBroker({
+    runtime: browserRuntime,
+    decide,
+    ...storeBrowserDeps(store),
+  });
 
   // A sleeping laptop or a dropped network leaves a socket that never closes on its own.
   const answered = new WeakSet<WebSocket>();
@@ -709,7 +720,7 @@ export async function startServer({
   server.on("upgrade", (request, socket, head) => {
     socket.on("error", () => socket.destroy());
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
-    if (url?.pathname !== "/ws") {
+    if (url?.pathname !== "/ws" && url?.pathname !== "/browser") {
       refuseUpgrade(socket, 404, { code: "not_found" });
       return;
     }
@@ -717,6 +728,17 @@ export async function startServer({
     const refused = refusal(request.headers.origin, url.searchParams.get("token"), url);
     if (refused) {
       refuseUpgrade(socket, refused.status, refused.body);
+      return;
+    }
+    if (url.pathname === "/browser") {
+      const botId = url.searchParams.get("botId") ?? "";
+      if (!store.getBot(botId)) {
+        refuseUpgrade(socket, 404, { code: "not_found" });
+        return;
+      }
+      handoffSockets.handleUpgrade(request, socket, head, (client) =>
+        serveHandoff(browser, client, botId),
+      );
       return;
     }
     sockets.handleUpgrade(request, socket, head, (client) => {
@@ -783,9 +805,10 @@ export async function startServer({
       heartbeat.cancel();
       approvals.close();
       await supervisor.close();
-      for (const client of sockets.clients) {
+      for (const client of [...sockets.clients, ...handoffSockets.clients]) {
         client.terminate();
       }
+      await browser.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },

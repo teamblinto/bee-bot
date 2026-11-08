@@ -46,6 +46,8 @@ export const PauseReason = z.enum([
   "config_dir",
   // The CLI authenticated with a different credential source than the account's lane.
   "credential_source",
+  // A site wants a sign-in or a challenge solved, or a browser action is the owner's to do.
+  "browser_session",
 ]);
 export type PauseReason = z.infer<typeof PauseReason>;
 
@@ -302,6 +304,55 @@ export type AuditEntry = z.infer<typeof AuditEntry>;
 // Engine accounts whose API key the vault holds. Never the key itself.
 export const VaultStatus = z.object({ apiKeys: z.array(z.string()) });
 export type VaultStatus = z.infer<typeof VaultStatus>;
+
+// The handoff socket: the owner watches the bot's browser and may take control of it. Nothing sent
+// up this socket is logged, stored or shown to the bot.
+export const HandoffReason = z.enum(["login", "captcha", "hand_off"]);
+export type HandoffReason = z.infer<typeof HandoffReason>;
+
+// Coordinates are page CSS pixels.
+export const HandoffInput = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("mouse"),
+    action: z.enum(["down", "up", "move", "wheel"]),
+    x: z.number().min(0).max(10_000),
+    y: z.number().min(0).max(10_000),
+    button: z.enum(["none", "left", "middle", "right"]),
+    deltaX: z.number().min(-10_000).max(10_000).optional(),
+    deltaY: z.number().min(-10_000).max(10_000).optional(),
+  }),
+  z.object({
+    type: z.literal("key"),
+    action: z.enum(["down", "up"]),
+    key: z.string().min(1).max(32),
+    code: z.string().max(32),
+  }),
+]);
+export type HandoffInput = z.infer<typeof HandoffInput>;
+
+export const HandoffClientMessage = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("take") }),
+  z.object({ type: z.literal("give") }),
+  z.object({ type: z.literal("input"), input: HandoffInput }),
+  // The private sign-in field: typed into the page's focused field in one go.
+  z.object({ type: z.literal("text"), text: z.string().min(1).max(1000) }),
+]);
+export type HandoffClientMessage = z.infer<typeof HandoffClientMessage>;
+
+export const HandoffServerMessage = z.discriminatedUnion("type", [
+  // `mine` is this socket holding the lease. `requested` is why the bot asked for a person.
+  z.object({
+    type: z.literal("lease"),
+    holder: z.enum(["bot", "human"]),
+    mine: z.boolean(),
+    requested: HandoffReason.nullable(),
+    note: z.string().nullable(),
+  }),
+  // A JPEG, base64, of a viewport `width` by `height` CSS pixels.
+  z.object({ type: z.literal("frame"), data: z.string(), width: z.number(), height: z.number() }),
+  z.object({ type: z.literal("unavailable") }),
+]);
+export type HandoffServerMessage = z.infer<typeof HandoffServerMessage>;
 
 export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
 export type MemoryType = z.infer<typeof MemoryType>;
