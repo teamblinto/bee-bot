@@ -14,6 +14,16 @@ import {
 import { z } from "zod";
 
 import {
+  type BoxOptions,
+  credentialMapping,
+  type EngineProcess,
+  proxyKeyPlaceholder,
+  spawnHost,
+  spawnInBox,
+  supportsSecureStorageDir,
+} from "./boxEngine.ts";
+import {
+  type BotLaunch,
   cliVersion,
   type EngineChoice,
   killTree,
@@ -42,6 +52,18 @@ import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 // Empty, not `user`: `user` loads the owner's plugins, hooks and CLAUDE.md into every bot.
 const settingSources = "";
 const toolList = "Read,Write,Edit,Glob,Grep,Bash";
+const beeTools = [
+  "memory_search",
+  "memory_get",
+  "memory_propose",
+  "memory_forget",
+  "send_message",
+  "notify",
+  "delegate",
+  "handoff",
+  "ask_user",
+  "create_routine",
+].map((name) => `mcp__bee__${name}`);
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
 // reaching `approve` would taint the scope. A new bee tool must be added here on purpose.
@@ -51,22 +73,20 @@ const askSettings = JSON.stringify({
   plansDirectory: ".plans",
   permissions: {
     ask: ["Bash", "Read", "Glob", "Grep"],
-    allow: [
-      "memory_search",
-      "memory_get",
-      "memory_propose",
-      "memory_forget",
-      "send_message",
-      "notify",
-      "delegate",
-      "handoff",
-      "ask_user",
-      "create_routine",
-    ].map((name) => `mcp__bee__${name}`),
+    allow: beeTools,
   },
 });
 const permissionTool = "mcp__bee__approve";
 const mcpTimeoutMs = 900_000;
+
+// Box mode (M3). No permission tool: anything off the allowlist is refused outright, and the broker
+// sees every call first through the hook. A hook that can't reach it blocks the call.
+const boxTools = "Read,Write,Edit,Glob,Grep,Bash";
+const boxPlanTools = "Read,Glob,Grep";
+const tokenVariable = "BEE_RUN_TOKEN";
+// Seconds. The broker can hold a call while it asks the owner.
+const hookTimeoutSeconds = 900;
+export const preToolUsePath = "/hooks/pre-tool-use";
 
 const gateTimeoutMs = 5000;
 const lingerMs = 5000;
@@ -178,6 +198,66 @@ export function turnArgs(
   ];
 }
 
+// Measured on 2.1.319. The token stays off argv: both configs name the variable the CLI expands.
+export function boxTurnArgs(
+  personaPath: string,
+  sessionId: string,
+  resume: boolean,
+  { model, effort, mode }: EngineChoice,
+  urls: { mcp: string; hook: string },
+) {
+  const tools = mode === "plan" ? boxPlanTools : boxTools;
+  const hook = {
+    type: "http",
+    url: urls.hook,
+    headers: { Authorization: `Bearer $${tokenVariable}` },
+    allowedEnvVars: [tokenVariable],
+    timeout: hookTimeoutSeconds,
+    onFailure: "block",
+  };
+  const settings = {
+    plansDirectory: ".plans",
+    hooks: { PreToolUse: [{ matcher: "*", hooks: [hook] }] },
+  };
+  const bee = {
+    type: "http",
+    timeout: mcpTimeoutMs,
+    url: urls.mcp,
+    headers: { Authorization: `Bearer \${${tokenVariable}}` },
+  };
+  return [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--input-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--model",
+    model,
+    ...(effort ? ["--effort", effort] : []),
+    "--permission-mode",
+    "dontAsk",
+    "--setting-sources",
+    settingSources,
+    "--strict-mcp-config",
+    "--tools",
+    tools,
+    "--allowedTools",
+    [tools, ...beeTools].join(","),
+    "--settings",
+    JSON.stringify(settings),
+    "--mcp-config",
+    JSON.stringify({ mcpServers: { bee } }),
+    "--system-prompt-snapshot",
+    "off",
+    "--append-system-prompt-file",
+    personaPath,
+    resume ? "--resume" : "--session-id",
+    sessionId,
+  ];
+}
+
 const loose = z.unknown().optional();
 
 // Carries the full tool input and thought. Only `toolDetail` may read from it, and nothing may log it.
@@ -262,37 +342,41 @@ type Credential = { firstParty: boolean; plan: boolean; apiKeySource: unknown; t
 
 // The one check for the run gate and the startup probe. A login the lane doesn't use is never
 // switched to: the bot pauses until the owner logs the CLI in the lane's way.
-function credentialPause(lane: EngineLane, credential: Credential) {
+function credentialPause(lane: EngineLane, credential: Credential, keySource = consoleKeySource) {
   const { plan, apiKeySource, token } = credential;
   if (!plan && !apiKeySource && (token === undefined || token === "none")) {
     return authPause();
   }
-  return resolvedLane(credential) === lane ? undefined : "credential_source";
+  return resolvedLane(credential, keySource) === lane ? undefined : "credential_source";
 }
 
-function resolvedLane({ firstParty, plan, apiKeySource, token }: Credential) {
+function resolvedLane({ firstParty, plan, apiKeySource, token }: Credential, keySource: string) {
   if (!firstParty) {
     return undefined;
   }
   if (apiKeySource) {
-    return apiKeySource === consoleKeySource && !plan ? "api_key" : undefined;
+    return apiKeySource === keySource && !plan ? "api_key" : undefined;
   }
   return plan && (token ?? "claude.ai") === "claude.ai" ? "subscription" : undefined;
 }
 
 // The CLI's version is never checked. A CLI that doesn't report its login here can't have its lane
 // checked, so the turn goes ahead and a failed login still surfaces from the result.
-function gateRejection(frame: Frame, lane: EngineLane) {
+function gateRejection(frame: Frame, lane: EngineLane, keySource = consoleKeySource) {
   const account = frame.response?.response?.account;
   if (!account) {
     return undefined;
   }
-  return credentialPause(lane, {
-    firstParty: account.apiProvider === "firstParty",
-    plan: Boolean(account.subscriptionType),
-    apiKeySource: account.apiKeySource,
-    token: account.tokenSource,
-  });
+  return credentialPause(
+    lane,
+    {
+      firstParty: account.apiProvider === "firstParty",
+      plan: Boolean(account.subscriptionType),
+      apiKeySource: account.apiKeySource,
+      token: account.tokenSource,
+    },
+    keySource,
+  );
 }
 
 type Seen = {
@@ -336,12 +420,13 @@ function mapResult({ result, assistantError, apiStatus, rateLimit }: Seen): Turn
 }
 
 type Attempt = {
-  command: readonly string[];
+  start: () => EngineProcess;
   clock: AwakeClock;
-  args: string[];
   cwd: string;
   prompt: string;
   lane: EngineLane;
+  // What the CLI reports for a key on the API lane: a box's key is the proxy placeholder.
+  keySource?: string | undefined;
   signal: AbortSignal;
   onDelta: (text: string) => void;
   onToolStart: (tool: ToolStart) => void;
@@ -352,12 +437,12 @@ type Attempt = {
 };
 
 function runProcess({
-  command,
+  start,
   clock,
-  args,
   cwd,
   prompt,
   lane,
+  keySource,
   signal,
   onDelta,
   onToolStart,
@@ -367,15 +452,7 @@ function runProcess({
   onDelivered,
 }: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
-    const [file = "", ...prefix] = command;
-    const child = NodeChildProcess.spawn(file, [...prefix, ...args], {
-      cwd,
-      env: childEnv(),
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      // Its own group, so a POSIX stop reaches the whole tree.
-      detached: process.platform !== "win32",
-    });
+    const child = start();
 
     const seen: Seen = {
       result: undefined,
@@ -405,14 +482,15 @@ function runProcess({
         return;
       }
       stopping = true;
-      if (child.pid !== undefined) {
-        killTree(child.pid);
-      }
+      child.kill();
       // A stop must settle the turn even if the kill silently failed.
       after(stopGraceMs, finish);
     }
 
     function outcome() {
+      if (gate !== "open" && child.dropped()) {
+        return { kind: "failed" } satisfies TurnOutcome;
+      }
       // Both come before the gate. Later, the prompt is out and stderr is only noise that must not
       // turn a good reply into a retry that sends the prompt again.
       if (gate === "pending" && /Session ID \S+ is already in use/.test(stderr)) {
@@ -447,12 +525,12 @@ function runProcess({
       }
       signal.removeEventListener("abort", stop);
       child.stdout.destroy();
-      child.stderr.destroy();
+      child.stderr?.destroy();
       resolve(outcome());
     }
 
     function openGate(frame: Frame) {
-      const rejection = gateRejection(frame, lane);
+      const rejection = gateRejection(frame, lane, keySource);
       if (rejection) {
         gate = rejection;
         child.stdin.end();
@@ -547,11 +625,9 @@ function runProcess({
       }
     }
 
-    child.once("error", () => {
-      if (child.pid === undefined) {
-        spawnFailed = true;
-        finish();
-      }
+    child.events.once("spawnError", () => {
+      spawnFailed = true;
+      finish();
     });
     child.stdin.on("error", () => {});
     child.stdout.setEncoding("utf8");
@@ -560,13 +636,13 @@ function runProcess({
       stdout = lines.pop() ?? "";
       lines.forEach(onLine);
     });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
       stderr = (stderr + chunk).slice(-stderrTailChars);
     });
     // A detached grandchild can hold the pipes open forever, so `close` alone can't be awaited.
-    child.once("exit", () => after(closeGraceMs, finish));
-    child.once("close", finish);
+    child.events.once("exit", () => after(closeGraceMs, finish));
+    child.events.once("close", finish);
 
     timers.add(
       awakeTimeout(clock, gateTimeoutMs, () => {
@@ -637,11 +713,56 @@ const isFolder = (path: string) =>
 
 type Options = { command: readonly string[]; dataDir: string; clock?: AwakeClock | undefined };
 
+type Starter = (args: string[]) => () => EngineProcess;
+
+// `command` is the CLI as the box sees it.
+function boxStarter(
+  command: readonly string[],
+  { runtime, layout }: BoxOptions,
+  launch: BotLaunch,
+  token: string,
+  credentialEnv: Record<string, string>,
+): Starter {
+  const env = {
+    ...layout.env,
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    [tokenVariable]: token,
+    ...credentialEnv,
+    ...(launch.lane === "api_key" && {
+      ANTHROPIC_BASE_URL: `${layout.apiLane}/anthropic`,
+      ANTHROPIC_API_KEY: proxyKeyPlaceholder,
+    }),
+  };
+  return (args) => () =>
+    spawnInBox(runtime, launch.botId, { argv: [...command, ...args], env, cwd: layout.workdir });
+}
+
 export function createClaudeRunTurn({
   command,
   dataDir,
   clock = createAwakeClock(),
-}: Options): RunTurn {
+  box,
+}: Options & { box?: BoxOptions | undefined }): RunTurn {
+  const secureStorage = new Map<string, Promise<boolean>>();
+  function credentialEnv({ runtime, layout }: BoxOptions, { botId, engineAccountId }: BotLaunch) {
+    const detected =
+      secureStorage.get(botId) ??
+      supportsSecureStorageDir(runtime, botId, layout.claudeBinary, layout.env);
+    secureStorage.set(botId, detected);
+    return detected.then((found) => {
+      const mapping = credentialMapping({
+        engine: "claude",
+        accountId: engineAccountId,
+        dataDir,
+        layout,
+        secureStorageDir: found,
+      });
+      return mapping.kind === "shared" ? mapping.env : {};
+    });
+  }
+
   return async ({
     prompt,
     sessionId,
@@ -661,23 +782,36 @@ export function createClaudeRunTurn({
     if (projectPath && !(await isFolder(projectPath))) {
       return { kind: "folder_missing" };
     }
-    const cwd = workingFolder(dataDir, launch.botId, projectPath);
+    const cwd = box ? box.layout.workdir : workingFolder(dataDir, launch.botId, projectPath);
     const privateFolder = workspacePath(dataDir, launch.botId);
-    const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");
+    const personaPath = box
+      ? NodePath.join(box.layout.beeDir.host(launch.botId), "persona.md")
+      : NodePath.join(NodePath.dirname(privateFolder), "persona.md");
     await NodeFS.mkdir(privateFolder, { recursive: true });
+    await NodeFS.mkdir(NodePath.dirname(personaPath), { recursive: true });
     await NodeFS.writeFile(personaPath, personaText(launch));
 
     const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;
     const configPath = NodePath.join(dataDir, "runtime", name);
+    const start: Starter = box
+      ? boxStarter(command, box, launch, permissions.token, await credentialEnv(box, launch))
+      : (args) => () => spawnHost(command, args, { cwd, env: childEnv(), stderr: true });
+    const argsFor = (asResume: boolean) =>
+      box
+        ? boxTurnArgs(`${box.layout.beeDir.box}/persona.md`, sessionId, asResume, launch, {
+            mcp: box.layout.beeUrl(permissions.url),
+            hook: box.layout.beeUrl(new URL(preToolUsePath, permissions.url).href),
+          })
+        : turnArgs(personaPath, sessionId, asResume, launch, configPath);
     const openTools = new Set<string>();
     const attempt = (asResume: boolean, text: string, stop: AbortSignal, delivered: () => void) =>
       runProcess({
-        command,
+        start: start(argsFor(asResume)),
         clock,
-        args: turnArgs(personaPath, sessionId, asResume, launch, configPath),
         cwd,
         prompt: text,
         lane: launch.lane,
+        keySource: box ? "ANTHROPIC_API_KEY" : undefined,
         signal: stop,
         onDelta,
         onToolStart: (tool) => {
@@ -712,7 +846,9 @@ export function createClaudeRunTurn({
       return { kind: "failed" };
     }
     try {
-      await writeMcpConfig(configPath, permissions.url, permissions.token);
+      if (!box) {
+        await writeMcpConfig(configPath, permissions.url, permissions.token);
+      }
       let input = prompt;
       let asResume = resume;
       let delivered = onDelivered;
@@ -820,9 +956,9 @@ export function createClaudeSummarize({
     const timeout = awakeTimeout(clock, summaryTimeoutMs, stop);
     try {
       const outcome = await runProcess({
-        command,
+        start: () =>
+          spawnHost(command, summaryArgs, { cwd: dataDir, env: childEnv(), stderr: true }),
         clock,
-        args: summaryArgs,
         cwd: dataDir,
         prompt: summaryPrompt(bot),
         lane: lane(),

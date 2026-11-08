@@ -343,6 +343,17 @@ function endpoint(path: string) {
   return url;
 }
 
+// The login terminal's own socket (R20): its bytes never pass through the event stream.
+export function terminalSocketUrl(botId: string, cols: number, rows: number) {
+  const url = endpoint("/terminal");
+  url.protocol = "ws:";
+  url.searchParams.set("token", token ?? "");
+  url.searchParams.set("botId", botId);
+  url.searchParams.set("cols", String(cols));
+  url.searchParams.set("rows", String(rows));
+  return url;
+}
+
 let failedAttempts = 0;
 
 function reconnect() {
