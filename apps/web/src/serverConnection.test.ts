@@ -94,6 +94,7 @@ const memory = (id: string, status: MemoryItem["status"]): MemoryItem => ({
   created: "now",
   supersededBy: null,
   text: id,
+  scope: "bot",
 });
 const memoryEvent = (seq: number, item: MemoryItem): ServerEvent => ({
   seq,

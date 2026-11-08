@@ -1,0 +1,110 @@
+{
+  "memories": [
+    { "key": "name", "type": "user", "text": "The owner's name is Samira and she goes by Sam." },
+    { "key": "tz", "type": "user", "text": "Sam works from Lisbon, timezone Europe/Lisbon." },
+    { "key": "coffee", "type": "user", "text": "Sam drinks oat milk flat whites, never decaf." },
+    {
+      "key": "answers",
+      "type": "feedback",
+      "text": "Keep answers short: bullet points, no preamble."
+    },
+    {
+      "key": "push",
+      "type": "feedback",
+      "text": "Never force-push to main; open a merge request instead."
+    },
+    {
+      "key": "tests",
+      "type": "feedback",
+      "text": "Run the unit tests before saying a change is done."
+    },
+    {
+      "key": "gitlab",
+      "type": "reference",
+      "text": "The bee-hive repository is hosted on GitLab under the platform group."
+    },
+    {
+      "key": "staging",
+      "type": "project",
+      "text": "The staging server is staging.hive.internal and deploys from the release branch."
+    },
+    {
+      "key": "deploy",
+      "type": "project",
+      "text": "Production deploys happen on Tuesdays after the standup."
+    },
+    {
+      "key": "freeze",
+      "type": "project",
+      "text": "Code freeze for the Q4 launch starts on December 12."
+    },
+    {
+      "key": "db",
+      "type": "project",
+      "text": "The billing service stores invoices in Postgres 16."
+    },
+    {
+      "key": "grafana",
+      "type": "reference",
+      "text": "Grafana dashboards for latency live at grafana.hive.internal/d/latency."
+    },
+    {
+      "key": "oncall",
+      "type": "reference",
+      "text": "The on-call rota is in the PagerDuty schedule named hive-primary."
+    },
+    {
+      "key": "dentist",
+      "type": "user",
+      "text": "Sam has a dentist appointment every first Monday of the month."
+    },
+    {
+      "key": "cat",
+      "type": "user",
+      "text": "Sam's cat is called Biscuit and is allergic to chicken."
+    },
+    {
+      "key": "lang",
+      "type": "feedback",
+      "text": "Write code comments in English even when Sam writes in Portuguese."
+    },
+    {
+      "key": "style",
+      "type": "feedback",
+      "text": "Prefer TypeScript over JavaScript for new scripts."
+    },
+    {
+      "key": "budget",
+      "type": "project",
+      "text": "The cloud budget for the hive project is 4000 euros per month."
+    },
+    {
+      "key": "vendor",
+      "type": "reference",
+      "text": "Invoices from the hosting vendor arrive by email from billing@hoster.example."
+    },
+    {
+      "key": "release",
+      "type": "project",
+      "text": "Release notes are drafted in the shared Notion page called Changelog."
+    }
+  ],
+  "queries": [
+    { "query": "owner name", "relevant": ["name"] },
+    { "query": "what timezone is Sam in", "relevant": ["tz"] },
+    { "query": "coffee order", "relevant": ["coffee"] },
+    { "query": "force-push main", "relevant": ["push"] },
+    { "query": "where is the repository hosted", "relevant": ["gitlab"] },
+    { "query": "staging server address", "relevant": ["staging"] },
+    { "query": "when do production deploys happen", "relevant": ["deploy"] },
+    { "query": "code freeze launch date", "relevant": ["freeze"] },
+    { "query": "invoices database", "relevant": ["db", "vendor"] },
+    { "query": "latency dashboard grafana", "relevant": ["grafana"] },
+    { "query": "who is on-call rota", "relevant": ["oncall"] },
+    { "query": "cat allergic", "relevant": ["cat"] },
+    { "query": "comments language Portuguese", "relevant": ["lang"] },
+    { "query": "cloud budget per month", "relevant": ["budget"] },
+    { "query": "release notes changelog", "relevant": ["release"] },
+    { "query": "run tests before done", "relevant": ["tests"] }
+  ]
+}

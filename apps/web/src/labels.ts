@@ -431,7 +431,9 @@ export const memoryLine = ({ type, source, created }: MemoryItem) =>
 export function memoryReview(item: MemoryItem, memories: MemoryItem[]) {
   const request = memoryRequest(item);
   if (!request) {
-    return { title: "Wants to remember this", lines: [{ label: "Memory", text: item.text }] };
+    const title =
+      item.scope === "team" ? "Wants every bot to remember this" : "Wants to remember this";
+    return { title, lines: [{ label: "Memory", text: item.text }] };
   }
   const target = memories.find(
     ({ id, status }) => id === request.targetId && status === "active",

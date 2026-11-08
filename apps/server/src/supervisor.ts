@@ -237,6 +237,7 @@ export function createSupervisor({
             console.error(`beebotd: run ${run.id} did not finish cleanly`, error);
             store.finishRun(run.id, bootId, { status: "Failed", reason: "engine_failed" });
           }
+          store.ingestRun(run.id);
           pump();
           onTurnEnded?.(run.launch.engineAccountId);
         }

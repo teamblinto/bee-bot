@@ -302,6 +302,7 @@ describe("event stream", () => {
       created: "2026-11-06T10:15:00.000Z",
       supersededBy: null,
       text: "healed at boot",
+      scope: "bot",
     });
 
     const { base, port, store } = await start();

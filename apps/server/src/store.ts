@@ -31,6 +31,7 @@ import { z } from "zod";
 
 import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
+import { openIngest } from "./ingest.ts";
 import { openRooms } from "./rooms.ts";
 import { openTasks } from "./tasks.ts";
 import { catchUpWindowMs, dueSlot, nextSlot } from "./routines.ts";
@@ -41,6 +42,7 @@ import {
   memoryLine,
   oneLine,
   readMemoryFiles,
+  readTeamMemoryFiles,
   writeMemoryFile,
 } from "./memory.ts";
 
@@ -446,6 +448,25 @@ export const migrations: Array<{
       updated_at TEXT NOT NULL
     );`,
   },
+  {
+    name: "memory_retention",
+    // memory_items is rebuilt from the files at every boot, so the new column needs no backfill.
+    sql: `ALTER TABLE memory_items ADD COLUMN scope TEXT NOT NULL DEFAULT 'bot'
+      CHECK (scope IN ('bot', 'team'));
+    CREATE TABLE turn_summaries (
+      run_id TEXT PRIMARY KEY REFERENCES runs (id),
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      room_id TEXT NOT NULL REFERENCES rooms (id),
+      status TEXT NOT NULL,
+      reason TEXT,
+      started_at TEXT,
+      ended_at TEXT NOT NULL,
+      tools TEXT NOT NULL,
+      asked TEXT NOT NULL,
+      replied TEXT NOT NULL
+    );
+    CREATE INDEX turn_summaries_by_bot ON turn_summaries (bot_id, ended_at);`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -652,6 +673,7 @@ export function openEventStore(dataDir: string) {
   const selectAfter = db.prepare(`SELECT ${eventColumns} FROM events WHERE seq > ? ORDER BY seq`);
   const selectBounds = db.prepare("SELECT MIN(seq) AS oldest, MAX(seq) AS latest FROM events");
   const deleteOld = db.prepare("DELETE FROM events WHERE seq <= (SELECT MAX(seq) FROM events) - ?");
+  const deleteBefore = db.prepare("DELETE FROM events WHERE created_at < ?");
 
   const parseEvent = (row: unknown) => {
     const { seq, payload, createdAt } = EventRow.parse(row);
@@ -868,14 +890,19 @@ export function openEventStore(dataDir: string) {
   );
 
   const memoryColumns = `i.id, i.bot_id AS botId, i.type, i.source, i.source_ref AS sourceRef,
-    i.status, i.created, i.superseded_by AS supersededBy, i.text`;
+    i.status, i.created, i.superseded_by AS supersededBy, i.text, i.scope`;
+  // Every bot reads the team's active items. Only its own private items are its to change.
+  const visibleTo = "(i.scope = 'team' OR i.bot_id = ?) AND i.status = 'active'";
   const selectMemory = db.prepare(`SELECT ${memoryColumns} FROM memory_items i WHERE i.id = ?`);
   const selectActiveItem = db.prepare(
     `SELECT ${memoryColumns} FROM memory_items i
-     WHERE i.bot_id = ? AND i.id = ? AND i.status = 'active'`,
+     WHERE i.bot_id = ? AND i.id = ? AND i.status = 'active' AND i.scope = 'bot'`,
+  );
+  const selectVisibleItem = db.prepare(
+    `SELECT ${memoryColumns} FROM memory_items i WHERE ${visibleTo} AND i.id = ?`,
   );
   const selectActiveItems = db.prepare(
-    `SELECT ${memoryColumns} FROM memory_items i WHERE i.bot_id = ? AND i.status = 'active'`,
+    `SELECT ${memoryColumns} FROM memory_items i WHERE ${visibleTo}`,
   );
   const selectStateMemory = db.prepare(
     `SELECT ${memoryColumns} FROM memory_items i
@@ -884,17 +911,17 @@ export function openEventStore(dataDir: string) {
   // The bot_id guard: a file copied into another bot's folder must not rewrite the first bot's item.
   const upsertMemory = db.prepare(
     `INSERT INTO memory_items
-     (id, bot_id, type, source, source_ref, status, created, superseded_by, text)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     (id, bot_id, type, source, source_ref, status, created, superseded_by, text, scope)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET status = excluded.status,
-       superseded_by = excluded.superseded_by, text = excluded.text
+       superseded_by = excluded.superseded_by, text = excluded.text, scope = excluded.scope
      WHERE bot_id = excluded.bot_id RETURNING rowid`,
   );
   const deleteMemoryText = db.prepare("DELETE FROM memory_fts WHERE rowid = ?");
   const insertMemoryText = db.prepare("INSERT INTO memory_fts (rowid, text) VALUES (?, ?)");
   const searchItems = db.prepare(
     `SELECT ${memoryColumns} FROM memory_fts f JOIN memory_items i ON i.rowid = f.rowid
-     WHERE memory_fts MATCH ? AND i.bot_id = ? AND i.status = 'active'
+     WHERE memory_fts MATCH ? AND ${visibleTo}
      ORDER BY f.rank LIMIT ${searchRows}`,
   );
   const searchMessages = db.prepare(
@@ -1196,10 +1223,14 @@ export function openEventStore(dataDir: string) {
     const row = selectActiveItem.get(botId, id);
     return row ? MemoryItem.parse(row) : undefined;
   };
+  const getVisibleMemory = (botId: string, id: string) => {
+    const row = selectVisibleItem.get(botId, id);
+    return row ? MemoryItem.parse(row) : undefined;
+  };
   const isTainted = (runId: string) => Tainted.parse(selectTainted.get(runId)).tainted;
 
   function indexMemory(item: MemoryItem) {
-    const { id, botId, type, source, sourceRef, status, created, supersededBy, text } = item;
+    const { id, botId, type, source, sourceRef, status, created, supersededBy, text, scope } = item;
     const row = upsertMemory.get(
       id,
       botId,
@@ -1210,6 +1241,7 @@ export function openEventStore(dataDir: string) {
       created,
       supersededBy,
       text,
+      scope,
     );
     if (row) {
       const { rowid } = RowId.parse(row);
@@ -1227,8 +1259,10 @@ export function openEventStore(dataDir: string) {
   }
 
   const newMemory = (
-    fields: Pick<MemoryItem, "botId" | "type" | "source" | "sourceRef" | "status" | "text">,
+    fields: Pick<MemoryItem, "botId" | "type" | "source" | "sourceRef" | "status" | "text"> &
+      Partial<Pick<MemoryItem, "scope">>,
   ): MemoryItem => ({
+    scope: "bot",
     ...fields,
     id: NodeCrypto.randomUUID(),
     created: new Date().toISOString(),
@@ -1284,20 +1318,32 @@ export function openEventStore(dataDir: string) {
     }
   }
 
-  // The files are the truth, so the index is rebuilt at every boot. No events: a client from before
-  // this boot gets a snapshot instead (`catchUp`).
-  transaction(() => {
-    db.exec("DELETE FROM memory_items; DELETE FROM memory_fts;");
-    for (const { id } of z.array(Bot).parse(selectBots.all())) {
-      const items = readMemoryFiles(dataDir, id);
+  // The files and messages are the truth, so the index is rebuilt at every boot. No events: a client
+  // from before this boot gets a snapshot instead (`catchUp`). Team files are read last, so a
+  // promotion cut off before its proposal file went still wins.
+  const rebuildIndex = () =>
+    transaction(() => {
+      db.exec("DELETE FROM memory_items; DELETE FROM memory_fts;");
+      const botIds = new Set(
+        z
+          .array(Bot)
+          .parse(selectBots.all())
+          .map(({ id }) => id),
+      );
+      const items = [
+        ...[...botIds].flatMap((id) => readMemoryFiles(dataDir, id)),
+        ...readTeamMemoryFiles(dataDir).filter(({ botId }) => botIds.has(botId)),
+      ];
       items.forEach(indexMemory);
       items.forEach(finishSupersede);
-    }
-  });
+      db.exec("INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')");
+    });
+  rebuildIndex();
 
   const tx: StoreTx = { transaction, emit };
   const rooms = openRooms(db, tx);
   const tasks = openTasks(db, tx);
+  const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
 
   return {
     rooms,
@@ -1315,6 +1361,11 @@ export function openEventStore(dataDir: string) {
     prune: (keep: number) => {
       deleteOld.run(keep);
     },
+    pruneEventsBefore: (cutoff: string) => {
+      deleteBefore.run(cutoff);
+    },
+    rebuildIndex,
+    ...ingest,
     // shortcut: sends the whole history, page it once rooms get long.
     state: (): ChatState => ({
       bots: z.array(Bot).parse(selectBots.all()),
@@ -1760,6 +1811,7 @@ export function openEventStore(dataDir: string) {
     },
 
     activeMemory: getActiveMemory,
+    visibleMemory: getVisibleMemory,
     searchMemory: (botId: string, query: string) => {
       const match = ftsQuery(query);
       if (!match) {
@@ -1781,16 +1833,20 @@ export function openEventStore(dataDir: string) {
     // until the owner decides. Taint is read in the transaction that writes.
     proposeMemory: (
       run: { id: string; botId: string },
-      input: Pick<MemoryItem, "text" | "type"> & { supersedes?: string | undefined },
+      input: Pick<MemoryItem, "text" | "type"> & {
+        supersedes?: string | undefined;
+        scope?: MemoryItem["scope"] | undefined;
+      },
     ) =>
       transaction(() => {
-        const { text, type, supersedes } = input;
+        const { text, type, supersedes, scope = "bot" } = input;
         const target =
           supersedes === undefined ? undefined : getActiveMemory(run.botId, supersedes);
-        if (supersedes !== undefined && !target) {
+        if ((supersedes !== undefined && !target) || (scope === "team" && target)) {
           return undefined;
         }
-        const tainted = isTainted(run.id);
+        // A bot never writes team memory: its proposal waits for the owner, tainted or not.
+        const tainted = scope === "team" || isTainted(run.id);
         const item = newMemory({
           botId: run.botId,
           type,
@@ -1798,6 +1854,7 @@ export function openEventStore(dataDir: string) {
           sourceRef: target ? `supersede:${target.id}` : `run:${run.id}`,
           status: tainted ? "pending" : "active",
           text,
+          scope,
         });
         saveMemory(item);
         if (target && !tainted) {

@@ -7,11 +7,12 @@ import { Bootstrap, type EngineLane, noRestartExitCodes } from "@beebot/contract
 import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
+import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
 
 const bootstrapTimeoutMs = 5000;
-const retainedEvents = 1000;
+const pruneEveryMs = 24 * 60 * 60_000;
 
 function exitWith(code: number, reason: string): never {
   console.error(`beebotd: ${reason}`);
@@ -30,7 +31,7 @@ function parseBootstrap(line: string) {
 function openStore(dataDir: string) {
   try {
     const store = openEventStore(dataDir);
-    store.prune(retainedEvents);
+    pruneEvents(store);
     return store;
   } catch (error) {
     console.error(error);
@@ -79,7 +80,15 @@ async function boot(bootstrap: Bootstrap) {
   }
   server.refreshLimits();
   await server.checkCodex();
+  const pruning = setInterval(() => {
+    try {
+      pruneEvents(store);
+    } catch (error) {
+      console.error(`beebotd: event pruning failed: ${(error as Error)?.name}`);
+    }
+  }, pruneEveryMs);
   return async () => {
+    clearInterval(pruning);
     await server.close();
     store.close();
   };
