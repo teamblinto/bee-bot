@@ -347,6 +347,7 @@ describe.skipIf(!available)("egress proxy in the beebot-dev Podman machine", () 
       dnsExfil: "error ENOTFOUND",
       connectAllowed: "HTTP/1.1 200 Connection Established",
       connectGithub: "HTTP/1.1 403 Forbidden",
+      connectVendor: "HTTP/1.1 403 Forbidden",
       connectLoopbackName: "HTTP/1.1 403 Forbidden",
       connectAttacker: "HTTP/1.1 403 Forbidden",
       connectPort: "HTTP/1.1 403 Forbidden",

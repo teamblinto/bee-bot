@@ -1,6 +1,6 @@
 import * as NodeNet from "node:net";
 
-import { normalizeHost, subscriptionHosts, type Vendor, vendors } from "./policy.ts";
+import { connectHosts, normalizeHost, type Vendor, vendors } from "./policy.ts";
 
 export type BotPolicy = { hosts: string[]; api: { vendor: Vendor; key: string } | null };
 
@@ -62,12 +62,10 @@ export function parseControl(line: string): ControlMessage | string {
       if (subscription !== null && lane === undefined) {
         return "policy subscription needs a vendor or null";
       }
-      const allowed = [
-        ...new Set([
-          ...(lane === undefined ? [] : subscriptionHosts[lane]),
-          ...normalized.filter((host) => host !== null),
-        ]),
-      ];
+      const allowed = connectHosts(
+        normalized.filter((host) => host !== null),
+        lane ?? null,
+      );
       if (api === null) {
         return { type: "policy", botId, hosts: allowed, api };
       }
