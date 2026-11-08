@@ -43,6 +43,8 @@ it("names a routine whose firing is ready to start", () => {
       status,
       reason: null,
       missedBefore: 0,
+      attempts: 0,
+      retryAt: null,
       createdAt: stamp.createdAt,
       decidedAt: null,
     },

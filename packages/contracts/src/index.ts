@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 15;
+export const protocolVersion = 16;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -316,13 +316,26 @@ export const Routine = z.object({
   timezone: z.string(),
   enabled: z.boolean(),
   skipIfLaterMins: z.number().nullable(),
-  // Null while disabled.
+  // The cron slot. The routine comes due `staggerMs` after it. Null while disabled.
   nextFireAt: z.string().nullable(),
+  staggerMs: z.number(),
+  // `owner_away` keeps scheduling and records each slot as skipped. `setup_failed` turned it off.
+  pausedReason: z.enum(["owner_away", "setup_failed"]).nullable(),
+  lastTickAt: z.string().nullable(),
+  lastAttemptAt: z.string().nullable(),
   createdAt: z.string(),
 });
 export type Routine = z.infer<typeof Routine>;
 
-export const FiringReason = z.enum(["no_boundary", "asleep", "bot_paused", "disabled", "too_late"]);
+export const FiringReason = z.enum([
+  "no_boundary",
+  "asleep",
+  "bot_paused",
+  "disabled",
+  "too_late",
+  "owner_away",
+  "catch_up",
+]);
 export type FiringReason = z.infer<typeof FiringReason>;
 
 export const RoutineFiring = z.object({
@@ -333,6 +346,9 @@ export const RoutineFiring = z.object({
   reason: FiringReason.nullable(),
   // Earlier slots this one passed over. They have no rows of their own.
   missedBefore: z.number(),
+  attempts: z.number(),
+  // Set after a failed attempt: the card reopens then, once.
+  retryAt: z.string().nullable(),
   createdAt: z.string(),
   decidedAt: z.string().nullable(),
 });

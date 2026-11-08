@@ -436,6 +436,10 @@ const routine = (id: string): Routine => ({
   enabled: true,
   skipIfLaterMins: null,
   nextFireAt: "later",
+  staggerMs: 0,
+  pausedReason: null,
+  lastTickAt: null,
+  lastAttemptAt: null,
   createdAt: "now",
 });
 const firing = (
@@ -450,6 +454,8 @@ const firing = (
   status,
   reason,
   missedBefore: 0,
+  attempts: 0,
+  retryAt: null,
   createdAt: "now",
   decidedAt: null,
 });

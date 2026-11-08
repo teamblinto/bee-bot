@@ -379,8 +379,30 @@ export const routineReadyLine = (name: string) => `${name} is ready to run`;
 export const missedLine = (count: number) =>
   `${formatCount(count)} earlier ${count === 1 ? "run was" : "runs were"} missed`;
 
-export const nextDueLine = ({ nextFireAt }: Routine) =>
-  nextFireAt ? `Next due ${dayAndTime(nextFireAt)}` : "Turned off";
+export function nextDueLine({ nextFireAt, staggerMs }: Routine) {
+  if (!nextFireAt) {
+    return "Turned off";
+  }
+  return `Next due ${dayAndTime(new Date(Date.parse(nextFireAt) + staggerMs).toISOString())}`;
+}
+
+export function heartbeatLine({ lastTickAt, lastAttemptAt }: Routine) {
+  const checked = lastTickAt ? `Last checked ${dayAndTime(lastTickAt)}` : "Not checked yet";
+  const started = lastAttemptAt ? `last started ${dayAndTime(lastAttemptAt)}` : "never started";
+  return `${checked}, ${started}`;
+}
+
+export const routinePauseLines: Record<NonNullable<Routine["pausedReason"]>, string> = {
+  owner_away: "Paused: you haven't used Bee Bot for a week. Send any message to resume.",
+  setup_failed:
+    "Turned off after 3 failed starts in a row. Check the bot's sign-in and folder, then turn it on.",
+};
+
+export const retryCardLine = "The last run failed. This is its one retry.";
+export const catchUpLine = "Bee Bot wasn't open when this was due, so this is a catch-up.";
+
+export const retryLine = (retryAt: string) =>
+  `The last run failed. It can be retried once from ${dayAndTime(retryAt)}`;
 
 const firingStatusLabels: Record<RoutineFiring["status"], string> = {
   ready: "Ready to run",
@@ -395,6 +417,8 @@ const firingReasonLines: Record<NonNullable<RoutineFiring["reason"]>, string> = 
   bot_paused: "the bot was paused",
   disabled: "the routine was changed or turned off",
   too_late: "it was past its skip limit",
+  owner_away: "you hadn't used Bee Bot for a week",
+  catch_up: "catching up on a time Bee Bot missed",
 };
 
 export function firingLine({ status, reason, slot, missedBefore }: RoutineFiring) {

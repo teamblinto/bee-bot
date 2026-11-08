@@ -1,7 +1,14 @@
 import type { Bot, Command, Routine, RoutineFiring } from "@beebot/contracts";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
-import { firingLine, nextDueLine, routinesNotice } from "../labels";
+import {
+  firingLine,
+  heartbeatLine,
+  nextDueLine,
+  retryLine,
+  routinePauseLines,
+  routinesNotice,
+} from "../labels";
 import {
   dayNames,
   defaultPreset,
@@ -155,7 +162,14 @@ export function RoutinesPanel({
                 <p className="text-small font-medium wrap-anywhere">{routine.name}</p>
                 <p className={metaClass}>{scheduleLine(routine.cron)}</p>
                 <p className={metaClass}>{nextDueLine(routine)}</p>
+                {routine.pausedReason && (
+                  <p className="text-label text-ink-secondary">
+                    {routinePauseLines[routine.pausedReason]}
+                  </p>
+                )}
+                <p className={metaClass}>{heartbeatLine(routine)}</p>
                 {firing && <p className={metaClass}>{firingLine(firing)}</p>}
+                {firing?.retryAt && <p className={metaClass}>{retryLine(firing.retryAt)}</p>}
               </div>
               <button
                 type="button"
