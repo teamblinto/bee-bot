@@ -210,8 +210,12 @@ function rows(sql: string) {
   }
 }
 
+// The approval gate's own rows. The broker decides first and writes its rows too.
 const auditRows = () =>
-  rows("SELECT tool, status, reason FROM audit_log WHERE tool IS NOT NULL ORDER BY id");
+  rows(
+    `SELECT tool, status, reason FROM audit_log
+     WHERE tool IS NOT NULL AND status NOT IN ('allow', 'deny', 'approve', 'hand_off') ORDER BY id`,
+  );
 
 describe("the MCP endpoint", () => {
   it("answers the handshake as plain JSON, and notifications with 202", async () => {

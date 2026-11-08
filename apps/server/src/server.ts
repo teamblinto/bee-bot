@@ -34,6 +34,7 @@ import { callBotTool } from "./botTools.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
+import { auditQuery, gateApproval, gateTool } from "./policy.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
 import { fallbackSummary, type Summarize } from "./summary.ts";
@@ -518,6 +519,10 @@ export async function startServer({
         }
         return result === "skipped" ? ok : { status: 409, body: { code: result } };
       }
+      case "set-bot-profile": {
+        const bot = store.policy.setBotProfile(command.botId, command.profile);
+        return bot ? { status: 200, body: bot } : notFound;
+      }
     }
   }
 
@@ -563,10 +568,14 @@ export async function startServer({
     await answerMcp(
       response,
       body,
-      (args, closed) => approvals.approve(run, args, closed),
-      (name, args) => callMemoryTool(store, run, name, args),
+      (args, closed) =>
+        gateApproval(store.policy, run, args, () => approvals.approve(run, args, closed)),
       (name, args) =>
-        callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
+        gateTool(store.policy, run, name, args, () => callMemoryTool(store, run, name, args)),
+      (name, args) =>
+        gateTool(store.policy, run, name, args, () =>
+          callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
+        ),
       mcpKeepaliveMs,
     );
   }
@@ -692,6 +701,13 @@ export async function startServer({
       }
     } else if (request.method === "GET" && url.pathname === "/engine") {
       void handleEngine(response);
+    } else if (request.method === "GET" && url.pathname === "/audit") {
+      const query = auditQuery(url);
+      sendJson(
+        response,
+        query ? 200 : 400,
+        query ? store.policy.auditPage(query) : { code: "bad_request" },
+      );
     } else if (request.method === "GET" && url.pathname === "/usage") {
       handleUsage(url, response).catch(() => sendJson(response, 200, { status: "unavailable" }));
     } else if (request.method === "POST" && url.pathname === "/usage/limits") {

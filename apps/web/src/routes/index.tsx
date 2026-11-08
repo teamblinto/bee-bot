@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { PanelLeft } from "lucide-react";
 import { useState, useSyncExternalStore } from "react";
 
+import { AuditPage } from "../components/AuditPage";
 import { BotDialog } from "../components/BotForm";
 import { ChatView } from "../components/ChatView";
 import { Onboarding } from "../components/Onboarding";
@@ -22,7 +23,7 @@ function Home() {
   const [dialog, setDialog] = useState<"new" | "room" | Bot>();
   const [roomId, setRoomId] = useState<string>();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [usageOpen, setUsageOpen] = useState(false);
+  const [page, setPage] = useState<"usage" | "audit">();
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
   const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
@@ -64,19 +65,20 @@ function Home() {
     <div className="flex h-dvh bg-background text-ink">
       <Sidebar
         connection={connection}
-        selectedId={usageOpen || room ? undefined : selected?.id}
-        selectedRoomId={usageOpen ? undefined : room?.id}
-        usageOpen={usageOpen}
+        selectedId={page || room ? undefined : selected?.id}
+        selectedRoomId={page ? undefined : room?.id}
+        usageOpen={page === "usage"}
+        auditOpen={page === "audit"}
         open={drawerOpen}
         onSelect={(botId) => {
           setSelectedId(botId);
           setRoomId(undefined);
-          setUsageOpen(false);
+          setPage(undefined);
           setDrawerOpen(false);
         }}
         onSelectRoom={(id) => {
           setRoomId(id);
-          setUsageOpen(false);
+          setPage(undefined);
           setDrawerOpen(false);
         }}
         onNewRoom={() => {
@@ -84,7 +86,11 @@ function Home() {
           setDrawerOpen(false);
         }}
         onUsage={() => {
-          setUsageOpen(true);
+          setPage("usage");
+          setDrawerOpen(false);
+        }}
+        onAudit={() => {
+          setPage("audit");
           setDrawerOpen(false);
         }}
         onNewBot={() => {
@@ -94,8 +100,10 @@ function Home() {
         onClose={() => setDrawerOpen(false)}
       />
       <main className="flex min-w-0 flex-1">
-        {usageOpen ? (
+        {page === "usage" ? (
           <UsagePage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
+        ) : page === "audit" ? (
+          <AuditPage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
         ) : room ? (
           <RoomView
             key={room.id}
@@ -139,7 +147,7 @@ function Home() {
           bots={chat.bots}
           onSaved={(saved) => {
             setRoomId(saved.id);
-            setUsageOpen(false);
+            setPage(undefined);
             setDialog(undefined);
           }}
           onClose={() => setDialog(undefined)}

@@ -1,5 +1,5 @@
 import type { Bot, Room } from "@beebot/contracts";
-import { Gauge, Hexagon, Plus, ShieldOff, Users } from "lucide-react";
+import { Gauge, Hexagon, Plus, ScrollText, ShieldOff, Users } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
@@ -119,10 +119,12 @@ export function Sidebar({
   selectedId,
   selectedRoomId,
   usageOpen,
+  auditOpen,
   open,
   onSelect,
   onSelectRoom,
   onUsage,
+  onAudit,
   onNewBot,
   onNewRoom,
   onClose,
@@ -131,10 +133,12 @@ export function Sidebar({
   selectedId: string | undefined;
   selectedRoomId: string | undefined;
   usageOpen: boolean;
+  auditOpen: boolean;
   open: boolean;
   onSelect: (botId: string) => void;
   onSelectRoom: (roomId: string) => void;
   onUsage: () => void;
+  onAudit: () => void;
   onNewBot: () => void;
   onNewRoom: () => void;
   onClose: () => void;
@@ -229,6 +233,15 @@ export function Sidebar({
         >
           <Gauge {...iconProps} />
           Usage
+        </button>
+        <button
+          type="button"
+          aria-current={auditOpen}
+          className="mb-1 flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-small text-ink-secondary transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:text-ink"
+          onClick={onAudit}
+        >
+          <ScrollText {...iconProps} />
+          Audit
         </button>
         <p
           role="status"
