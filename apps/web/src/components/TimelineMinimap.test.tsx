@@ -71,6 +71,10 @@ const message = (id: string, author: ChatMessage["author"], body: string): Trans
     body,
     tools: [],
     workedMs: null,
+    botId: null,
+    replyToId: null,
+    chainId: null,
+    hop: 0,
     createdAt: "2026-11-06T00:00:00.000Z",
   },
 });

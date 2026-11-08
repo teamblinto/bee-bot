@@ -24,7 +24,7 @@ import serverPackage from "../package.json" with { type: "json" };
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { writeMemoryFile } from "./memory.ts";
 import { startServer } from "./server.ts";
-import { migrations, openEventStore, seedFromId } from "./store.ts";
+import { migrate, migrations, openEventStore, seedFromId } from "./store.ts";
 
 const token = "t".repeat(43);
 const appOrigin = "http://127.0.0.1:5833";
@@ -58,6 +58,24 @@ afterEach(async () => {
   }
   NodeFS.rmSync(dataDir, { recursive: true, force: true });
 });
+
+const migrationIndex = (name: string) =>
+  migrations.findIndex((migration) => migration.name === name);
+
+// A database as the version before `name` left it.
+async function seedBefore(name: string, sql: string) {
+  const { DatabaseSync } = await import("node:sqlite");
+  NodeFS.mkdirSync(dataDir, { recursive: true });
+  const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+  migrate(db, migrationIndex(name));
+  db.exec(sql);
+  return db;
+}
+
+const oldBot = (id: string) => `INSERT INTO bots (id, name, personality, status, created_at)
+    VALUES ('${id}', 'Ada', '', 'ready', 'then');
+  INSERT INTO rooms (id, default_bot_id, created_at) VALUES ('room-${id}', '${id}', 'then');
+  INSERT INTO scopes (id, room_id, bot_id) VALUES ('scope-${id}', 'room-${id}', '${id}');`;
 
 async function start(port = 0, heartbeatMs?: number) {
   const store = openEventStore(dataDir);
@@ -672,27 +690,8 @@ describe("bot avatars", () => {
   });
 
   it("gives an existing bot a fixed seed from its ID", async () => {
-    const first = await start();
-    await createBot(first.base);
-    const { id } = first.store.state().bots[0] as Bot;
-    await first.stop();
-
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
-      DELETE FROM migrations WHERE name = 'account_lane';
-      ALTER TABLE settings DROP COLUMN environment_id;
-      DELETE FROM migrations WHERE name = 'environment_id';
-      DROP TABLE routine_firings;
-      DROP TABLE routines;
-      DELETE FROM migrations WHERE name = 'routines';
-      DELETE FROM migrations WHERE name = 'codex_account';
-      DELETE FROM engine_accounts WHERE id = 'codex';
-      DELETE FROM migrations WHERE name = 'bot_project_path';
-      ALTER TABLE bots DROP COLUMN project_path;
-      DELETE FROM migrations WHERE name = 'bot_avatars';
-      ALTER TABLE bots DROP COLUMN avatar_seed;`);
-    db.close();
+    const id = "6f1c2a4e-0000-4000-8000-000000000001";
+    (await seedBefore("bot_avatars", oldBot(id))).close();
 
     const second = await start();
     expect(second.store.state().bots[0]?.avatarSeed).toBe(seedFromId(id));
@@ -732,25 +731,23 @@ describe("storage failure", () => {
 
 describe("restart", () => {
   it("puts every account on the subscription lane, its stored events too", async () => {
-    const first = await start();
-    await first.stop();
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
-      DELETE FROM migrations WHERE name = 'account_lane';
-      INSERT INTO events (type, payload, created_at) VALUES ('account.changed',
+    const db = await seedBefore(
+      "account_lane",
+      `INSERT INTO events (type, payload, created_at) VALUES ('account.changed',
         '{"type":"account.changed","account":{"id":"claude","label":"Claude","blockedUntil":null}}',
-        'then');`);
+        'then');`,
+    );
+    // Stop before coordination, which clears every stored event.
+    migrate(db, migrationIndex("coordination"));
+    const { payload } = db.prepare("SELECT payload FROM events").get() as { payload: string };
     db.close();
+    expect(JSON.parse(payload)).toMatchObject({ account: { id: "claude", lane: "subscription" } });
 
     const { store } = await start();
     expect(store.state().accounts.map(({ lane }) => lane)).toEqual([
       "subscription",
       "subscription",
       "subscription",
-    ]);
-    expect(store.eventsAfter(0)).toMatchObject([
-      { type: "account.changed", account: { id: "claude", lane: "subscription" } },
     ]);
   });
 
@@ -771,41 +768,14 @@ describe("restart", () => {
   });
 
   it("reads rows from before bots had models and messages had tools", async () => {
-    const seeded = openEventStore(dataDir);
-    const { roomId } = seeded.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
-    seeded.sendMessage({ id: "m", roomId, body: "hello", attended: false });
-    seeded.close();
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
-      DELETE FROM migrations WHERE name = 'account_lane';
-      ALTER TABLE settings DROP COLUMN environment_id;
-      DELETE FROM migrations WHERE name = 'environment_id';
-      DROP TABLE routine_firings;
-      DROP TABLE routines;
-      DELETE FROM migrations WHERE name = 'routines';
-      DELETE FROM migrations WHERE name = 'codex_account';
-      DELETE FROM engine_accounts WHERE id = 'codex';
-      DELETE FROM migrations WHERE name = 'bot_project_path';
-      ALTER TABLE bots DROP COLUMN project_path;
-      DELETE FROM migrations WHERE name = 'bot_avatars';
-      ALTER TABLE bots DROP COLUMN avatar_seed;
-      DELETE FROM migrations WHERE name = 'bot_engine';
-      ALTER TABLE bots DROP COLUMN effort; ALTER TABLE bots DROP COLUMN mode;
-      ALTER TABLE bots DROP COLUMN access;
-      DELETE FROM migrations WHERE name = 'usage_limits';
-      DROP TABLE usage_checks; DROP TABLE usage_windows;
-      DELETE FROM migrations WHERE name = 'run_timing';
-      ALTER TABLE messages DROP COLUMN worked_ms;
-      DELETE FROM migrations WHERE name = 'bot_memory';
-      DROP TRIGGER messages_fts_insert; DROP TRIGGER messages_fts_delete;
-      DROP TRIGGER messages_fts_update; DROP TABLE messages_fts; DROP TABLE memory_fts;
-      DROP TABLE memory_items; ALTER TABLE scopes DROP COLUMN tainted;
-      DELETE FROM migrations WHERE name = 'tools_and_approvals';
-      DROP TABLE approvals; DROP TABLE bot_tool_grants; DROP TABLE settings;
-      ALTER TABLE bots DROP COLUMN model; ALTER TABLE messages DROP COLUMN tools;
-      ALTER TABLE audit_log DROP COLUMN tool;
-      UPDATE events SET payload = json_remove(payload, '$.bot.model', '$.message.tools');`);
+    const db = await seedBefore(
+      "tools_and_approvals",
+      `${oldBot("ada")}
+      INSERT INTO messages (id, room_id, author, body, event_seq, created_at)
+        VALUES ('m', 'room-ada', 'human', 'hello', 2, 'then');
+      INSERT INTO events (type, payload, created_at) VALUES ('bot.changed', '{}', 'then'),
+        ('message.created', '{}', 'then');`,
+    );
     db.close();
 
     const { store, port } = await start();
@@ -1256,25 +1226,12 @@ describe("project folders", () => {
   });
 
   it("migrates a bot from before folders, with no folder and no old events", async () => {
-    const first = await start();
-    await createBot(first.base);
-    const { id } = first.store.state().bots[0] as Bot;
-    await first.stop();
-
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
-    db.exec(`ALTER TABLE engine_accounts DROP COLUMN lane;
-      DELETE FROM migrations WHERE name = 'account_lane';
-      ALTER TABLE settings DROP COLUMN environment_id;
-      DELETE FROM migrations WHERE name = 'environment_id';
-      DROP TABLE routine_firings;
-      DROP TABLE routines;
-      DELETE FROM migrations WHERE name = 'routines';
-      DELETE FROM migrations WHERE name = 'codex_account';
-      DELETE FROM engine_accounts WHERE id = 'codex';
-      DELETE FROM migrations WHERE name = 'bot_project_path';
-      ALTER TABLE bots DROP COLUMN project_path;
-      UPDATE events SET payload = json_remove(payload, '$.bot.projectPath');`);
+    const id = "6f1c2a4e-0000-4000-8000-000000000002";
+    const db = await seedBefore(
+      "bot_project_path",
+      `${oldBot(id)}
+      INSERT INTO events (type, payload, created_at) VALUES ('bot.changed', '{}', 'then');`,
+    );
     db.close();
 
     const { store, port } = await start();

@@ -105,6 +105,10 @@ it("doesn't blame Claude when a Codex bot's login fails mid-run", () => {
     createdAt: "2026-11-06T00:00:00.000Z",
     startedAt: null,
     endedAt: null,
+    chainId: null,
+    hop: 0,
+    depth: 0,
+    taskId: null,
   };
   expect(runLine(run, undefined)).not.toContain("Claude");
 });

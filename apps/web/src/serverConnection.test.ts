@@ -38,6 +38,10 @@ const message = (id: string): ChatMessage => ({
   body: id,
   tools: [],
   workedMs: null,
+  botId: null,
+  replyToId: null,
+  chainId: null,
+  hop: 0,
   createdAt: "now",
 });
 const run = (status: Run["status"]): Run => ({
@@ -48,6 +52,10 @@ const run = (status: Run["status"]): Run => ({
   createdAt: "now",
   startedAt: "now",
   endedAt: null,
+  chainId: null,
+  hop: 0,
+  depth: 0,
+  taskId: null,
 });
 
 const messageEvent = (seq: number): ServerEvent => ({
@@ -104,6 +112,8 @@ const emptyChat: ChatState = {
   usageLimits: [],
   routines: [],
   firings: [],
+  rooms: [],
+  tasks: [],
   noticeAcknowledgedAt: null,
 };
 
@@ -175,6 +185,8 @@ it("reaches the same state by replay as by snapshot", () => {
     usageLimits: [],
     routines: [],
     firings: [],
+    rooms: [],
+    tasks: [],
     noticeAcknowledgedAt: null,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });

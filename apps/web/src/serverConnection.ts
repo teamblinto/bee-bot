@@ -140,6 +140,17 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
       const others = chat.firings.filter(({ routineId }) => routineId !== firing.routineId);
       return { ...state, chat: { ...chat, firings: [...others, firing] } };
     }
+    case "room.changed":
+      return { ...state, chat: { ...chat, rooms: upsert(chat.rooms, event.room) } };
+    case "task.changed": {
+      // Snapshots hold open tasks only, and replay must land on the same state.
+      const { task } = event;
+      const tasks =
+        task.status === "open"
+          ? upsert(chat.tasks, task)
+          : chat.tasks.filter(({ id }) => id !== task.id);
+      return { ...state, chat: { ...chat, tasks } };
+    }
   }
 }
 
@@ -258,6 +269,8 @@ let state: ConnectionState = {
     usageLimits: [],
     routines: [],
     firings: [],
+    rooms: [],
+    tasks: [],
     noticeAcknowledgedAt: null,
   },
   drafts: {},

@@ -23,12 +23,16 @@ import {
   Run,
   type RunReason,
   ServerEvent,
+  type WakeSource,
   UsageLimits,
   UsageWindow,
 } from "@beebot/contracts";
 import { z } from "zod";
 
+import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
+import { openRooms } from "./rooms.ts";
+import { openTasks } from "./tasks.ts";
 import { catchUpWindowMs, dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
 import {
@@ -321,6 +325,127 @@ export const migrations: Array<{
     UPDATE events SET payload = json_set(payload, '$.account.lane', 'subscription')
       WHERE type = 'account.changed';`,
   },
+  {
+    name: "coordination",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    // Rebuilds copy rowid, which orders bots' latest runs. Foreign keys are off here, so approvals
+    // and scopes keep pointing at the rebuilt tables by name.
+    sql: `DELETE FROM events;
+    CREATE TABLE rooms_new (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL DEFAULT 'dm' CHECK (kind IN ('dm', 'group')),
+      name TEXT,
+      default_bot_id TEXT REFERENCES bots (id),
+      created_at TEXT NOT NULL,
+      CHECK (kind = 'group' OR default_bot_id IS NOT NULL)
+    );
+    INSERT INTO rooms_new (rowid, id, kind, default_bot_id, created_at)
+      SELECT rowid, id, 'dm', default_bot_id, created_at FROM rooms;
+    DROP TABLE rooms;
+    ALTER TABLE rooms_new RENAME TO rooms;
+    CREATE UNIQUE INDEX rooms_one_dm_per_bot ON rooms (default_bot_id) WHERE kind = 'dm';
+    ALTER TABLE messages ADD COLUMN bot_id TEXT REFERENCES bots (id);
+    ALTER TABLE messages ADD COLUMN reply_to_id TEXT;
+    ALTER TABLE messages ADD COLUMN chain_id TEXT;
+    ALTER TABLE messages ADD COLUMN hop INTEGER NOT NULL DEFAULT 0;
+    UPDATE messages SET bot_id = (SELECT default_bot_id FROM rooms WHERE rooms.id = messages.room_id)
+      WHERE author = 'bot';
+    ALTER TABLE wakes ADD COLUMN source TEXT NOT NULL DEFAULT 'human'
+      CHECK (source IN ('human', 'routine', 'task', 'approval', 'continue'));
+    ALTER TABLE wakes ADD COLUMN chain_id TEXT;
+    ALTER TABLE wakes ADD COLUMN hop INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wakes ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+    UPDATE wakes SET source = 'continue' WHERE idempotency_key LIKE 'continue:%';
+    UPDATE wakes SET source = 'routine'
+      WHERE substr(idempotency_key, 9) IN (SELECT id FROM routine_firings);
+    ALTER TABLE scopes ADD COLUMN no_progress_runs INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE scopes ADD COLUMN left_at TEXT;
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('delegate', 'handoff')),
+      chain_id TEXT NOT NULL,
+      hop INTEGER NOT NULL,
+      depth INTEGER NOT NULL,
+      parent_run_id TEXT NOT NULL REFERENCES runs (id),
+      requester_bot_id TEXT NOT NULL REFERENCES bots (id),
+      owner_bot_id TEXT NOT NULL REFERENCES bots (id),
+      room_id TEXT NOT NULL REFERENCES rooms (id),
+      goal TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('open', 'done', 'refused', 'failed', 'cancelled')),
+      result_message_id TEXT REFERENCES messages (id),
+      delivery_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX tasks_by_parent_run ON tasks (parent_run_id);
+    CREATE INDEX tasks_open ON tasks (status) WHERE status = 'open';
+    CREATE TABLE runs_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      scope_id TEXT NOT NULL REFERENCES scopes (id),
+      wake_id TEXT NOT NULL REFERENCES wakes (id),
+      engine_account_id TEXT NOT NULL REFERENCES engine_accounts (id),
+      status TEXT NOT NULL CHECK (status IN ('Queued', 'Refused', 'Running', 'Completed', 'Failed',
+        'Cancelled', 'Interrupted', 'WaitingUser', 'WaitingQuota')),
+      reason TEXT,
+      input_high_seq INTEGER,
+      boot_id TEXT,
+      chain_id TEXT,
+      hop INTEGER NOT NULL DEFAULT 0,
+      depth INTEGER NOT NULL DEFAULT 0,
+      task_id TEXT REFERENCES tasks (id),
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      ended_at TEXT
+    );
+    INSERT INTO runs_new (rowid, id, bot_id, scope_id, wake_id, engine_account_id, status, reason,
+        input_high_seq, boot_id, created_at, started_at, ended_at)
+      SELECT rowid, id, bot_id, scope_id, wake_id, engine_account_id, status, reason,
+        input_high_seq, boot_id, created_at, started_at, ended_at FROM runs;
+    DROP TABLE runs;
+    ALTER TABLE runs_new RENAME TO runs;
+    CREATE UNIQUE INDEX runs_one_active_per_bot ON runs (bot_id)
+      WHERE status IN ('Queued', 'Running');
+    CREATE UNIQUE INDEX runs_one_running_per_account ON runs (engine_account_id)
+      WHERE status = 'Running';
+    CREATE INDEX runs_by_bot ON runs (bot_id, created_at);
+    CREATE INDEX runs_by_chain ON runs (chain_id) WHERE chain_id IS NOT NULL;
+    ALTER TABLE routines ADD COLUMN created_by_run_id TEXT REFERENCES runs (id);
+    ALTER TABLE routines ADD COLUMN approved_at TEXT;
+    UPDATE routines SET approved_at = created_at;
+    CREATE TABLE outbox (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs (id),
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX outbox_pending ON outbox (next_attempt_at) WHERE status = 'pending';
+    CREATE TABLE external_effects (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs (id),
+      tool TEXT NOT NULL,
+      target TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('intended', 'done', 'failed', 'uncertain')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX external_effects_intended ON external_effects (run_id)
+      WHERE status = 'intended';
+    CREATE TABLE room_rounds (
+      room_id TEXT PRIMARY KEY REFERENCES rooms (id),
+      chain_id TEXT,
+      bot_posts INTEGER NOT NULL DEFAULT 0,
+      window_started_at TEXT,
+      updated_at TEXT NOT NULL
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -430,12 +555,15 @@ export function buildDigest(newestFirst: ReadonlyArray<Pick<ChatMessage, "author
   return lines.length > 0 ? [digestHeader, ...lines, digestFooter].join("\n") : "";
 }
 
-function migrate(db: DatabaseSync) {
+export function migrate(db: DatabaseSync, upTo = migrations.length) {
   db.exec(`CREATE TABLE IF NOT EXISTS migrations (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     applied_at TEXT NOT NULL
   )`);
+  // node:sqlite turns this on, and it can't change inside a transaction. Off, ALTER TABLE can add a
+  // defaulted foreign key and a rebuilt table can be dropped under the rows that point at it.
+  db.exec("PRAGMA foreign_keys = OFF");
   // IMMEDIATE takes the write lock first, so a concurrent opener can't apply the same migration.
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -448,7 +576,7 @@ function migrate(db: DatabaseSync) {
       }
     });
     const record = db.prepare("INSERT INTO migrations (id, name, applied_at) VALUES (?, ?, ?)");
-    migrations.slice(applied.length).forEach((migration, index) => {
+    migrations.slice(applied.length, upTo).forEach((migration, index) => {
       db.exec(migration.sql);
       migration.backfill?.(db);
       record.run(applied.length + index + 1, migration.name, new Date().toISOString());
@@ -471,6 +599,12 @@ function routineBody({ name, timezone, prompt }: Routine, slot: string, lateMs: 
   return `${header}\n\n${prompt}`;
 }
 
+// Synchronous, and not re-entrant: a module's write can't run inside another's transaction.
+export type StoreTx = {
+  transaction: <T>(work: () => T) => T;
+  emit: (body: EventBody) => number;
+};
+
 export type EventStore = ReturnType<typeof openEventStore>;
 
 export function openEventStore(dataDir: string) {
@@ -478,7 +612,6 @@ export function openEventStore(dataDir: string) {
   const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"), { timeout: 5000 });
   try {
     db.exec("PRAGMA journal_mode = WAL");
-    // After migrate: ALTER TABLE can't add a defaulted foreign key while this is on.
     migrate(db);
     db.exec("PRAGMA foreign_keys = ON");
   } catch (error) {
@@ -537,10 +670,12 @@ export function openEventStore(dataDir: string) {
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
     b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
   const selectBots = db.prepare(
-    `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id ORDER BY b.rowid`,
+    `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
+     ORDER BY b.rowid`,
   );
   const selectBot = db.prepare(
-    `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id WHERE b.id = ?`,
+    `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
+     WHERE b.id = ?`,
   );
   const insertBot = db.prepare(
     `INSERT INTO bots
@@ -578,13 +713,13 @@ export function openEventStore(dataDir: string) {
      RETURNING ${accountColumns}`,
   );
 
-  const messageColumns =
-    "id, room_id AS roomId, author, body, tools, worked_ms AS workedMs, created_at AS createdAt";
+  const messageColumns = `id, room_id AS roomId, author, body, tools, worked_ms AS workedMs,
+    bot_id AS botId, reply_to_id AS replyToId, chain_id AS chainId, hop, created_at AS createdAt`;
   const selectMessages = db.prepare(`SELECT ${messageColumns} FROM messages ORDER BY event_seq`);
   const selectMessage = db.prepare(`SELECT ${messageColumns} FROM messages WHERE id = ?`);
   const insertMessage = db.prepare(
-    `INSERT INTO messages (id, room_id, author, body, tools, worked_ms, event_seq, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, room_id, author, body, tools, worked_ms, bot_id, reply_to_id,
+       chain_id, hop, event_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const selectInput = db.prepare(
     `SELECT body, event_seq AS seq FROM messages
@@ -626,8 +761,8 @@ export function openEventStore(dataDir: string) {
   const wakeColumns = "id, bot_id AS botId, scope_id AS scopeId, attended";
   const insertWake = db.prepare(
     `INSERT OR IGNORE INTO wakes
-     (id, bot_id, scope_id, idempotency_key, attended, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+     (id, bot_id, scope_id, idempotency_key, attended, source, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
   );
   const selectPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND attended = ? AND status = 'pending'",
@@ -649,7 +784,7 @@ export function openEventStore(dataDir: string) {
 
   const runColumns = `id, bot_id AS botId, status, reason, created_at AS createdAt,
     started_at AS startedAt, ended_at AS endedAt, scope_id AS scopeId, wake_id AS wakeId, engine_account_id AS engineAccountId,
-    input_high_seq AS inputHighSeq`;
+    input_high_seq AS inputHighSeq, chain_id AS chainId, hop, depth, task_id AS taskId`;
   const selectRun = db.prepare(`SELECT ${runColumns} FROM runs WHERE id = ?`);
   const selectLatestRuns = db.prepare(
     `SELECT ${runColumns} FROM runs
@@ -910,13 +1045,14 @@ export function openEventStore(dataDir: string) {
     emit({ type: "approval.changed", approval });
   }
 
-  function addWake(scope: Scope, key: string, attended: boolean) {
+  function addWake(scope: Scope, key: string, attended: boolean, source: WakeSource) {
     insertWake.run(
       NodeCrypto.randomUUID(),
       scope.botId,
       scope.id,
       key,
       attended ? 1 : 0,
+      source,
       new Date().toISOString(),
     );
   }
@@ -952,6 +1088,10 @@ export function openEventStore(dataDir: string) {
       message.body,
       JSON.stringify(message.tools),
       message.workedMs,
+      message.botId,
+      message.replyToId,
+      message.chainId,
+      message.hop,
       seq,
       message.createdAt,
     );
@@ -959,7 +1099,10 @@ export function openEventStore(dataDir: string) {
 
   // The first message of a burst makes the wake and the rest coalesce into it, so input that
   // lands during a run already has its one durable follow-up, even if the server dies.
-  function postMessage(input: { id: string; roomId: string; body: string; attended: boolean }) {
+  function postMessage(
+    input: { id: string; roomId: string; body: string; attended: boolean },
+    source: WakeSource = "human",
+  ) {
     const existing = selectMessage.get(input.id);
     if (existing) {
       const { roomId, body } = MessageRow.parse(existing);
@@ -977,10 +1120,14 @@ export function openEventStore(dataDir: string) {
       body: input.body,
       tools: [],
       workedMs: null,
+      botId: null,
+      replyToId: null,
+      chainId: null,
+      hop: 0,
       createdAt: new Date().toISOString(),
     });
     if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
-      addWake(scope, `message:${input.id}`, input.attended);
+      addWake(scope, `message:${input.id}`, input.attended, source);
     }
     return "sent";
   }
@@ -1148,7 +1295,14 @@ export function openEventStore(dataDir: string) {
     }
   });
 
+  const tx: StoreTx = { transaction, emit };
+  const rooms = openRooms(db, tx);
+  const tasks = openTasks(db, tx);
+
   return {
+    rooms,
+    tasks,
+    effects: openEffects(db, tx),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);
     },
@@ -1175,6 +1329,8 @@ export function openEventStore(dataDir: string) {
         .map(({ accountId }) => usageLimits(accountId)),
       routines: z.array(RoutineRow).parse(selectRoutines.all()),
       firings: z.array(RoutineFiring).parse(selectLatestFirings.all()),
+      rooms: rooms.listRooms(),
+      tasks: tasks.openTasks(),
       noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
     }),
 
@@ -1361,7 +1517,7 @@ export function openEventStore(dataDir: string) {
         }
         endOpenFiring(routine.id, "ran", null);
         const body = routineBody(routine, firing.slot, lateMs);
-        if (postMessage({ id, roomId, body, attended }) !== "sent") {
+        if (postMessage({ id, roomId, body, attended }, "routine") !== "sent") {
           throw new Error(`firing ${id} could not post its message`);
         }
         return "started";
@@ -1399,7 +1555,7 @@ export function openEventStore(dataDir: string) {
         // A repeat click finds the pending wake or a newer run. Once stopped, the wake is gone,
         // so a fixed key would stop the owner continuing again.
         if (!selectAnyPendingWake.get(scope.id)) {
-          addWake(scope, `continue:${run.id}:${NodeCrypto.randomUUID()}`, attended);
+          addWake(scope, `continue:${run.id}:${NodeCrypto.randomUUID()}`, attended, "continue");
         }
         return "continued";
       }),
@@ -1519,6 +1675,10 @@ export function openEventStore(dataDir: string) {
             body: finished.reply ?? "",
             tools: finished.tools ?? [],
             workedMs: run.startedAt ? Date.parse(now) - Date.parse(run.startedAt) : null,
+            botId: run.botId,
+            replyToId: null,
+            chainId: run.chainId,
+            hop: run.hop,
             createdAt: now,
           });
           advanceAck.run(run.inputHighSeq, run.scopeId);

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 14;
+export const protocolVersion = 15;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -100,6 +100,11 @@ export const ChatMessage = z.object({
   tools: z.array(z.string()),
   // How long the turn behind a bot message ran. Null for owners and for rows older than the column.
   workedMs: z.number().nullable(),
+  // The bot that wrote it. Null for owners.
+  botId: z.string().nullable(),
+  replyToId: z.string().nullable(),
+  chainId: z.string().nullable(),
+  hop: z.number(),
   createdAt: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -112,6 +117,9 @@ export const RunStatus = z.enum([
   "Failed",
   "Cancelled",
   "Interrupted",
+  // Both hold neither the bot's slot nor the account gate.
+  "WaitingUser",
+  "WaitingQuota",
 ]);
 export type RunStatus = z.infer<typeof RunStatus>;
 
@@ -137,6 +145,10 @@ export const Run = z.object({
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   endedAt: z.string().nullable(),
+  chainId: z.string().nullable(),
+  hop: z.number(),
+  depth: z.number(),
+  taskId: z.string().nullable(),
 });
 export type Run = z.infer<typeof Run>;
 
@@ -326,6 +338,53 @@ export const RoutineFiring = z.object({
 });
 export type RoutineFiring = z.infer<typeof RoutineFiring>;
 
+export const WakeSource = z.enum(["human", "routine", "task", "approval", "continue"]);
+export type WakeSource = z.infer<typeof WakeSource>;
+
+export const LimitRefusal = z.enum([
+  "hop",
+  "depth",
+  "fan_out",
+  "mentions",
+  "post_budget",
+  "backoff",
+  "repeated_failure",
+  "chain_turns",
+  "chain_time",
+  "routine_approval",
+]);
+export type LimitRefusal = z.infer<typeof LimitRefusal>;
+
+export const Room = z.object({
+  id: z.string(),
+  kind: z.enum(["dm", "group"]),
+  // Null for a DM, which goes by its bot's name.
+  name: z.string().nullable(),
+  defaultBotId: z.string().nullable(),
+  // Bot IDs, in the order they joined.
+  members: z.array(z.string()),
+  createdAt: z.string(),
+});
+export type Room = z.infer<typeof Room>;
+
+export const Task = z.object({
+  id: z.string(),
+  kind: z.enum(["delegate", "handoff"]),
+  chainId: z.string(),
+  hop: z.number(),
+  depth: z.number(),
+  parentRunId: z.string(),
+  requesterBotId: z.string(),
+  ownerBotId: z.string(),
+  roomId: z.string(),
+  goal: z.string(),
+  status: z.enum(["open", "done", "refused", "failed", "cancelled"]),
+  resultMessageId: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Task = z.infer<typeof Task>;
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
@@ -339,6 +398,9 @@ export const ChatState = z.object({
   routines: z.array(Routine),
   // Only the latest of each routine. An open card always is its routine's latest.
   firings: z.array(RoutineFiring),
+  rooms: z.array(Room),
+  // Open tasks only.
+  tasks: z.array(Task),
   noticeAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
@@ -355,6 +417,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("routine.changed"), routine: Routine }),
   z.object({ type: z.literal("routine.deleted"), routineId: z.string() }),
   z.object({ type: z.literal("firing.changed"), firing: RoutineFiring }),
+  z.object({ type: z.literal("room.changed"), room: Room }),
+  z.object({ type: z.literal("task.changed"), task: Task }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
