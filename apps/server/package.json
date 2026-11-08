@@ -11,6 +11,7 @@
   "devDependencies": {
     "@beebot/boxd": "workspace:*",
     "@beebot/contracts": "workspace:*",
+    "@beebot/egress": "workspace:*",
     "@types/node": "catalog:",
     "@types/ws": "catalog:",
     "croner": "catalog:",

@@ -66,7 +66,7 @@ describe("broker taint", () => {
     expect(legs(run.id)).toMatchObject({ a: 0 });
     db.prepare("UPDATE bots SET manifest = ? WHERE id = ?").run('["browser"]', bot.id);
     expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("approve");
-    expect(legs(run.id)).toEqual({ a: 1, b: 1, c: 0, tainted: 1 });
+    expect(legs(run.id)).toEqual({ a: 1, b: 1, c: 1, tainted: 1 });
   });
 
   it("clears the legs when the session starts over", () => {

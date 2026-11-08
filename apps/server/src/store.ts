@@ -8,6 +8,7 @@ import {
   type ApprovalTool,
   Bot,
   type BotAccess,
+  type BotProfile,
   ChatMessage,
   type ChatState,
   defaultBotModel,
@@ -37,7 +38,7 @@ import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
-import { parseManifest } from "./broker.ts";
+import { parseManifest, profileLegs } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
@@ -611,6 +612,11 @@ export const migrations: Array<{
     // The Podman machine boxes run in. Null takes the default.
     sql: "ALTER TABLE settings ADD COLUMN box_machine TEXT",
   },
+  {
+    name: "m3_injection_message_taint",
+    // Whether the sending bot's session was tainted when it sent this, fixed at send time.
+    sql: "ALTER TABLE messages ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -928,6 +934,22 @@ export function openEventStore(dataDir: string) {
     `INSERT INTO messages (id, room_id, author, body, tools, worked_ms, bot_id, reply_to_id,
        chain_id, hop, event_seq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  // The sender's latest run is the one posting: a reply, a send, a delegation or a result.
+  const taintFromSender = db.prepare(
+    `UPDATE messages SET tainted = 1 WHERE id = ? AND EXISTS (
+       SELECT 1 FROM runs r JOIN scopes s ON s.id = r.scope_id
+       WHERE r.id = (SELECT id FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1)
+         AND s.tainted = 1)`,
+  );
+  const selectTaintedInput = db.prepare(
+    `SELECT 1 FROM messages WHERE room_id = ? AND event_seq > ? AND event_seq <= ?
+       AND author = 'bot' AND bot_id <> ? AND tainted = 1 LIMIT 1`,
+  );
+  // A tainted bot's text is untrusted input: leg A, and the memory gate's flag.
+  const taintScope = db.prepare("UPDATE scopes SET tainted = 1, legs_untrusted = 1 WHERE id = ?");
+  const selectUntrusted = db.prepare("SELECT legs_untrusted AS untrusted FROM scopes WHERE id = ?");
+  const isUntrusted = (scopeId: string) =>
+    z.object({ untrusted: z.number() }).parse(selectUntrusted.get(scopeId)).untrusted === 1;
   // A scope's input is every message in its room but its own bot's. Bot rows from before bot_id
   // are the scope's own bot.
   const inputColumns = `m.id, m.body, m.event_seq AS seq, m.author, m.bot_id AS botId, b.name,
@@ -1481,7 +1503,21 @@ export function openEventStore(dataDir: string) {
       seq,
       message.createdAt,
     );
+    if (message.author === "bot" && message.botId) {
+      taintFromSender.run(message.id, message.botId);
+    }
   }
+
+  const withMemory = (profile: BotProfile, scopeId: string) => {
+    const allowed = profileLegs[profile];
+    return allowed.readsPrivate && (allowed.readsUntrusted || !isUntrusted(scopeId));
+  };
+
+  const taintFromInput = (scope: Scope, highSeq: number) => {
+    if (selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId)) {
+      taintScope.run(scope.id);
+    }
+  };
 
   // A pending wake on a scope already carries new input, so a burst coalesces into it.
   function wakeMembers(
@@ -2270,8 +2306,9 @@ export function openEventStore(dataDir: string) {
         }
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
+        taintFromInput(scope, highSeq);
         recordRun(run);
-        const { name, personality, model, effort, mode, projectPath } = BotRow.parse(
+        const { name, personality, model, effort, mode, projectPath, profile } = BotRow.parse(
           selectBot.get(run.botId),
         );
         return {
@@ -2290,7 +2327,11 @@ export function openEventStore(dataDir: string) {
             effort,
             mode,
             projectPath,
-            memory: buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
+            // Memory is private data: a Researcher never holds it (§12), and an Operator only
+            // while its session has taken in nothing untrusted, since its reply can reach a bot.
+            memory: withMemory(profile, scope.id)
+              ? buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId)))
+              : "",
           },
         };
       }),
@@ -2328,6 +2369,7 @@ export function openEventStore(dataDir: string) {
         const run = RunRow.parse(selectRun.get(runId));
         const pin = Math.max(run.inputHighSeq ?? 0, highSeq);
         pinInput.run(pin, runId);
+        taintFromInput(getScope(run.scopeId), pin);
         advanceDelivered.run(pin, run.scopeId);
         if (run.status === "Completed") {
           advanceAck.run(pin, run.scopeId);

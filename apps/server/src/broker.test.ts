@@ -46,9 +46,10 @@ describe("rule table", () => {
     expect(decideTool({ ...ids, tool: "browser_navigate" }, granted).kind).toBe("allow");
   });
 
-  it("lets a granted Reader read pages, and asks before it clicks or types", () => {
+  it("lets a granted Reader read pages, and asks before it opens, clicks or types", () => {
     const reader = context({ profile: "reader", manifest: ["browser"] });
     expect(decideTool({ ...ids, tool: "browser_snapshot" }, reader).kind).toBe("allow");
+    expect(decideTool({ ...ids, tool: "browser_navigate" }, reader).kind).toBe("approve");
     expect(decideTool({ ...ids, tool: "browser_click" }, reader).kind).toBe("approve");
     expect(decideTool({ ...ids, tool: "browser_type" }, { ...reader, attended: false })).toEqual({
       kind: "deny",

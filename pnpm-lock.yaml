@@ -269,6 +269,9 @@ importers:
       '@beebot/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@beebot/egress':
+        specifier: workspace:*
+        version: link:../boxd/egress
       '@types/node':
         specifier: 'catalog:'
         version: 24.19.2
