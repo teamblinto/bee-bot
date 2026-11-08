@@ -110,6 +110,7 @@ function problemText(machine: string, probe: MachineProbe) {
 export type BoxHost = {
   runtime: BoxRuntime;
   prepare: (botId: string) => Promise<void>;
+  applyEgress: (botId: string) => Promise<void>;
   sidecar: (botId: string) => Promise<SidecarEndpoint>;
   closed: Promise<void>;
   close: () => Promise<void>;
@@ -222,6 +223,8 @@ export function createBoxService({
     runtime,
     sidecar: async (botId: string) => current().sidecar(botId),
     prepare: async (botId: string) => current().prepare(botId),
+    // With no host up there is no proxy to tell: a box's policy is pushed when it comes up.
+    applyEgress: async (botId: string) => host?.host.applyEgress(botId),
     availability: () => status,
     ready: () => host !== undefined,
     onChange: (listener: (availability: BoxAvailability) => void) => {

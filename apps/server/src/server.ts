@@ -42,6 +42,7 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
+import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
@@ -382,6 +383,14 @@ export async function startServer({
     return { type: "replay", events: store.eventsAfter(afterSeq) };
   }
 
+  // Live for a running box. A failure is logged only: the box's next start pushes the policy again.
+  async function applyEgress(bot: Bot) {
+    await boxes?.applyEgress(bot.id).catch((error: unknown) => {
+      console.error(`beebotd: egress for ${bot.id} not applied: ${(error as Error)?.message}`);
+    });
+    return { status: 200, body: bot };
+  }
+
   function runCommand(command: Command) {
     const notFound = { status: 404, body: { code: "not_found" } };
     const ok = { status: 200, body: { ok: true } };
@@ -607,6 +616,24 @@ export async function startServer({
           });
         }
         return { status: 200, body: bot };
+      }
+      case "set-bot-egress-hosts": {
+        const hosts = ownerEgressHosts(command.hosts);
+        if (hosts === null) {
+          return { status: 400, body: { code: "bad_egress_host" } };
+        }
+        const bot = store.policy.setBotEgressHosts(command.botId, hosts);
+        if (!bot) {
+          return notFound;
+        }
+        return applyEgress(bot);
+      }
+      case "set-bot-unattended-lane": {
+        if (command.lane === "subscription" && !store.automatedAccessAt()) {
+          return { status: 409, body: { code: "automated_access_unacknowledged" } };
+        }
+        const bot = store.policy.setBotUnattendedLane(command.botId, command.lane);
+        return bot ? applyEgress(bot) : notFound;
       }
       case "set-box-machine":
         store.setBoxMachine(command.machine);

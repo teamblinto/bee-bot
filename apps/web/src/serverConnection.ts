@@ -494,6 +494,10 @@ const errorSentences: Record<string, string> = {
   bot_busy: "This bot is working. Wait for it to finish or stop it, then try again.",
   boxes_unavailable: "Boxes aren't available. Set them up on the Usage page first.",
   boxes_unsupported: "This server can't run boxes.",
+  bad_egress_host:
+    "Enter site names only, like pypi.org: no https://, path, port, wildcard, IP address or local name.",
+  automated_access_unacknowledged:
+    "Read the notice about bots that run on their own first. It's on the Usage page.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   ambiguous_mention: "More than one bot here goes by that name. Pick one from the @ list.",

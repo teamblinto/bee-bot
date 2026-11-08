@@ -71,7 +71,10 @@ export function seedFromId(id: string) {
 }
 
 const IdRow = z.object({ id: z.string() });
-const BotRow = Bot.extend({ manifest: z.string().transform(parseManifest) });
+const BotRow = Bot.extend({
+  manifest: z.string().transform(parseManifest),
+  egressHosts: z.string().transform((json) => z.array(z.string()).parse(JSON.parse(json))),
+});
 
 export const migrations: Array<{
   name: string;
@@ -617,6 +620,13 @@ export const migrations: Array<{
     // Whether the sending bot's session was tainted when it sent this, fixed at send time.
     sql: "ALTER TABLE messages ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0",
   },
+  {
+    name: "m3_gaps_bot_unattended_lane",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN unattended_lane TEXT NOT NULL DEFAULT 'api_key'
+      CHECK (unattended_lane IN ('subscription', 'api_key'));`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -877,7 +887,10 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.profile, b.boundary, b.manifest, b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
+    b.profile, b.boundary, b.manifest, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
+    b.unattended_lane AS unattendedLane,
+    (SELECT json_group_array(host) FROM
+      (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
      ORDER BY b.rowid`,
@@ -1893,8 +1906,8 @@ export function openEventStore(dataDir: string) {
   const automatedAccessAt = () =>
     z.object({ acknowledgedAt: z.string().nullable() }).parse(selectAutomatedAccess.get())
       .acknowledgedAt;
-  const laneOfBox = (engineAccountId: string) =>
-    unattendedLane(vaultStatus().apiKeys.includes(engineAccountId), automatedAccessAt());
+  const laneOfBox = ({ engineAccountId, unattendedLane: chosen }: Bot) =>
+    unattendedLane(vaultStatus().apiKeys.includes(engineAccountId), automatedAccessAt(), chosen);
 
   // `automatic`: the routine runs on its own, so no person's click is needed.
   const startFiring = (id: string, attended: boolean, automatic: boolean) =>
@@ -1988,10 +2001,11 @@ export function openEventStore(dataDir: string) {
       automatedAccessAcknowledgedAt: automatedAccessAt(),
     }),
 
+    automatedAccessAt,
     // R7, for a box bot: the lane an unattended run may take, or null when the owner allowed none.
     boxLane: (botId: string) => {
       const bot = getBot(botId);
-      return bot ? laneOfBox(bot.engineAccountId) : null;
+      return bot ? laneOfBox(bot) : null;
     },
     boxMachine: () =>
       z.object({ machine: z.string().nullable() }).parse(selectBoxMachine.get()).machine,
@@ -2265,7 +2279,7 @@ export function openEventStore(dataDir: string) {
           selectEarlierInChain.get(wake.id) !== undefined,
         hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
         boundary: bot.boundary,
-        unattendedLane: laneOfBox(bot.engineAccountId),
+        unattendedLane: laneOfBox(bot),
         botStatus: bot.status,
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,

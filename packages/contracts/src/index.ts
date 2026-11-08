@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 20;
+export const protocolVersion = 21;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -117,6 +117,14 @@ export const EngineAccountId = z.enum(["claude", "codex", "fake"]);
 export const maxAvatarSeed = 0xffffffff;
 export const AvatarSeed = z.number().int().min(0).max(maxAvatarSeed);
 
+// On the host the credential stays in the vendor CLI's own store. In a box an API key lives in
+// Bee's vault, and only the egress proxy ever sees it.
+export const EngineLane = z.enum(["subscription", "api_key"]);
+export type EngineLane = z.infer<typeof EngineLane>;
+
+// Names only, checked again by the server: no scheme, port, path, wildcard or IP literal.
+export const EgressHosts = z.array(z.string().trim().min(1).max(253)).max(100);
+
 export const Bot = z.object({
   id: z.string(),
   name: z.string(),
@@ -135,6 +143,10 @@ export const Bot = z.object({
   profile: BotProfile,
   boundary: BotBoundary,
   manifest: Manifest,
+  // Hosts a boxed bot may reach besides its engine's own, granted by the owner.
+  egressHosts: EgressHosts,
+  // R7: what a boxed bot uses on its own when an API key is saved. A subscription is an opt-in.
+  unattendedLane: EngineLane,
   avatarSeed: AvatarSeed,
   // The real path of the owner's folder. Null keeps the bot in its private workspace.
   projectPath: z.string().nullable(),
@@ -204,11 +216,6 @@ export const Run = z.object({
   taskId: z.string().nullable(),
 });
 export type Run = z.infer<typeof Run>;
-
-// On the host the credential stays in the vendor CLI's own store. In a box an API key lives in
-// Bee's vault, and only the egress proxy ever sees it.
-export const EngineLane = z.enum(["subscription", "api_key"]);
-export type EngineLane = z.infer<typeof EngineLane>;
 
 export const EngineAccount = z.object({
   id: z.string(),
@@ -843,6 +850,8 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
   z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
   z.object({ type: z.literal("set-up-boxes") }),
+  z.object({ type: z.literal("set-bot-egress-hosts"), botId: z.uuid(), hosts: EgressHosts }),
+  z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
 ]);
 export type Command = z.infer<typeof Command>;
 
