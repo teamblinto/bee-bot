@@ -13,6 +13,7 @@ import {
 import { buildTranscript } from "../transcript";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
+import { HandoffView } from "./HandoffView";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
 import { TerminalPanel } from "./TerminalPanel";
@@ -30,6 +31,7 @@ function BotMenu({
   onMemory,
   onRoutines,
   onLogin,
+  onBrowser,
 }: {
   bot: Bot;
   connected: boolean;
@@ -38,6 +40,7 @@ function BotMenu({
   onMemory: () => void;
   onRoutines: () => void;
   onLogin: () => void;
+  onBrowser: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -75,6 +78,15 @@ function BotMenu({
             Log in
           </button>
         )}
+        <button
+          type="button"
+          {...hide}
+          className={menuItemClass}
+          disabled={!connected}
+          onClick={onBrowser}
+        >
+          Browser
+        </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
         </button>
@@ -155,6 +167,7 @@ export function ChatView({
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   useEffect(() => {
     if (lastBotMessageId && lastBotMessageId !== seenId) {
@@ -214,6 +227,7 @@ export function ChatView({
           onMemory={() => setMemoryOpen(true)}
           onRoutines={() => setRoutinesOpen(true)}
           onLogin={() => setLoginOpen(true)}
+          onBrowser={() => setBrowserOpen(true)}
         />
       </header>
       {empty ? (
@@ -284,6 +298,7 @@ export function ChatView({
           onClose={() => setRoutinesOpen(false)}
         />
       )}
+      {browserOpen && <HandoffView bot={bot} onClose={() => setBrowserOpen(false)} />}
     </section>
   );
 }

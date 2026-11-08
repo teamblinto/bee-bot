@@ -28,11 +28,13 @@ import { type WebSocket, WebSocketServer } from "ws";
 import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals, type Execute } from "./approvals.ts";
 import type { BoxOptions } from "./boxEngine.ts";
-import type { Decide } from "./broker.ts";
 import { staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { callBotTool } from "./botTools.ts";
+import { type Decide, decide as policyDecide } from "./broker.ts";
+import { createBrowserBroker, noBrowser, serveHandoff, storeBrowserDeps } from "./browser.ts";
+import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerMcp, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
@@ -79,6 +81,7 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   clock?: AwakeClock | undefined;
   // Box mode: the login terminal attaches through it.
   box?: BoxOptions | undefined;
+  browserRuntime?: BrowserRuntime | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -157,6 +160,7 @@ export async function startServer({
   heartbeatMs = 30_000,
   clock = createAwakeClock(),
   box,
+  browserRuntime = noBrowser,
 }: Options) {
   const terminals = box && createTerminals({ ...box, dataDir, bot: (id) => store.getBot(id) });
   const expectedToken = Buffer.from(token);
@@ -232,6 +236,12 @@ export async function startServer({
   }
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+  const handoffSockets = new WebSocketServer({ noServer: true, maxPayload: 4096 });
+  const browser = createBrowserBroker({
+    runtime: browserRuntime,
+    decide: decide ?? policyDecide,
+    ...storeBrowserDeps(store),
+  });
 
   // A sleeping laptop or a dropped network leaves a socket that never closes on its own.
   const answered = new WeakSet<WebSocket>();
@@ -756,7 +766,7 @@ export async function startServer({
     socket.on("error", () => socket.destroy());
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
     const terminal = url?.pathname === "/terminal" && terminals;
-    if (url?.pathname !== "/ws" && !terminal) {
+    if (url?.pathname !== "/ws" && url?.pathname !== "/browser" && !terminal) {
       refuseUpgrade(socket, 404, { code: "not_found" });
       return;
     }
@@ -771,6 +781,17 @@ export async function startServer({
       if (notServed) {
         refuseUpgrade(socket, notServed.status, notServed.body);
       }
+      return;
+    }
+    if (url.pathname === "/browser") {
+      const botId = url.searchParams.get("botId") ?? "";
+      if (!store.getBot(botId)) {
+        refuseUpgrade(socket, 404, { code: "not_found" });
+        return;
+      }
+      handoffSockets.handleUpgrade(request, socket, head, (client) =>
+        serveHandoff(browser, client, botId),
+      );
       return;
     }
     sockets.handleUpgrade(request, socket, head, (client) => {
@@ -838,9 +859,10 @@ export async function startServer({
       terminals?.close();
       approvals.close();
       await supervisor.close();
-      for (const client of sockets.clients) {
+      for (const client of [...sockets.clients, ...handoffSockets.clients]) {
         client.terminate();
       }
+      await browser.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },

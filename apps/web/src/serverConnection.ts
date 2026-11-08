@@ -356,6 +356,14 @@ export function terminalSocketUrl(botId: string, cols: number, rows: number) {
   return url;
 }
 
+// Browsers can't set headers on a WebSocket, so the token rides in the query.
+export function socketUrl(path: string) {
+  const url = endpoint(path);
+  url.protocol = "ws:";
+  url.searchParams.set("token", token ?? "");
+  return url;
+}
+
 let failedAttempts = 0;
 
 function reconnect() {
@@ -454,10 +462,7 @@ export async function connect() {
     return;
   }
 
-  const url = endpoint("/ws");
-  url.protocol = "ws:";
-  url.searchParams.set("token", token);
-  const socket = new WebSocket(url);
+  const socket = new WebSocket(socketUrl("/ws"));
   socket.onopen = () => {
     const subscribe: ClientMessage = { type: "subscribe", afterSeq: state.seq };
     socket.send(JSON.stringify(subscribe));

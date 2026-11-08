@@ -4,6 +4,7 @@ import * as NodeReadline from "node:readline";
 
 import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@beebot/contracts";
 
+import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
@@ -81,6 +82,9 @@ async function boot(bootstrap: Bootstrap) {
   }
   // The egress proxy reads API keys from here, so none ever enters a box, argv, env or a log.
   const vault = openVault(store.vaultStore, vaultKey);
+
+  // Until boxd runs a sidecar per bot: one Chromium for every bot, for development only.
+  const devBrowser = process.env.BEEBOT_DEV_BROWSER_CDP;
   const server = await startServer({
     ...bootstrap,
     store,
@@ -96,6 +100,12 @@ async function boot(bootstrap: Bootstrap) {
       clock,
       lane: () => store.accountLane("claude"),
     }),
+    browserRuntime: devBrowser
+      ? createCdpBrowserRuntime(async () => ({
+          http: devBrowser,
+          downloadsDir: "/home/browser/downloads",
+        }))
+      : undefined,
   });
   console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
   const { pauseReason } = await probe(store.accountLane("claude"));

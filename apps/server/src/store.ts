@@ -1848,6 +1848,7 @@ export function openEventStore(dataDir: string) {
     boxes,
     continuations,
     vaultStore: openVaultStore(db, tx),
+    appendAudit,
     effects: openEffects(db, tx),
     policy: openPolicy(db, tx, getBot),
     egress: openEgress(db),
