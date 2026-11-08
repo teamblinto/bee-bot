@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - images/*
 
 allowBuilds:
   # No install script since Electron 44. Keep the key: pnpm fails installs without it.

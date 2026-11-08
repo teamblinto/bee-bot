@@ -1,0 +1,19 @@
+{
+  "name": "@beebot/box",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bee Bot box image: engine and browser entry points",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./runSpec.json": "./runSpec.json"
+  },
+  "scripts": {
+    "build:image": "node build.ts",
+    "test": "vp test run"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}
