@@ -55,6 +55,10 @@ export function openEffects(db: DatabaseSync, { transaction }: StoreTx) {
     `SELECT ${effectColumns} FROM external_effects
      WHERE run_id = ? AND status = 'intended' ORDER BY rowid`,
   );
+  const settleRun = db.prepare(
+    `UPDATE external_effects SET status = ?, updated_at = ?
+     WHERE run_id = ? AND status = 'intended' RETURNING ${effectColumns}`,
+  );
 
   const outboxColumns = `id, run_id AS runId, kind, payload, idempotency_key AS idempotencyKey,
     status, attempts, next_attempt_at AS nextAttemptAt, created_at AS createdAt,
@@ -92,6 +96,8 @@ export function openEffects(db: DatabaseSync, { transaction }: StoreTx) {
       const row = settle.get(status, new Date().toISOString(), id);
       return row ? Effect.parse(row) : undefined;
     },
+    settleRunEffects: (runId: string, status: "done" | "uncertain") =>
+      z.array(Effect).parse(settleRun.all(status, new Date().toISOString(), runId)),
     unsettledEffects: (runId: string) => z.array(Effect).parse(selectIntended.all(runId)),
 
     enqueueOutbox: (input: {

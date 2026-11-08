@@ -297,7 +297,7 @@ describe("claiming", () => {
     store.queueRun(second!);
     expect(count("runs")).toBe(1);
 
-    store.recover("boot-b");
+    store.recover("boot-b", () => "hold");
     expect(run(store, bot)?.status).toBe("Interrupted");
     store.queueRun(second!);
     expect(run(store, bot)?.status).toBe("Queued");
@@ -391,7 +391,7 @@ describe("outcomes", () => {
     await send(ada, "hello");
     await expectTurns(engine, 1);
     engine.turns[0]?.finish({ kind: "limited", retryAfterMs: 1500 });
-    await expectStatus(store, ada, "Failed");
+    await expectStatus(store, ada, "WaitingQuota");
     expect(run(store, ada)?.reason).toBe("limited");
     expect(store.state().accounts[0]?.blockedUntil).not.toBeNull();
 
@@ -548,6 +548,7 @@ describe("restart", () => {
     await first.send(ada, "running");
     await first.send(ben, "queued");
     await expectStatus(first.store, ben, "Queued");
+    before.turns[0]?.tool("Bash");
     const wakes = count("wakes");
     await first.stop();
 
@@ -574,6 +575,7 @@ describe("restart", () => {
     await first.send(bot, "first");
     await expectTurns(before, 1);
     await first.send(bot, "second");
+    before.turns[0]?.tool("Bash");
     const wakes = count("wakes");
     await first.stop();
 
@@ -595,6 +597,7 @@ describe("restart", () => {
     const [ada, ben] = [await first.createBot("Ada"), await first.createBot("Ben")];
     await first.send(ada, "hello");
     await expectTurns(before, 1);
+    before.turns[0]?.tool("Bash");
     await first.stop();
 
     const after = scriptedEngine();
@@ -621,6 +624,7 @@ describe("restart", () => {
     const bot = await first.createBot();
     await first.send(bot, "hello");
     await expectTurns(before, 1);
+    before.turns[0]?.tool("Bash");
     await first.stop();
 
     const after = scriptedEngine();
@@ -653,7 +657,7 @@ describe("restart", () => {
     expect(response.status).toBe(409);
   });
 
-  it("survives a hard kill mid-turn with history intact and no repeat", async () => {
+  it("survives a hard kill mid-tool with history intact and the effect never repeated", async () => {
     const probe = NodeNet.createServer().listen(0, "127.0.0.1");
     await once(probe, "listening");
     const { port } = probe.address() as NodeNet.AddressInfo;
@@ -691,7 +695,7 @@ describe("restart", () => {
       type: "send-message",
       messageId: NodeCrypto.randomUUID(),
       roomId: bot.roomId,
-      body: "/hang",
+      body: "/approve Bash ls",
     });
     await vi.waitFor(() =>
       expect(query("SELECT status FROM runs")).toEqual([{ status: "Running" }]),
@@ -702,7 +706,8 @@ describe("restart", () => {
     const after = scriptedEngine();
     const { store } = await boot(after.runTurn);
     expect(run(store, bot)?.status).toBe("Interrupted");
-    expect(store.state().messages.map(({ body }) => body)).toEqual(["/hang"]);
+    expect(query("SELECT status FROM external_effects")).toEqual([{ status: "uncertain" }]);
+    expect(store.state().messages.map(({ body }) => body)).toEqual(["/approve Bash ls"]);
     await new Promise((resolve) => setTimeout(resolve, 1100));
     expect(after.turns).toEqual([]);
   }, 20_000);
@@ -730,7 +735,7 @@ describe("delivery", () => {
     });
   });
 
-  it("never resends after a kill: Continue sends only the note", async () => {
+  it("continues a killed turn with no tool in flight, sending only the note", async () => {
     const before = scriptedEngine();
     const first = await boot(before.runTurn);
     const bot = await first.createBot();
@@ -740,9 +745,7 @@ describe("delivery", () => {
     await first.stop();
 
     const after = scriptedEngine();
-    const { store, command } = await boot(after.runTurn);
-    await expectStatus(store, bot, "Interrupted");
-    await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    const { store } = await boot(after.runTurn);
     await expectTurns(after, 1);
     expect(after.turns[0]?.prompt).toMatch(note);
     expect(after.turns[0]?.prompt).not.toContain("hello");
@@ -775,8 +778,7 @@ describe("delivery", () => {
     await first.stop();
 
     const after = scriptedEngine();
-    const { store, command } = await boot(after.runTurn);
-    await command({ type: "continue-run", runId: run(store, bot)?.id ?? "" });
+    await boot(after.runTurn);
     await expectTurns(after, 1);
     expect(after.turns[0]).toMatchObject({ prompt: "hello", resume: false });
   });

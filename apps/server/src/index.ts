@@ -2,7 +2,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import { Bootstrap, type EngineLane, noRestartExitCodes } from "@beebot/contracts";
+import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@beebot/contracts";
 
 import { createClaudeRunTurn, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
@@ -23,6 +23,14 @@ function exitWith(code: number, reason: string): never {
 function parseBootstrap(line: string) {
   try {
     return Bootstrap.safeParse(JSON.parse(line)).data;
+  } catch {
+    return undefined;
+  }
+}
+
+function parsePower(line: string) {
+  try {
+    return PowerSignal.safeParse(JSON.parse(line)).data;
   } catch {
     return undefined;
   }
@@ -87,10 +95,13 @@ async function boot(bootstrap: Bootstrap) {
       console.error(`beebotd: event pruning failed: ${(error as Error)?.name}`);
     }
   }, pruneEveryMs);
-  return async () => {
-    clearInterval(pruning);
-    await server.close();
-    store.close();
+  return {
+    power: server.power,
+    stop: async () => {
+      clearInterval(pruning);
+      await server.close();
+      store.close();
+    },
   };
 }
 
@@ -125,7 +136,14 @@ if (fileFlag === -1) {
   let running: ReturnType<typeof boot> | undefined;
   const stdin = NodeReadline.createInterface({ input: process.stdin });
 
-  stdin.once("line", (line) => {
+  stdin.on("line", (line) => {
+    if (running) {
+      const signal = parsePower(line);
+      if (signal) {
+        void running.then(({ power }) => power(signal.power));
+      }
+      return;
+    }
     clearTimeout(bootstrapTimer);
     running = start(parseBootstrap(line));
   });
@@ -135,12 +153,12 @@ if (fileFlag === -1) {
     if (!running) {
       exitWith(noRestartExitCodes.invalidBootstrap, "stdin closed before bootstrap");
     }
-    void running.then((stop) => stop()).then(() => process.exit(0));
+    void running.then(({ stop }) => stop()).then(() => process.exit(0));
   });
 } else {
   // Headless: no parent holds stdin open, so a signal is the order to stop.
   const running = start(readBootstrapFile(process.argv[fileFlag + 1]));
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.once(signal, () => void running.then((stop) => stop()).then(() => process.exit(0)));
+    process.once(signal, () => void running.then(({ stop }) => stop()).then(() => process.exit(0)));
   }
 }

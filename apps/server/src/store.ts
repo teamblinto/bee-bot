@@ -562,8 +562,9 @@ export type ClaimedRun = {
   launch: BotLaunch;
 };
 
+// WaitingUser posts `reply` as the question; WaitingQuota waits out `blockedUntil`.
 export type FinishedRun = {
-  status: "Completed" | "Failed" | "Cancelled";
+  status: "Completed" | "Failed" | "Cancelled" | "WaitingUser" | "WaitingQuota";
   reason: RunReason | null;
   reply?: string;
   tools?: string[];
@@ -573,7 +574,8 @@ export type FinishedRun = {
 
 const settledAs = { Completed: "done", Failed: "failed", Cancelled: "cancelled" } as const;
 const continuationNote =
-  "Your previous turn was cut off before it finished. Continue from where you left off.";
+  "Your previous turn was cut off before it finished. Continue from where you left off. " +
+  "A command you started may or may not have finished, so check before repeating it.";
 const approvalsInState = 500;
 const enginePauses = [
   "auth_failed",
@@ -833,7 +835,6 @@ export function openEventStore(dataDir: string) {
   );
   const markWakeDone = db.prepare("UPDATE wakes SET status = 'done' WHERE id = ?");
   const setWakeNotBefore = db.prepare("UPDATE wakes SET not_before = ? WHERE id = ?");
-  const reopenWake = db.prepare("UPDATE wakes SET status = 'pending', not_before = ? WHERE id = ?");
   const cancelPendingWakes = db.prepare(
     "UPDATE wakes SET status = 'done' WHERE bot_id = ? AND status = 'pending'",
   );
@@ -900,6 +901,21 @@ export function openEventStore(dataDir: string) {
   const interruptRuns = db.prepare(
     `UPDATE runs SET status = 'Interrupted', reason = 'server_restarted', ended_at = ?
      WHERE status = 'Running' AND boot_id != ? RETURNING ${runColumns}`,
+  );
+  // A parked run is resumed, not replaced: the next admitted wake for its scope queues it again.
+  const requeueParked = db.prepare(
+    `UPDATE runs SET status = 'Queued', reason = NULL, wake_id = ?, ended_at = NULL
+     WHERE id = (SELECT id FROM runs WHERE scope_id = ?
+       AND status IN ('WaitingUser', 'WaitingQuota') ORDER BY rowid DESC LIMIT 1)
+     RETURNING ${runColumns}`,
+  );
+  const cancelParked = db.prepare(
+    `UPDATE runs SET status = 'Cancelled', reason = 'stopped', ended_at = ?
+     WHERE bot_id = ? AND status IN ('WaitingUser', 'WaitingQuota') RETURNING ${runColumns}`,
+  );
+  const selectRecoveries = db.prepare(
+    `SELECT created_at AS createdAt FROM wakes
+     WHERE bot_id = ? AND idempotency_key LIKE 'recover:%' ORDER BY rowid DESC LIMIT ?`,
   );
   const insertAudit = db.prepare(
     `INSERT INTO audit_log (run_id, bot_id, status, reason, tool, created_at)
@@ -1192,6 +1208,12 @@ export function openEventStore(dataDir: string) {
   }
 
   function addRun(wake: Wake, status: "Queued" | "Refused", reason: RunReason | null) {
+    const parked = status === "Queued" ? requeueParked.get(wake.id, wake.scopeId) : undefined;
+    if (parked) {
+      markWakeDone.run(wake.id);
+      recordRun(RunRow.parse(parked));
+      return;
+    }
     const { engineAccountId } = Bot.parse(selectBot.get(wake.botId));
     const id = NodeCrypto.randomUUID();
     const now = new Date().toISOString();
@@ -1350,7 +1372,7 @@ export function openEventStore(dataDir: string) {
 
   function endAttempt(run: RunRow, finished: FinishedRun, now: string) {
     const row = selectAttemptFiring.get(run.wakeId);
-    if (!row) {
+    if (!row || finished.status === "WaitingUser" || finished.status === "WaitingQuota") {
       return;
     }
     const firing = RoutineFiring.parse(row);
@@ -1923,7 +1945,7 @@ export function openEventStore(dataDir: string) {
           return;
         }
         const run = RunRow.parse(row);
-        if (finished.status === "Completed") {
+        if (finished.status === "Completed" || finished.status === "WaitingUser") {
           addMessage({
             id: NodeCrypto.randomUUID(),
             roomId: getScope(run.scopeId).roomId,
@@ -1942,13 +1964,15 @@ export function openEventStore(dataDir: string) {
         }
         recordRun(run);
         endAttempt(run, finished, now);
-        // A limited run's wake reopens, so its task is still being worked on.
-        if (!finished.blockedUntil) {
+        // A parked run resumes later, so its task is still being worked on.
+        if (finished.status !== "WaitingUser" && finished.status !== "WaitingQuota") {
           tasks.settleRun(run, settledAs[finished.status], finished.reply ?? "");
         }
         if (finished.blockedUntil) {
           blockAccount.run(finished.blockedUntil, run.engineAccountId);
-          reopenWake.run(finished.blockedUntil, run.wakeId);
+          // Admission defers it to the reset, which then resumes this parked run.
+          const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
+          addWake(getScope(run.scopeId), `quota:${run.id}:${now}`, attended, "continue");
           emit({
             type: "account.changed",
             account: EngineAccount.parse(selectAccount.get(run.engineAccountId)),
@@ -1971,6 +1995,9 @@ export function openEventStore(dataDir: string) {
     stopBot: (botId: string) =>
       transaction(() => {
         cancelPendingWakes.run(botId);
+        for (const parked of cancelParked.all(new Date().toISOString(), botId)) {
+          recordRun(RunRow.parse(parked));
+        }
         const row = selectActiveRun.get(botId);
         if (!row) {
           return undefined;
@@ -2170,18 +2197,47 @@ export function openEventStore(dataDir: string) {
         }
       }),
 
-    // Restart never creates a wake, and Queued runs are left alone. An interrupted bot's pending
-    // wakes are closed: firing one would resend the interrupted input with no human deciding.
-    // That input stays unacked, so Continue or the next message carries all of it.
-    recover: (bootId: string) =>
+    // Queued runs are left alone. An interrupted run either continues by a `recover:` wake, or
+    // waits for a human: then its bot's pending wakes are closed, since firing one would resend the
+    // interrupted input with no human deciding. That input stays unacked, so Continue or the next
+    // message carries all of it.
+    recover: (bootId: string, decide: (run: Run, now: string) => "continue" | "hold") =>
       transaction(() => {
-        for (const row of interruptRuns.all(new Date().toISOString(), bootId)) {
+        const now = new Date().toISOString();
+        for (const row of interruptRuns.all(now, bootId)) {
           const run = RunRow.parse(row);
-          cancelPendingWakes.run(run.botId);
           recordRun(run);
+          if (decide(run, now) === "continue") {
+            const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
+            addWake(getScope(run.scopeId), `recover:${run.id}`, attended, "continue");
+          } else {
+            cancelPendingWakes.run(run.botId);
+          }
         }
         // Their tool calls died with the old process, so no decision can reach them.
         expireApprovals.all(new Date().toISOString()).forEach(recordApproval);
+      }),
+
+    recentRecoveries: (botId: string, limit: number) =>
+      z
+        .array(z.object({ createdAt: z.string() }))
+        .parse(selectRecoveries.all(botId, limit))
+        .map(({ createdAt }) => createdAt),
+
+    // The answer is the owner's input, so the next turn resumes the parked session with it.
+    resumeFromUser: (runId: string, answer: string) =>
+      transaction(() => {
+        const run = getRun(runId);
+        if (!run) {
+          return "not_found";
+        }
+        if (run.status !== "WaitingUser") {
+          return "not_waiting";
+        }
+        const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
+        const roomId = getScope(run.scopeId).roomId;
+        postMessage({ id: NodeCrypto.randomUUID(), roomId, body: answer, attended });
+        return "resumed";
       }),
 
     close: () => db.close(),
