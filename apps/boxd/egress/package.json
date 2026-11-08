@@ -4,6 +4,9 @@
   "private": true,
   "description": "Bee Bot egress proxy, runs beside boxd in the Linux host",
   "type": "module",
+  "exports": {
+    "./proxy": "./src/proxy.ts"
+  },
   "scripts": {
     "test": "vp test run"
   },

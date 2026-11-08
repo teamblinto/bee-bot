@@ -70,9 +70,9 @@ const engineRules: Record<string, ToolRule> = {
   Bash: { labels: legs("readsPrivate", "sideEffect") },
 };
 
-// Every page is untrusted, and a click or a typed value can change something out there.
+// Every page is untrusted, and a click, a typed value or the URL itself can send something out.
 const browserRules: Record<string, ToolRule> = {
-  browser_navigate: { labels: legs("readsUntrusted"), grant: browserGrant },
+  browser_navigate: { labels: legs("readsUntrusted", "sideEffect"), grant: browserGrant },
   browser_snapshot: { labels: legs("readsUntrusted"), grant: browserGrant },
   browser_click: { labels: legs("readsUntrusted", "sideEffect"), grant: browserGrant },
   browser_type: {
