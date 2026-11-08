@@ -8,6 +8,7 @@ import {
   type ApprovalTool,
   Bot,
   type BotAccess,
+  type BotProfile,
   ChatMessage,
   type ChatState,
   defaultBotModel,
@@ -37,7 +38,7 @@ import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
-import { parseManifest } from "./broker.ts";
+import { parseManifest, profileLegs } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
@@ -946,6 +947,9 @@ export function openEventStore(dataDir: string) {
   );
   // A tainted bot's text is untrusted input: leg A, and the memory gate's flag.
   const taintScope = db.prepare("UPDATE scopes SET tainted = 1, legs_untrusted = 1 WHERE id = ?");
+  const selectUntrusted = db.prepare("SELECT legs_untrusted AS untrusted FROM scopes WHERE id = ?");
+  const isUntrusted = (scopeId: string) =>
+    z.object({ untrusted: z.number() }).parse(selectUntrusted.get(scopeId)).untrusted === 1;
   // A scope's input is every message in its room but its own bot's. Bot rows from before bot_id
   // are the scope's own bot.
   const inputColumns = `m.id, m.body, m.event_seq AS seq, m.author, m.bot_id AS botId, b.name,
@@ -1503,6 +1507,11 @@ export function openEventStore(dataDir: string) {
       taintFromSender.run(message.id, message.botId);
     }
   }
+
+  const withMemory = (profile: BotProfile, scopeId: string) => {
+    const allowed = profileLegs[profile];
+    return allowed.readsPrivate && (allowed.readsUntrusted || !isUntrusted(scopeId));
+  };
 
   const taintFromInput = (scope: Scope, highSeq: number) => {
     if (selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId)) {
@@ -2318,11 +2327,11 @@ export function openEventStore(dataDir: string) {
             effort,
             mode,
             projectPath,
-            // A Researcher reads the web and holds no private data (§12), so it gets no memory.
-            memory:
-              profile === "researcher"
-                ? ""
-                : buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId))),
+            // Memory is private data: a Researcher never holds it (§12), and an Operator only
+            // while its session has taken in nothing untrusted, since its reply can reach a bot.
+            memory: withMemory(profile, scope.id)
+              ? buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId)))
+              : "",
           },
         };
       }),

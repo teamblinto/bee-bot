@@ -359,6 +359,8 @@ describe("bot-to-bot taint", { timeout: 30_000 }, () => {
     expect(audit("memory_search")).toEqual(["deny nobody_watching"]);
     expect(audit("memory_propose")).toEqual(["deny nobody_watching"]);
     expect(memoryStatus("POISON")).toEqual([]);
+    // Opal's reply goes back to Rae, so Opal must not start with its memory either.
+    expect(leaks()).toEqual([]);
   });
 
   it("a tainted bot's chat message reaches the Operator as untrusted input", async () => {
@@ -371,6 +373,7 @@ describe("bot-to-bot taint", { timeout: 30_000 }, () => {
     expect(prompts.map(({ bot }) => bot).slice(0, 2)).toEqual(["Rae", "Opal"]);
     expect(audit("memory_search")).toEqual(["deny nobody_watching"]);
     expect(memoryStatus("POISON")).toEqual([]);
+    expect(leaks()).toEqual([]);
   });
 
   it("an untainted bot's delegation still runs on the Operator's own legs", async () => {
