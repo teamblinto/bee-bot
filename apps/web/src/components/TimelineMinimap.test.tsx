@@ -257,6 +257,8 @@ const bot: Bot = {
   effort: null,
   mode: "build",
   access: "supervised",
+  profile: "operator",
+  boundary: "host",
   avatarSeed: 7,
   projectPath: null,
 };

@@ -2,6 +2,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import { once } from "node:events";
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -19,6 +20,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { buildDigest, type EventStore, openEventStore } from "./store.ts";
@@ -1172,7 +1174,7 @@ describe("tool activity", () => {
 });
 
 describe("fake engine", () => {
-  const turn = (prompt: string, signal = new AbortController().signal, onDelivered = () => {}) =>
+  const turn = (prompt: string, overrides: Partial<Parameters<RunTurn>[0]> = {}) =>
     fakeRunTurn({
       approve: async () => ({ behavior: "deny", message: "unused" }),
       prompt,
@@ -1190,14 +1192,15 @@ describe("fake engine", () => {
         projectPath: null,
         memory: "",
       },
-      signal,
       onDelta: () => {},
       onToolStart: () => {},
       onToolEnd: () => {},
       onThinking: () => {},
       onRateLimit: () => {},
       permissions: { url: "http://127.0.0.1:9/mcp", token: "unused" },
-      onDelivered,
+      onDelivered: () => {},
+      signal: new AbortController().signal,
+      ...overrides,
     });
 
   it("is scripted by the last line of the prompt", async () => {
@@ -1211,16 +1214,50 @@ describe("fake engine", () => {
   it("takes the prompt like a real engine, except on turns that fail before it", async () => {
     const delivered: string[] = [];
     for (const prompt of ["/fail", "/auth", "/limit", "hi"]) {
-      await turn(prompt, undefined, () => delivered.push(prompt));
+      await turn(prompt, { onDelivered: () => delivered.push(prompt) });
     }
     expect(delivered).toEqual(["hi"]);
   });
 
   it("hangs until aborted", async () => {
     const controller = new AbortController();
-    const hanging = turn("/hang", controller.signal);
+    const hanging = turn("/hang", { signal: controller.signal });
     controller.abort();
     expect(await hanging).toEqual({ kind: "failed" });
+  });
+
+  it("resumes only a session it has seen", async () => {
+    await turn("first", { sessionId: "seen" });
+    await turn("second", { sessionId: "seen", resume: true });
+    expect(await turn("/recall", { sessionId: "seen", resume: true })).toEqual({
+      kind: "completed",
+      text: "Test engine recalls: first | second",
+    });
+    expect(await turn("/recall", { sessionId: "seen" })).toMatchObject({
+      text: "Test engine recalls: ",
+    });
+    expect(await turn("hi", { sessionId: "unseen", resume: true })).toEqual({
+      kind: "session_lost",
+    });
+  });
+
+  it("ends its turn when the tool call waits on the owner", async () => {
+    const broker = NodeHttp.createServer((_request, response) => {
+      const decision = { behavior: "deny", message: waitingMessage("c1") };
+      const result = { content: [{ type: "text", text: JSON.stringify(decision) }] };
+      response.end(`data: ${JSON.stringify({ jsonrpc: "2.0", id: 1, result })}
+
+`);
+    });
+    broker.listen(0, "127.0.0.1");
+    await once(broker, "listening");
+    cleanups.push(() => void broker.close());
+    const { port } = broker.address() as NodeNet.AddressInfo;
+    const permissions = { url: `http://127.0.0.1:${port}/mcp`, token: "unused" };
+    expect(await turn("/approve Bash ls", { permissions })).toEqual({
+      kind: "waiting",
+      text: "Test engine: waiting",
+    });
   });
 });
 

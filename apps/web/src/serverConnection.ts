@@ -151,6 +151,27 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
           : chat.tasks.filter(({ id }) => id !== task.id);
       return { ...state, chat: { ...chat, tasks } };
     }
+    case "box.changed": {
+      const { box } = event;
+      const boxes = [...chat.boxes.filter(({ botId }) => botId !== box.botId), box];
+      return { ...state, chat: { ...chat, boxes } };
+    }
+    case "continuation.changed": {
+      // Snapshots hold waiting ones only, and replay must land on the same state.
+      const { continuation } = event;
+      const continuations =
+        continuation.status === "waiting"
+          ? upsert(chat.continuations, continuation)
+          : chat.continuations.filter(({ id }) => id !== continuation.id);
+      return { ...state, chat: { ...chat, continuations } };
+    }
+    case "vault.changed":
+      return { ...state, chat: { ...chat, vault: event.vault } };
+    case "automated-access.acknowledged":
+      return {
+        ...state,
+        chat: { ...chat, automatedAccessAcknowledgedAt: event.acknowledgedAt },
+      };
   }
 }
 
@@ -272,6 +293,10 @@ let state: ConnectionState = {
     rooms: [],
     tasks: [],
     noticeAcknowledgedAt: null,
+    boxes: [],
+    continuations: [],
+    vault: { apiKeys: [] },
+    automatedAccessAcknowledgedAt: null,
   },
   drafts: {},
   liveTools: {},

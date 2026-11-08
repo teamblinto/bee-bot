@@ -29,6 +29,8 @@ const bot: Bot = {
   effort: null,
   mode: "build",
   access: "supervised",
+  profile: "operator",
+  boundary: "host",
   avatarSeed: 7,
   projectPath: null,
 };
@@ -117,6 +119,10 @@ const emptyChat: ChatState = {
   rooms: [],
   tasks: [],
   noticeAcknowledgedAt: null,
+  boxes: [],
+  continuations: [],
+  vault: { apiKeys: [] },
+  automatedAccessAcknowledgedAt: null,
 };
 
 const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => ({
@@ -190,6 +196,10 @@ it("reaches the same state by replay as by snapshot", () => {
     rooms: [],
     tasks: [],
     noticeAcknowledgedAt: null,
+    boxes: [],
+    continuations: [],
+    vault: { apiKeys: [] },
+    automatedAccessAcknowledgedAt: null,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });

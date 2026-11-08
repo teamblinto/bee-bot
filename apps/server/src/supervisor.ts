@@ -58,6 +58,9 @@ function finishedRun(
       pauseBot: outcome.pauseReason ?? "auth_failed",
     };
   }
+  if (outcome.kind === "waiting") {
+    return { status: "WaitingUser", reason: null, reply: outcome.text, tools };
+  }
   if (outcome.kind === "completed") {
     return {
       status: parked ? "WaitingUser" : "Completed",
@@ -336,7 +339,7 @@ export function createSupervisor({
             const finished = finishedRun(outcome, controller.signal.reason, tools, parked);
             store.effects.settleRunEffects(
               run.id,
-              outcome.kind === "completed" ? "done" : "uncertain",
+              outcome.kind === "completed" || outcome.kind === "waiting" ? "done" : "uncertain",
             );
             store.finishRun(run.id, bootId, finished);
           } catch (error) {

@@ -29,6 +29,9 @@ import {
 } from "@beebot/contracts";
 import { z } from "zod";
 
+import { chainAudit, openAudit } from "./audit.ts";
+import { openBoxes } from "./boxes.ts";
+import { openContinuations } from "./continuations.ts";
 import { openEffects } from "./effects.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
@@ -39,6 +42,7 @@ import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
+import { openVaultEntries } from "./vault.ts";
 import {
   buildMemory,
   ftsQuery,
@@ -492,6 +496,97 @@ export const migrations: Array<{
     sql: `DELETE FROM events;
     ALTER TABLE bots ADD COLUMN summary TEXT;`,
   },
+  {
+    name: "m3_bot_boundary",
+    // Stored events lack the new required fields, so they would not parse. Clients get a snapshot.
+    // Bots so far act on the owner's own files at the owner's word, which is the Operator's pair.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN profile TEXT NOT NULL DEFAULT 'operator'
+      CHECK (profile IN ('reader', 'researcher', 'operator'));
+    ALTER TABLE bots ADD COLUMN boundary TEXT NOT NULL DEFAULT 'host'
+      CHECK (boundary IN ('host', 'box'));
+    ALTER TABLE bots ADD COLUMN manifest TEXT NOT NULL DEFAULT '[]';
+    CREATE TABLE bot_egress_hosts (
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      host TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (bot_id, host)
+    );
+    ALTER TABLE settings ADD COLUMN automated_access_acknowledged_at TEXT;`,
+  },
+  {
+    name: "m3_boxes",
+    sql: `CREATE TABLE boxes (
+      bot_id TEXT PRIMARY KEY REFERENCES bots (id),
+      state TEXT NOT NULL CHECK (state IN
+        ('absent', 'creating', 'stopped', 'starting', 'running', 'failed')),
+      reason TEXT,
+      updated_at TEXT NOT NULL
+    );`,
+  },
+  {
+    name: "m3_continuations",
+    sql: `CREATE TABLE continuations (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      run_id TEXT NOT NULL REFERENCES runs (id),
+      session_id TEXT NOT NULL,
+      tool_use_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('approval', 'hand_off')),
+      tool TEXT NOT NULL,
+      request TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      shown TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('waiting', 'approved', 'denied', 'expired', 'claimed',
+        'succeeded', 'failed', 'unknown')),
+      reason TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      decided_at TEXT,
+      claimed_at TEXT,
+      finished_at TEXT,
+      result TEXT,
+      resumed_at TEXT,
+      resume_run_id TEXT REFERENCES runs (id)
+    );
+    CREATE INDEX continuations_open ON continuations (status)
+      WHERE status IN ('waiting', 'approved', 'claimed');
+    CREATE INDEX continuations_unresumed ON continuations (bot_id) WHERE resumed_at IS NULL;`,
+  },
+  {
+    name: "m3_audit_chain",
+    // Rebuilt so rows outside a run, such as box and vault events, fit.
+    sql: `CREATE TABLE audit_log_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT,
+      bot_id TEXT,
+      initiator TEXT CHECK (initiator IN ('human', 'routine', 'bot', 'system')),
+      attended INTEGER,
+      status TEXT NOT NULL,
+      reason TEXT,
+      tool TEXT,
+      digest TEXT,
+      created_at TEXT NOT NULL,
+      prev_hash TEXT NOT NULL DEFAULT '',
+      hash TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO audit_log_new (id, run_id, bot_id, status, reason, tool, created_at)
+      SELECT id, run_id, bot_id, status, reason, tool, created_at FROM audit_log;
+    DROP TABLE audit_log;
+    ALTER TABLE audit_log_new RENAME TO audit_log;
+    CREATE INDEX audit_log_by_bot ON audit_log (bot_id, id);`,
+    backfill: chainAudit,
+  },
+  {
+    name: "m3_vault",
+    sql: `CREATE TABLE vault_entries (
+      name TEXT PRIMARY KEY,
+      ciphertext BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -752,7 +847,7 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
+    b.profile, b.boundary, b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
      ORDER BY b.rowid`,
@@ -979,10 +1074,7 @@ export function openEventStore(dataDir: string) {
     `SELECT created_at AS createdAt FROM wakes
      WHERE bot_id = ? AND idempotency_key LIKE 'recover:%' ORDER BY rowid DESC LIMIT ?`,
   );
-  const insertAudit = db.prepare(
-    `INSERT INTO audit_log (run_id, bot_id, status, reason, tool, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  );
+  const { appendAudit } = openAudit(db);
 
   const approvalColumns = `id, run_id AS runId, bot_id AS botId, tool, digest, status, reason,
     created_at AS createdAt, decided_at AS decidedAt`;
@@ -1005,6 +1097,9 @@ export function openEventStore(dataDir: string) {
   const insertGrant = db.prepare("INSERT OR IGNORE INTO bot_tool_grants VALUES (?, ?)");
   const selectSettings = db.prepare(
     "SELECT notice_acknowledged_at AS noticeAcknowledgedAt FROM settings",
+  );
+  const selectAutomatedAccess = db.prepare(
+    "SELECT automated_access_acknowledged_at AS acknowledgedAt FROM settings",
   );
   const { environmentId } = z
     .object({ environmentId: z.string().min(1) })
@@ -1270,7 +1365,7 @@ export function openEventStore(dataDir: string) {
   }
 
   function recordRun(run: RunRow) {
-    insertAudit.run(run.id, run.botId, run.status, run.reason, null, new Date().toISOString());
+    appendAudit({ runId: run.id, botId: run.botId, status: run.status, reason: run.reason });
     emit({ type: "run.changed", run: Run.parse(run) });
   }
 
@@ -1278,7 +1373,7 @@ export function openEventStore(dataDir: string) {
   function recordApproval(row: unknown) {
     const approval = Approval.parse(row);
     const { runId, botId, status, reason, tool } = approval;
-    insertAudit.run(runId, botId, status, reason, tool, new Date().toISOString());
+    appendAudit({ runId, botId, status, reason, tool });
     emit({ type: "approval.changed", approval });
   }
 
@@ -1726,10 +1821,15 @@ export function openEventStore(dataDir: string) {
       addWake(getScope(scopeId), key, attended, "task", chain),
   });
   const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
+  const boxes = openBoxes(db, tx);
+  const continuations = openContinuations(db, tx);
+  const { vaultStatus } = openVaultEntries(db);
 
   return {
     rooms,
     tasks,
+    boxes,
+    continuations,
     effects: openEffects(db, tx),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);
@@ -1765,6 +1865,12 @@ export function openEventStore(dataDir: string) {
       rooms: rooms.listRooms(),
       tasks: tasks.openTasks(),
       noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
+      boxes: boxes.listBoxes(),
+      continuations: continuations.waitingContinuations(),
+      vault: vaultStatus(),
+      automatedAccessAcknowledgedAt: z
+        .object({ acknowledgedAt: z.string().nullable() })
+        .parse(selectAutomatedAccess.get()).acknowledgedAt,
     }),
 
     createBot: ({
@@ -2298,7 +2404,7 @@ export function openEventStore(dataDir: string) {
       status: "allowed" | "refused",
       reason: "always" | `access:${BotAccess}` | null,
     ) => {
-      insertAudit.run(runId, botId, status, reason, tool, new Date().toISOString());
+      appendAudit({ runId, botId, status, reason, tool });
     },
     toolGranted: (botId: string, tool: ApprovalTool) => selectGrant.get(botId, tool) !== undefined,
     grantTool: (botId: string, tool: ApprovalTool) => {

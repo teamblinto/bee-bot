@@ -120,6 +120,8 @@ it("warns when editing a bot that's already on Codex", () => {
     effort: null,
     mode: "build",
     access: "supervised",
+    profile: "operator",
+    boundary: "host",
     avatarSeed: 7,
     projectPath: null,
   });

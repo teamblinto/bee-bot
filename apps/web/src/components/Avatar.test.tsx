@@ -78,6 +78,8 @@ const bot = {
   effort: null,
   mode: "build",
   access: "supervised",
+  profile: "operator",
+  boundary: "host",
   avatarSeed: 5,
   projectPath: null,
 } as const;

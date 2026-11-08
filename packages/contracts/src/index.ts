@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 17;
+export const protocolVersion = 18;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -63,6 +63,15 @@ export type BotMode = z.infer<typeof BotMode>;
 export const BotAccess = z.enum(["supervised", "auto-edits", "full"]);
 export type BotAccess = z.infer<typeof BotAccess>;
 
+// Rule of Two: Reader holds untrusted input and private data, Researcher untrusted input and side
+// effects, Operator private data and side effects. A session with all three needs a person.
+export const BotProfile = z.enum(["reader", "researcher", "operator"]);
+export type BotProfile = z.infer<typeof BotProfile>;
+
+// Only a box run may be unattended.
+export const BotBoundary = z.enum(["host", "box"]);
+export type BotBoundary = z.infer<typeof BotBoundary>;
+
 export const EngineModel = z.object({
   id: BotModel,
   label: z.string(),
@@ -94,6 +103,8 @@ export const Bot = z.object({
   effort: Effort.nullable(),
   mode: BotMode,
   access: BotAccess,
+  profile: BotProfile,
+  boundary: BotBoundary,
   avatarSeed: AvatarSeed,
   // The real path of the owner's folder. Null keeps the bot in its private workspace.
   projectPath: z.string().nullable(),
@@ -161,7 +172,8 @@ export const Run = z.object({
 });
 export type Run = z.infer<typeof Run>;
 
-// Either way the credential stays in the vendor CLI's own store; Bee never holds it.
+// On the host the credential stays in the vendor CLI's own store. In a box an API key lives in
+// Bee's vault, and only the egress proxy ever sees it.
 export const EngineLane = z.enum(["subscription", "api_key"]);
 export type EngineLane = z.infer<typeof EngineLane>;
 
@@ -210,6 +222,86 @@ export const PendingApproval = z.object({
   expiresAt: z.string(),
 });
 export type PendingApproval = z.infer<typeof PendingApproval>;
+
+export const BoxState = z.enum(["absent", "creating", "stopped", "starting", "running", "failed"]);
+export type BoxState = z.infer<typeof BoxState>;
+
+export const BoxStatus = z.object({
+  botId: z.string(),
+  state: BoxState,
+  reason: z.string().nullable(),
+  updatedAt: z.string(),
+});
+export type BoxStatus = z.infer<typeof BoxStatus>;
+
+// Bee never runs a hand_off: the owner does it, and approving records that it was done.
+export const ContinuationKind = z.enum(["approval", "hand_off"]);
+export type ContinuationKind = z.infer<typeof ContinuationKind>;
+
+// `claimed` is the broker running the action. A crash then leaves it `unknown`, never retried.
+export const ContinuationStatus = z.enum([
+  "waiting",
+  "approved",
+  "denied",
+  "expired",
+  "claimed",
+  "succeeded",
+  "failed",
+  "unknown",
+]);
+export type ContinuationStatus = z.infer<typeof ContinuationStatus>;
+
+export const ContinuationReason = z.enum([
+  "owner",
+  "timeout",
+  "no_surface",
+  "payload_changed",
+  "stopped",
+  "server_restarted",
+]);
+export type ContinuationReason = z.infer<typeof ContinuationReason>;
+
+// `shown` is the whole action as the owner sees it, and `digest` binds a decision to it.
+export const Continuation = z.object({
+  id: z.string(),
+  botId: z.string(),
+  runId: z.string(),
+  kind: ContinuationKind,
+  tool: z.string(),
+  shown: z.string(),
+  digest: z.string(),
+  status: ContinuationStatus,
+  reason: ContinuationReason.nullable(),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  decidedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+});
+export type Continuation = z.infer<typeof Continuation>;
+
+export const AuditInitiator = z.enum(["human", "routine", "bot", "system"]);
+export type AuditInitiator = z.infer<typeof AuditInitiator>;
+
+// Only what crossed Bee's gateways: native CLI shell and file tools never do.
+export const AuditEntry = z.object({
+  id: z.number(),
+  runId: z.string().nullable(),
+  botId: z.string().nullable(),
+  // Both null on rows from before M3.
+  initiator: AuditInitiator.nullable(),
+  attended: z.boolean().nullable(),
+  status: z.string(),
+  reason: z.string().nullable(),
+  tool: z.string().nullable(),
+  // Of the action's payload, which is never kept here.
+  digest: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type AuditEntry = z.infer<typeof AuditEntry>;
+
+// Engine accounts whose API key the vault holds. Never the key itself.
+export const VaultStatus = z.object({ apiKeys: z.array(z.string()) });
+export type VaultStatus = z.infer<typeof VaultStatus>;
 
 export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
 export type MemoryType = z.infer<typeof MemoryType>;
@@ -438,6 +530,12 @@ export const ChatState = z.object({
   // Open tasks only.
   tasks: z.array(Task),
   noticeAcknowledgedAt: z.string().nullable(),
+  boxes: z.array(BoxStatus),
+  // Waiting only.
+  continuations: z.array(Continuation),
+  vault: VaultStatus,
+  // The owner was told the vendor's automated-access terms bind them for unattended bots (R7).
+  automatedAccessAcknowledgedAt: z.string().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -455,6 +553,10 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("firing.changed"), firing: RoutineFiring }),
   z.object({ type: z.literal("room.changed"), room: Room }),
   z.object({ type: z.literal("task.changed"), task: Task }),
+  z.object({ type: z.literal("box.changed"), box: BoxStatus }),
+  z.object({ type: z.literal("continuation.changed"), continuation: Continuation }),
+  z.object({ type: z.literal("vault.changed"), vault: VaultStatus }),
+  z.object({ type: z.literal("automated-access.acknowledged"), acknowledgedAt: z.string() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 

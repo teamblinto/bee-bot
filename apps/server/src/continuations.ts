@@ -1,0 +1,174 @@
+import * as NodeCrypto from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+
+import { Continuation, type ContinuationReason } from "@beebot/contracts";
+import { z } from "zod";
+
+import type { StoreTx } from "./store.ts";
+
+const waitingPrefix = "waiting: ";
+
+// What the broker answers a tool call that now waits on the owner. The engine ends its turn on it.
+export const waitingMessage = (id: string) =>
+  `${waitingPrefix}${id}. The owner has to answer first. End your turn now: you will be resumed with the outcome.`;
+
+export const isWaitingMessage = (message: string) => message.startsWith(waitingPrefix);
+
+const ContinuationRow = Continuation.extend({
+  sessionId: z.string(),
+  toolUseId: z.string(),
+  request: z.string(),
+  payload: z.string(),
+  claimedAt: z.string().nullable(),
+  result: z.string().nullable(),
+  resumedAt: z.string().nullable(),
+  resumeRunId: z.string().nullable(),
+});
+export type ContinuationRow = z.infer<typeof ContinuationRow>;
+
+export type NewContinuation = Pick<
+  ContinuationRow,
+  | "botId"
+  | "runId"
+  | "sessionId"
+  | "toolUseId"
+  | "kind"
+  | "tool"
+  | "request"
+  | "payload"
+  | "shown"
+  | "digest"
+> & { ttlMs: number };
+
+export type ContinuationRepository = ReturnType<typeof openContinuations>;
+
+// Every change is one conditional UPDATE, so a decision, a claim or a resume happens at most once.
+export function openContinuations(db: DatabaseSync, { transaction, emit }: StoreTx) {
+  const columns = `id, bot_id AS botId, run_id AS runId, session_id AS sessionId,
+    tool_use_id AS toolUseId, kind, tool, request, payload, shown, digest, status, reason,
+    created_at AS createdAt, expires_at AS expiresAt, decided_at AS decidedAt,
+    claimed_at AS claimedAt, finished_at AS finishedAt, result, resumed_at AS resumedAt,
+    resume_run_id AS resumeRunId`;
+  const insert = db.prepare(
+    `INSERT INTO continuations (id, bot_id, run_id, session_id, tool_use_id, kind, tool, request,
+       payload, shown, digest, status, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?) RETURNING ${columns}`,
+  );
+  const selectOne = db.prepare(`SELECT ${columns} FROM continuations WHERE id = ?`);
+  const selectWaiting = db.prepare(
+    `SELECT ${columns} FROM continuations WHERE status = 'waiting' ORDER BY rowid`,
+  );
+  const selectUnresumed = db.prepare(
+    `SELECT ${columns} FROM continuations WHERE resumed_at IS NULL
+     AND status IN ('denied', 'expired', 'succeeded', 'failed', 'unknown') ORDER BY rowid`,
+  );
+  // An owner's "approve" on a hand_off means they did it themselves.
+  const decideOne = db.prepare(
+    `UPDATE continuations SET
+       status = CASE WHEN ? = 'deny' THEN 'denied' WHEN kind = 'hand_off' THEN 'succeeded'
+         ELSE 'approved' END,
+       reason = 'owner', decided_at = ?,
+       finished_at = CASE WHEN ? = 'deny' OR kind = 'hand_off' THEN ? END
+     WHERE id = ? AND status = 'waiting' AND digest = ? AND expires_at > ? RETURNING ${columns}`,
+  );
+  const denyOne = db.prepare(
+    `UPDATE continuations SET status = 'denied', reason = ?, finished_at = ?
+     WHERE id = ? AND status IN ('waiting', 'approved') RETURNING ${columns}`,
+  );
+  const claimOne = db.prepare(
+    `UPDATE continuations SET status = 'claimed', claimed_at = ?
+     WHERE id = ? AND status = 'approved' RETURNING ${columns}`,
+  );
+  const finishOne = db.prepare(
+    `UPDATE continuations SET status = ?, result = ?, finished_at = ?
+     WHERE id = ? AND status = 'claimed' RETURNING ${columns}`,
+  );
+  const expireDue = db.prepare(
+    `UPDATE continuations SET status = 'expired', reason = 'timeout', finished_at = ?
+     WHERE status = 'waiting' AND expires_at <= ? RETURNING ${columns}`,
+  );
+  const claimedToUnknown = db.prepare(
+    `UPDATE continuations SET status = 'unknown', reason = 'server_restarted', finished_at = ?
+     WHERE status = 'claimed' RETURNING ${columns}`,
+  );
+  const resumeOne = db.prepare(
+    `UPDATE continuations SET resumed_at = ?, resume_run_id = ?
+     WHERE id = ? AND resumed_at IS NULL RETURNING ${columns}`,
+  );
+
+  const parse = (row: unknown) => (row === undefined ? undefined : ContinuationRow.parse(row));
+
+  function changed(row: unknown) {
+    const parsed = ContinuationRow.parse(row);
+    emit({ type: "continuation.changed", continuation: Continuation.parse(parsed) });
+    return parsed;
+  }
+
+  const one = (row: unknown) => (row === undefined ? undefined : changed(row));
+  const now = () => new Date().toISOString();
+
+  return {
+    openContinuation: ({ ttlMs, ...fields }: NewContinuation) =>
+      transaction(() => {
+        const createdAt = now();
+        const expiresAt = new Date(Date.parse(createdAt) + ttlMs).toISOString();
+        const { botId, runId, sessionId, toolUseId, kind, tool, request, payload, shown, digest } =
+          fields;
+        const row = insert.get(
+          NodeCrypto.randomUUID(),
+          botId,
+          runId,
+          sessionId,
+          toolUseId,
+          kind,
+          tool,
+          request,
+          payload,
+          shown,
+          digest,
+          createdAt,
+          expiresAt,
+        );
+        return changed(row);
+      }),
+    getContinuation: (id: string) => parse(selectOne.get(id)),
+    waitingContinuations: () => z.array(Continuation).parse(selectWaiting.all()),
+    unresumedContinuations: () => z.array(ContinuationRow).parse(selectUnresumed.all()),
+    // Bound to the digest of what the owner saw. Past its expiry it is closed, so a late answer
+    // changes nothing.
+    decideContinuation: (id: string, digest: string, decision: "approve" | "deny") =>
+      transaction(() => {
+        const at = now();
+        const row = one(decideOne.get(decision, at, decision, at, id, digest, at));
+        if (row) {
+          return row.status;
+        }
+        const current = parse(selectOne.get(id));
+        if (!current) {
+          return "not_found";
+        }
+        return current.digest === digest ? "closed" : "digest_mismatch";
+      }),
+    denyContinuation: (
+      id: string,
+      reason: Extract<ContinuationReason, "no_surface" | "payload_changed" | "stopped">,
+    ) => transaction(() => one(denyOne.get(reason, now(), id))),
+    // Durable before the action runs: from here a crash means `unknown`, and nothing retries it.
+    claimContinuation: (id: string) => transaction(() => one(claimOne.get(now(), id))),
+    finishContinuation: (id: string, status: "succeeded" | "failed", result: string) =>
+      transaction(() => one(finishOne.get(status, result, now(), id))),
+    expireContinuations: () =>
+      transaction(() => {
+        const at = now();
+        return expireDue.all(at, at).map(changed);
+      }),
+    // Waiting ones survive a restart: the owner can still answer them.
+    recoverContinuations: () =>
+      transaction(() => {
+        const at = now();
+        return [...claimedToUnknown.all(at), ...expireDue.all(at, at)].map(changed);
+      }),
+    markResumed: (id: string, runId: string) =>
+      transaction(() => parse(resumeOne.get(now(), runId, id))),
+  };
+}

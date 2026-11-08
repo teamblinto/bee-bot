@@ -7,6 +7,7 @@ import type { ApprovalTool, Bot, EngineLane, PauseReason } from "@beebot/contrac
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
+import { isWaitingMessage } from "./continuations.ts";
 import type { WindowUpdate } from "./usage.ts";
 
 export type TurnOutcome =
@@ -16,7 +17,9 @@ export type TurnOutcome =
   | { kind: "auth_failed"; pauseReason?: PauseReason }
   // The engine no longer has this session: the supervisor restarts from the room digest.
   | { kind: "session_lost" }
-  | { kind: "folder_missing" };
+  | { kind: "folder_missing" }
+  // A tool now waits on the owner (R17). The turn is over, and the outcome resumes the session.
+  | { kind: "waiting"; text: string };
 
 export type EngineChoice = Pick<Bot, "model" | "effort" | "mode">;
 
@@ -125,6 +128,7 @@ const defaultLimitSeconds = 30;
 const ToolResult = z.object({
   result: z.object({ content: z.tuple([z.object({ text: z.string() })]) }),
 });
+const Answer = z.object({ behavior: z.enum(["allow", "deny"]), message: z.string().optional() });
 
 // A Map, because a tool name is whatever the engine reports and could be "constructor".
 const inputKeys = new Map([
@@ -184,10 +188,14 @@ async function askPermission(
   const response = await callTool(permissions, params, signal);
   const data = /^data: (.*)$/m.exec(await response.text())?.[1];
   if (data === undefined) {
-    return false;
+    return "denied";
   }
   const { result } = ToolResult.parse(JSON.parse(data));
-  return result.content[0].text.startsWith('{"behavior":"allow"');
+  const { behavior, message = "" } = Answer.parse(JSON.parse(result.content[0].text));
+  if (behavior === "allow") {
+    return "allowed";
+  }
+  return isWaitingMessage(message) ? "waiting" : "denied";
 }
 
 // Memory tools answer as plain JSON, not as the approval stream.
@@ -197,11 +205,20 @@ async function proposeMemory(permissions: Permissions, text: string, signal: Abo
   return ToolResult.parse(await response.json()).result.content[0].text;
 }
 
+// Each session's prompts, oldest first. Gone with the process, so a resume after a restart finds
+// the session lost, as with a real engine whose own store went.
+const fakeSessions = new Map<string, string[]>();
+
+const lastLine = (text: string) => (text.split("\n").at(-1) ?? "").trim();
+
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
-// /approve <Tool> <detail...>, /remember <text...>, /work [thought] (a scripted multi-tool turn).
-// Anything else streams a reply word by word.
+// /approve <Tool> <detail...>, /remember <text...>, /work [thought] (a scripted multi-tool turn),
+// /recall (the last line of each earlier turn in the session). Anything else streams a reply word
+// by word.
 export const fakeRunTurn: RunTurn = async ({
   prompt,
+  sessionId,
+  resume,
   signal,
   onDelta,
   onToolStart,
@@ -211,7 +228,7 @@ export const fakeRunTurn: RunTurn = async ({
   onDelivered,
   onSteerable,
 }) => {
-  const line = (prompt.split("\n").at(-1) ?? "").trim();
+  const line = lastLine(prompt);
   const [directive, argument] = line.split(/\s+/);
   switch (directive) {
     case "/fail":
@@ -221,6 +238,11 @@ export const fakeRunTurn: RunTurn = async ({
     case "/limit":
       return { kind: "limited", retryAfterMs: (Number(argument) || defaultLimitSeconds) * 1000 };
   }
+  const earlier = resume ? fakeSessions.get(sessionId) : [];
+  if (!earlier) {
+    return { kind: "session_lost" };
+  }
+  fakeSessions.set(sessionId, [...earlier, prompt]);
   onDelivered();
   switch (directive) {
     case "/hang":
@@ -231,9 +253,14 @@ export const fakeRunTurn: RunTurn = async ({
     case "/approve": {
       const [, tool = "", detail = ""] = /^\S+\s+(\S+)\s*(.*)$/.exec(line) ?? [];
       onToolStart({ id: "fake-approve", name: tool, detail: detail || null });
-      const allowed = await askPermission(permissions, tool, detail, signal);
-      onToolEnd("fake-approve", !allowed);
-      const text = `Test engine: ${allowed ? "allowed" : "denied"}`;
+      const answer = await askPermission(permissions, tool, detail, signal);
+      onToolEnd("fake-approve", answer !== "allowed");
+      const text = `Test engine: ${answer}`;
+      onDelta(text);
+      return answer === "waiting" ? { kind: "waiting", text } : { kind: "completed", text };
+    }
+    case "/recall": {
+      const text = `Test engine recalls: ${earlier.map(lastLine).join(" | ")}`;
       onDelta(text);
       return { kind: "completed", text };
     }
