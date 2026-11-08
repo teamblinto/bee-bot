@@ -476,6 +476,17 @@ const errorSentences: Record<string, string> = {
   storage_failed: "Bee Bot couldn't save that. Try again.",
   unknown_model: "That model isn't available.",
   unsupported_effort: "That model doesn't support this reasoning level.",
+  vault_insecure_keyring:
+    "This computer has no password manager Bee Bot can use, so it won't save an API key. Set up GNOME Keyring or KWallet, then restart Bee Bot.",
+  vault_keyring_unavailable:
+    "Bee Bot can't reach this computer's password manager, so it won't save an API key.",
+  vault_key_unreadable:
+    "Bee Bot can't read its vault key, so it won't save an API key. Your saved keys are unchanged.",
+  vault_no_key:
+    "This server has no vault key file, so it won't save an API key. Set BEEBOT_VAULT_KEY_FILE and restart it.",
+  vault_wrong_key:
+    "The vault key doesn't match the keys already saved. Delete the saved keys, then save them again.",
+  vault_corrupt: "A saved key is damaged. Delete it and save it again.",
 };
 
 function errorSentence(body: unknown) {
