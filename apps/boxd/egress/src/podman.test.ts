@@ -19,7 +19,8 @@ const available =
 
 const packageDir = NodePath.resolve(import.meta.dirname, "..");
 const tag = NodeCrypto.randomBytes(3).toString("hex");
-const name = (what: string) => `beebot-dev-ws3-${what}-${tag}`;
+const runId = `beebot-dev-ws3-${tag}`;
+const name = (what: string) => `${runId}-${what}`;
 const label = ["--label", "beebot-dev=1"];
 const canary = `sk-ant-canary-${NodeCrypto.randomUUID()}`;
 const canarySha = NodeCrypto.createHash("sha256").update(canary).digest("hex");
@@ -105,9 +106,34 @@ const subnetOf = async (network: string) =>
     .split("/")[0]
     ?.replace(/\.0$/, "") ?? "";
 
+// Everything still named for this run, tracked or not: a step that failed between creating a
+// resource and recording its ID must not leak it.
+async function leftovers() {
+  const lists = await Promise.all([
+    run(["ps", "-a", "--format", "{{.ID}} {{.Names}}"]),
+    run(["network", "ls", "--format", "{{.ID}} {{.Name}}"]),
+    run(["images", "--format", "{{.ID}} {{.Repository}}"]),
+  ]);
+  const [containers = [], networks = [], images = []] = lists.map((list) =>
+    list
+      .split("\n")
+      .map((line) => line.split(" "))
+      .filter(([, item = ""]) => item.replace(/^localhost\//, "").startsWith(`${runId}-`))
+      .map(([id = ""]) => id),
+  );
+  return [
+    ...containers.map((id) => ({ kind: "container" as const, id })),
+    ...networks.map((id) => ({ kind: "network" as const, id })),
+    ...images.map((id) => ({ kind: "image" as const, id })),
+  ];
+}
+
 // The proxy's own `--rm` teardown can still hold the networks when `rm -f` returns, so each removal
 // is retried, and anything left behind fails the run instead of leaking on the shared machine.
 afterAll(async () => {
+  if (!available) {
+    return;
+  }
   await Promise.all(
     children.map(async (child) => {
       if (child.exitCode !== null || child.signalCode !== null) {
@@ -120,26 +146,26 @@ afterAll(async () => {
       clearTimeout(timer);
     }),
   );
-  const leaked: string[] = [];
-  for (const { kind, id } of created.reverse()) {
-    const args =
-      kind === "container"
-        ? ["rm", "-f", "-i", "-t", "0", id]
-        : kind === "network"
-          ? ["network", "rm", "-f", id]
-          : ["rmi", "-f", "-i", id];
-    let removed = false;
-    for (let attempt = 0; attempt < 10 && !removed; attempt += 1) {
-      removed = await run(args).then(
-        () => true,
-        () => new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
-      );
+  const remove = async (items: typeof created) => {
+    for (const { kind, id } of items) {
+      const args =
+        kind === "container"
+          ? ["rm", "-f", "-i", "-t", "0", id]
+          : kind === "network"
+            ? ["network", "rm", "-f", id]
+            : ["rmi", "-f", "-i", id];
+      let removed = false;
+      for (let attempt = 0; attempt < 10 && !removed; attempt += 1) {
+        removed = await run(args).then(
+          () => true,
+          () => new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+        );
+      }
     }
-    if (!removed) {
-      leaked.push(`${kind} ${id}`);
-    }
-  }
-  expect(leaked).toEqual([]);
+  };
+  await remove(created.reverse());
+  await remove(await leftovers());
+  expect(await leftovers()).toEqual([]);
 }, 180_000);
 
 describe.skipIf(!available)("egress proxy in the beebot-dev Podman machine", () => {
@@ -290,11 +316,14 @@ describe.skipIf(!available)("egress proxy in the beebot-dev Podman machine", () 
     );
     await relay.until((lines) => lines.filter((line) => line === '{"ok":true}').length === 2);
 
+    let probes = 0;
     const probe = async () =>
       JSON.parse(
         await run([
           "run",
           "--rm",
+          "--name",
+          name(`probe-${(probes += 1)}`),
           ...label,
           ...hardened,
           "--user",
