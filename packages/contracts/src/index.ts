@@ -22,6 +22,10 @@ export const Bootstrap = z.object({
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
+// Each later stdin line from the desktop: the OS is about to sleep, or just woke.
+export const PowerSignal = z.object({ power: z.enum(["suspend", "resume"]) });
+export type PowerSignal = z.infer<typeof PowerSignal>;
+
 // Served at `GET /.well-known/bee-bot` without auth, so a client can identify a server before it connects.
 export const ServerInfo = z.object({
   environmentId: z.string(),

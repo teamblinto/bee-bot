@@ -3,10 +3,14 @@ import * as NodeCrypto from "node:crypto";
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
 import type { RunTurn, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
+import { createOutboxWorker, type Deliver } from "./outbox.ts";
+import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 import type { WindowUpdate } from "./usage.ts";
+import { createAwakeClock, createWatchdog } from "./watchdog.ts";
 
 const defaultTurnTimeoutMs = 10 * 60_000;
+const defaultSilenceMs = 5 * 60_000;
 const tickMs = 1000;
 const minBlockMs = 1000;
 const maxBlockMs = 24 * 60 * 60_000;
@@ -26,15 +30,23 @@ type Options = {
   // A usage check can race a turn's token refresh, so a turn waits for it.
   accountHeld?: ((accountId: string) => boolean) | undefined;
   turnTimeoutMs?: number | undefined;
+  silenceMs?: number | undefined;
+  outboxHandlers?: ReadonlyMap<string, Deliver> | undefined;
+  now?: (() => number) | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
 // A finished reply holds too: a stop or timeout landing after `result` has nothing left to stop.
-function finishedRun(outcome: TurnOutcome, abortReason: unknown, tools: string[]): FinishedRun {
+function finishedRun(
+  outcome: TurnOutcome,
+  abortReason: unknown,
+  tools: string[],
+  question: string | undefined,
+): FinishedRun {
   if (outcome.kind === "limited") {
     const blockMs = Math.min(Math.max(outcome.retryAfterMs, minBlockMs), maxBlockMs);
     return {
-      status: "Failed",
+      status: "WaitingQuota",
       reason: "limited",
       blockedUntil: new Date(Date.now() + blockMs).toISOString(),
     };
@@ -47,7 +59,9 @@ function finishedRun(outcome: TurnOutcome, abortReason: unknown, tools: string[]
     };
   }
   if (outcome.kind === "completed") {
-    return { status: "Completed", reason: null, reply: outcome.text, tools };
+    return question === undefined
+      ? { status: "Completed", reason: null, reply: outcome.text, tools }
+      : { status: "WaitingUser", reason: null, reply: question, tools };
   }
   if (outcome.kind === "folder_missing") {
     return { status: "Failed", reason: "folder_missing" };
@@ -95,8 +109,13 @@ export function createSupervisor({
   onTurnEnded,
   accountHeld,
   turnTimeoutMs = defaultTurnTimeoutMs,
+  silenceMs = defaultSilenceMs,
+  outboxHandlers = new Map(),
+  now = Date.now,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
+  const clock = createAwakeClock(now);
+  const outbox = createOutboxWorker(store.effects, outboxHandlers);
   const turns = new Map<
     string,
     {
@@ -104,11 +123,19 @@ export function createSupervisor({
       ended: Promise<void>;
       pauseClock: () => void;
       resumeClock: () => void;
+      watchdog: ReturnType<typeof createWatchdog>;
+      question?: string;
     }
   >();
   let closing = false;
 
-  store.recover(bootId);
+  store.recover(bootId, (run, at) =>
+    recoveryVerdict({
+      unsettledEffects: store.effects.settleRunEffects(run.id, "uncertain").length,
+      continuedAt: store.recentRecoveries(run.botId, continueCap),
+      now: at,
+    }),
+  );
 
   function settleWake(wake: Wake, now: string) {
     const { hasActiveRun, hasInput, ...admission } = store.wakeContext(wake, now);
@@ -139,23 +166,59 @@ export function createSupervisor({
     const tools: string[] = [];
     const seenTools = new Set<string>();
     const deltas = batchDeltas((text) => onDelta(run.id, text));
-    let remainingMs = turnTimeoutMs;
-    let resumedAt = 0;
+    const watchdog = createWatchdog(clock, silenceMs);
+    const effects = new Map<string, string>();
+    // Awake time only: a timer that fires on wake re-arms for whatever the sleep didn't use.
+    let usedMs = 0;
+    let since: number | undefined;
     let timeout: NodeJS.Timeout | undefined;
+    const used = () => usedMs + (since === undefined ? 0 : clock.awakeNow() - since);
+    const arm = () => {
+      clearTimeout(timeout);
+      const leftMs = turnTimeoutMs - used();
+      if (leftMs <= 0) {
+        controller.abort("timeout");
+      } else {
+        timeout = setTimeout(arm, leftMs);
+      }
+    };
     const resumeClock = () => {
-      if (!timeout) {
-        resumedAt = Date.now();
-        timeout = setTimeout(() => controller.abort("timeout"), remainingMs);
+      if (since === undefined) {
+        since = clock.awakeNow();
+        arm();
       }
     };
     const pauseClock = () => {
-      if (timeout) {
+      if (since !== undefined) {
         clearTimeout(timeout);
-        timeout = undefined;
-        remainingMs = Math.max(remainingMs - (Date.now() - resumedAt), 0);
+        usedMs = used();
+        since = undefined;
       }
     };
     resumeClock();
+    const recordEffect = (tool: ToolStart) => {
+      try {
+        const { id } = store.effects.recordEffect({
+          runId: run.id,
+          tool: tool.name,
+          target: tool.id,
+          idempotencyKey: `${run.id}:${tool.id}`,
+        });
+        effects.set(tool.id, id);
+      } catch (error) {
+        console.error(`beebotd: effect of run ${run.id} was not recorded`, error);
+      }
+    };
+    const settleEffect = (toolId: string, failed: boolean) => {
+      const id = effects.get(toolId);
+      try {
+        if (id) {
+          store.effects.settleEffect(id, failed ? "failed" : "done");
+        }
+      } catch (error) {
+        console.error(`beebotd: effect of run ${run.id} was not settled`, error);
+      }
+    };
     const attempt = (prompt: string, sessionId: string, resume: boolean) =>
       runTurn({
         prompt,
@@ -163,12 +226,17 @@ export function createSupervisor({
         resume,
         launch: run.launch,
         signal: controller.signal,
-        onDelta: deltas.add,
+        onDelta: (text) => {
+          watchdog.touch();
+          deltas.add(text);
+        },
         onToolStart: (tool) => {
           deltas.flush();
+          watchdog.toolStart(tool.id);
           if (!seenTools.has(tool.id)) {
             seenTools.add(tool.id);
             tools.push(tool.name);
+            recordEffect(tool);
             if (!tool.name.startsWith("mcp__bee__")) {
               try {
                 store.markTainted(run.id);
@@ -181,10 +249,13 @@ export function createSupervisor({
         },
         onToolEnd: (id, failed) => {
           deltas.flush();
+          watchdog.toolEnd(id);
+          settleEffect(id, failed);
           onToolEnd(run.id, id, failed);
         },
         onThinking: (state) => {
           deltas.flush();
+          watchdog.touch();
           onThinking(run.id, state);
         },
         onRateLimit: (updates) => {
@@ -226,12 +297,18 @@ export function createSupervisor({
       .then((outcome) => {
         deltas.flush();
         pauseClock();
+        const question = turns.get(run.id)?.question;
         turns.delete(run.id);
         approvals.closeRun(run.id);
         // Left Running on purpose: the next boot marks it Interrupted.
         if (!closing) {
           try {
-            store.finishRun(run.id, bootId, finishedRun(outcome, controller.signal.reason, tools));
+            const finished = finishedRun(outcome, controller.signal.reason, tools, question);
+            store.effects.settleRunEffects(
+              run.id,
+              outcome.kind === "completed" ? "done" : "uncertain",
+            );
+            store.finishRun(run.id, bootId, finished);
           } catch (error) {
             // A run left Running would hold its bot and account until the next boot.
             console.error(`beebotd: run ${run.id} did not finish cleanly`, error);
@@ -242,7 +319,7 @@ export function createSupervisor({
         }
       })
       .catch((error: unknown) => console.error(error));
-    turns.set(run.id, { controller, ended, pauseClock, resumeClock });
+    turns.set(run.id, { controller, ended, pauseClock, resumeClock, watchdog });
   }
 
   function startRun(runId: string, botId: string, accountId: string, now: string) {
@@ -282,6 +359,7 @@ export function createSupervisor({
           console.error(`beebotd: run ${run.id} failed`, error);
         }
       }
+      outbox.drain(now);
     } catch (error) {
       console.error(error);
     }
@@ -306,17 +384,56 @@ export function createSupervisor({
     }
   }
 
-  const ticker = setInterval(pump, tickMs);
+  // A turn waiting on the owner isn't silent either.
+  function watch() {
+    for (const [runId, { watchdog, controller }] of turns) {
+      if (approvals.isHolding(runId)) {
+        watchdog.touch();
+      } else if (watchdog.stalled()) {
+        controller.abort("timeout");
+      }
+    }
+  }
+
+  const ticker = setInterval(() => {
+    clock.observe();
+    watch();
+    pump();
+  }, tickMs);
   ticker.unref();
 
   return {
     pump,
     stopBot,
     syncClocks,
+    // Every chain ends here: parked runs and open tasks too, so nothing wakes back up after.
     stopAll: () => {
       for (const botId of store.botIds()) {
         stopBot(botId);
       }
+      for (const task of store.tasks.openTasks()) {
+        store.tasks.finishTask(task.id, "cancelled");
+      }
+    },
+    suspend: () => clock.suspend(),
+    resume: () => {
+      clock.resume();
+      pump();
+    },
+    // For a tool that needs the owner: the turn is left to end on its own, then the run parks as
+    // WaitingUser with `question` as the bot's message, releasing its bot and account.
+    parkWaitingUser: (runId: string, question: string) => {
+      const turn = turns.get(runId);
+      if (!turn || turn.controller.signal.aborted) {
+        return false;
+      }
+      turn.question = question;
+      return true;
+    },
+    resumeFromUser: (runId: string, answer: string) => {
+      const result = store.resumeFromUser(runId, answer);
+      pump();
+      return result;
     },
     close: async () => {
       closing = true;
@@ -325,7 +442,7 @@ export function createSupervisor({
       for (const { controller } of ending) {
         controller.abort("shutdown");
       }
-      await Promise.all(ending.map(({ ended }) => ended));
+      await Promise.all([...ending.map(({ ended }) => ended), outbox.idle()]);
     },
   };
 }

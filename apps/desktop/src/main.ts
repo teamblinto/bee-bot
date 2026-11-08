@@ -1,10 +1,19 @@
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, Menu, nativeImage, Notification, shell, Tray } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeImage,
+  Notification,
+  powerMonitor,
+  shell,
+  Tray,
+} from "electron";
 
 import { watchNotices } from "./notices.ts";
-import { startServer, stopServer } from "./server.ts";
+import { sendPower, startServer, stopServer } from "./server.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
 
@@ -151,6 +160,8 @@ async function start() {
     app.quit();
     return;
   }
+  powerMonitor.on("suspend", () => sendPower("suspend"));
+  powerMonitor.on("resume", () => sendPower("resume"));
   createTray();
   createWindow();
   stopNotices = watchNotices(connection.url, connection.token, ({ title, body }) => {

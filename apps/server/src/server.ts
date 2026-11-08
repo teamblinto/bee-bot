@@ -685,6 +685,8 @@ export async function startServer({
     // Fills the model catalog too, so the first picker shows what the CLI offers.
     refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
     checkCodex,
+    power: (state: "suspend" | "resume") =>
+      state === "suspend" ? supervisor.suspend() : supervisor.resume(),
     close: async () => {
       clearInterval(heartbeat);
       approvals.close();

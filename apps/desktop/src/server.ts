@@ -7,6 +7,7 @@ import * as NodeTimers from "node:timers/promises";
 import {
   type Bootstrap,
   noRestartExitCodes,
+  type PowerSignal,
   ProtocolNotice,
   protocolVersion,
 } from "@beebot/contracts";
@@ -108,6 +109,13 @@ export async function startServer({ entry, dataDir, allowedOrigins, fakeEngine }
   child = spawnServer(entry, { port, token, dataDir, allowedOrigins, fakeEngine });
   await waitForReady(url, token);
   return { url, token };
+}
+
+export function sendPower(power: PowerSignal["power"]) {
+  if (child?.stdin.writable) {
+    child.stdin.write(`${JSON.stringify({ power } satisfies PowerSignal)}
+`);
+  }
 }
 
 export async function stopServer() {
