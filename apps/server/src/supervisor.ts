@@ -41,7 +41,7 @@ function finishedRun(
   outcome: TurnOutcome,
   abortReason: unknown,
   tools: string[],
-  question: string | undefined,
+  parked: boolean,
 ): FinishedRun {
   if (outcome.kind === "limited") {
     const blockMs = Math.min(Math.max(outcome.retryAfterMs, minBlockMs), maxBlockMs);
@@ -59,9 +59,12 @@ function finishedRun(
     };
   }
   if (outcome.kind === "completed") {
-    return question === undefined
-      ? { status: "Completed", reason: null, reply: outcome.text, tools }
-      : { status: "WaitingUser", reason: null, reply: question, tools };
+    return {
+      status: parked ? "WaitingUser" : "Completed",
+      reason: null,
+      reply: outcome.text,
+      tools,
+    };
   }
   if (outcome.kind === "folder_missing") {
     return { status: "Failed", reason: "folder_missing" };
@@ -124,7 +127,7 @@ export function createSupervisor({
       pauseClock: () => void;
       resumeClock: () => void;
       watchdog: ReturnType<typeof createWatchdog>;
-      question?: string;
+      parked?: boolean;
     }
   >();
   let closing = false;
@@ -297,13 +300,13 @@ export function createSupervisor({
       .then((outcome) => {
         deltas.flush();
         pauseClock();
-        const question = turns.get(run.id)?.question;
+        const parked = turns.get(run.id)?.parked ?? false;
         turns.delete(run.id);
         approvals.closeRun(run.id);
         // Left Running on purpose: the next boot marks it Interrupted.
         if (!closing) {
           try {
-            const finished = finishedRun(outcome, controller.signal.reason, tools, question);
+            const finished = finishedRun(outcome, controller.signal.reason, tools, parked);
             store.effects.settleRunEffects(
               run.id,
               outcome.kind === "completed" ? "done" : "uncertain",
@@ -422,13 +425,13 @@ export function createSupervisor({
       pump();
     },
     // For a tool that needs the owner: the turn is left to end on its own, then the run parks as
-    // WaitingUser with `question` as the bot's message, releasing its bot and account.
-    parkWaitingUser: (runId: string, question: string) => {
+    // WaitingUser with the turn's reply, releasing its bot and account. The tool posts the question.
+    parkWaitingUser: (runId: string) => {
       const turn = turns.get(runId);
       if (!turn || turn.controller.signal.aborted) {
         return false;
       }
-      turn.question = question;
+      turn.parked = true;
       return true;
     },
     resumeFromUser: (runId: string, answer: string) => {

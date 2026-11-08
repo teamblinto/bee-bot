@@ -7,6 +7,7 @@ import type { Bot, RunStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createApprovals } from "./approvals.ts";
+import { callBotTool } from "./botTools.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueWindowMs, recoveryVerdict } from "./recovery.ts";
@@ -328,10 +329,10 @@ describe("waiting states", () => {
     await expectTurns(engine, 1);
     const id = latestRun(store, ada)?.id ?? "";
     engine.turns[0]?.deliver();
-    expect(supervisor.parkWaitingUser(id, "Which branch?")).toBe(true);
+    expect(supervisor.parkWaitingUser(id)).toBe(true);
     engine.turns[0]?.finish(reply);
     await expectStatus(store, ada, "WaitingUser");
-    expect(store.state().messages.at(-1)).toMatchObject({ author: "bot", body: "Which branch?" });
+    expect(store.state().messages.at(-1)).toMatchObject({ author: "bot", body: "done" });
 
     send(ben, "same account");
     await expectTurns(engine, 2);
@@ -345,6 +346,31 @@ describe("waiting states", () => {
     expect(latestRun(store, ada)).toMatchObject({ id, status: "Running" });
     engine.turns[2]?.finish(reply);
     await expectStatus(store, ada, "Completed");
+  });
+  it("parks a run that calls ask_user until the owner replies, then continues it once", async () => {
+    const engine = scriptedEngine();
+    const { store, supervisor, send } = boot(engine.runTurn);
+    const ada = createBot(store);
+    send(ada, "ship it");
+    await expectTurns(engine, 1);
+    const run = { id: latestRun(store, ada)?.id ?? "", botId: ada.id };
+    engine.turns[0]?.deliver();
+    const asked = callBotTool(store, run, "ask_user", { question: "Which branch?" }, ({ runId }) =>
+      supervisor.parkWaitingUser(runId),
+    );
+    expect(JSON.parse(asked)).toMatchObject({ status: "waiting" });
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, ada, "WaitingUser");
+    expect(store.state().messages.filter((m) => m.body === "Which branch?")).toHaveLength(1);
+
+    send(ada, "main");
+    await expectTurns(engine, 2);
+    expect(engine.turns[1]).toMatchObject({ prompt: "main", resume: true });
+    engine.turns[1]?.finish(reply);
+    await expectStatus(store, ada, "Completed");
+    await ticks(1);
+    expect(engine.turns).toHaveLength(2);
+    expect(store.state().runs).toHaveLength(1);
   });
 });
 
@@ -360,7 +386,7 @@ describe("stop-all", () => {
     send(asker, "question");
     await expectTurns(engine, 1);
     const askerRun = latestRun(store, asker)?.id ?? "";
-    supervisor.parkWaitingUser(askerRun, "Yes or no?");
+    supervisor.parkWaitingUser(askerRun);
     engine.turns[0]?.finish(reply);
     await expectStatus(store, asker, "WaitingUser");
 

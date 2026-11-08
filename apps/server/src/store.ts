@@ -562,7 +562,7 @@ export type ClaimedRun = {
   launch: BotLaunch;
 };
 
-// WaitingUser posts `reply` as the question; WaitingQuota waits out `blockedUntil`.
+// WaitingQuota waits out `blockedUntil`.
 export type FinishedRun = {
   status: "Completed" | "Failed" | "Cancelled" | "WaitingUser" | "WaitingQuota";
   reason: RunReason | null;

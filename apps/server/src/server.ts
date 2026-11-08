@@ -484,7 +484,8 @@ export async function startServer({
       body,
       (args, closed) => approvals.approve(run, args, closed),
       (name, args) => callMemoryTool(store, run, name, args),
-      (name, args) => callBotTool(store, run, name, args),
+      (name, args) =>
+        callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
       mcpKeepaliveMs,
     );
   }
