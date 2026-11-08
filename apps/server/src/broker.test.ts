@@ -38,17 +38,27 @@ describe("rule table", () => {
 
   it("refuses a granted tool until the manifest grants it", () => {
     const researcher = context({ profile: "researcher" });
-    expect(decideTool({ ...ids, tool: "browser_open" }, researcher)).toEqual({
+    expect(decideTool({ ...ids, tool: "browser_navigate" }, researcher)).toEqual({
       kind: "deny",
       reason: "not_granted",
     });
     const granted = { ...researcher, manifest: ["browser"] };
-    expect(decideTool({ ...ids, tool: "browser_open" }, granted).kind).toBe("allow");
+    expect(decideTool({ ...ids, tool: "browser_navigate" }, granted).kind).toBe("allow");
+  });
+
+  it("lets a granted Reader read pages, and asks before it clicks or types", () => {
+    const reader = context({ profile: "reader", manifest: ["browser"] });
+    expect(decideTool({ ...ids, tool: "browser_snapshot" }, reader).kind).toBe("allow");
+    expect(decideTool({ ...ids, tool: "browser_click" }, reader).kind).toBe("approve");
+    expect(decideTool({ ...ids, tool: "browser_type" }, { ...reader, attended: false })).toEqual({
+      kind: "deny",
+      reason: "nobody_watching",
+    });
   });
 
   it("hands a human-only tool to a person, even when watched", () => {
-    const granted = context({ profile: "researcher", manifest: ["browser"] });
-    expect(decideTool({ ...ids, tool: "browser_sign_in" }, granted).kind).toBe("hand_off");
+    const signIn = { ...call("sign_in", noLegs), humanOnly: true };
+    expect(decide(signIn, context({ profile: "researcher" })).kind).toBe("hand_off");
   });
 
   it("lets the default Operator run Bee's own tools and the engine's", () => {

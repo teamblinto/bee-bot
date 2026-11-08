@@ -24,7 +24,8 @@ import {
   inputDigest,
   writeAction,
 } from "./approvals.ts";
-import type { Decide } from "./broker.ts";
+import { type Decide, decide as policyDecide } from "./broker.ts";
+import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
@@ -255,6 +256,10 @@ describe("the MCP endpoint", () => {
       "handoff",
       "ask_user",
       "create_routine",
+      "browser_navigate",
+      "browser_snapshot",
+      "browser_click",
+      "browser_type",
     ]);
     // A read-only hint would let the CLI run a memory call alongside a tool, ahead of the taint.
     expect(list.result.tools.every(({ annotations }) => annotations === undefined)).toBe(true);
@@ -1532,6 +1537,108 @@ describe("in Box mode a tool call", () => {
     expect(rows("SELECT status FROM continuations")).toEqual([{ status: "unknown" }]);
     expect(started).toBe(1);
     expect(ran).toEqual([]);
+  });
+
+  it("answers Claude's PreToolUse hook now: allow, or a deny that waits on the owner", async () => {
+    const answers: unknown[] = [];
+    let calls = 0;
+    const hookTurn: RunTurn = async ({ permissions }) => {
+      calls += 1;
+      if (calls > 1) {
+        return { kind: "completed", text: "resumed" };
+      }
+      const hook = (tool_name: string, tool_input: object, token = permissions.token) =>
+        fetch(new URL("/hooks/pre-tool-use", permissions.url), {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ hook_event_name: "PreToolUse", tool_name, tool_input }),
+        });
+      expect((await hook("Bash", { command: "echo hi" }, "wrong")).status).toBe(401);
+      for (const [tool, input] of [
+        ["Read", { file_path: "notes.txt" }],
+        ["Bash", { command: "echo hi" }],
+        ["mcp__bee__memory_search", { query: "x" }],
+        ["WebFetch", { url: "https://example.com" }],
+      ] as const) {
+        answers.push(await (await hook(tool, input)).json());
+      }
+      return { kind: "waiting", text: "waiting" };
+    };
+    const { send, waiting, answer, bodies } = await boxBoot({ runTurn: hookTurn });
+    await send("go");
+    const card = await waiting();
+    const decision = (answer: unknown) =>
+      (
+        answer as {
+          hookSpecificOutput?: { permissionDecision: string; permissionDecisionReason: string };
+        }
+      ).hookSpecificOutput;
+    expect(decision(answers[0])?.permissionDecision).toBe("allow");
+    expect(decision(answers[1])).toEqual({
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: waitingMessage(card.id),
+    });
+    expect(answers[2]).toEqual({});
+    expect(decision(answers[3])?.permissionDecision).toBe("deny");
+    await answer(card, "approve");
+    await vi.waitFor(() => expect(bodies().at(-1)).toBe("resumed"));
+    expect(ran).toHaveLength(1);
+  });
+
+  it("holds an approved browser action as a continuation, and performs it once", async () => {
+    const replies: string[] = [];
+    let calls = 0;
+    const browserTurn: RunTurn = async ({ permissions }) => {
+      calls += 1;
+      if (calls > 1) {
+        return { kind: "completed", text: "resumed" };
+      }
+      const call = rpc("tools/call", { name: "browser_click", arguments: { ref: "1:0" } });
+      const response = await mcp(permissions, call);
+      const { result } = (await response.json()) as { result: { content: [{ text: string }] } };
+      replies.push(result.content[0].text);
+      return { kind: "waiting", text: "waiting" };
+    };
+    const performed: string[] = [];
+    const click: Execute = async ({ payload }) => {
+      performed.push(payload);
+      return { ok: true, output: "clicked" };
+    };
+    const { store, bot, post, send, waiting, answer, bodies } = await boxBoot({
+      runTurn: browserTurn,
+      decide: policyDecide,
+      executors: new Map([["browser_click", click]]),
+    });
+    await post({ type: "set-bot-manifest", botId: bot.id, manifest: ["browser"] });
+    expect(store.getBot(bot.id)?.manifest).toEqual(["browser"]);
+    await send("click it");
+    const card = await waiting();
+    expect(card).toMatchObject({ tool: "browser_click", shown: 'browser_click: {"ref":"1:0"}' });
+    expect(replies).toEqual([waitingMessage(card.id)]);
+    await answer(card, "approve");
+    await vi.waitFor(() => expect(bodies().at(-1)).toBe("resumed"));
+    expect(performed.map((payload) => JSON.parse(payload))).toEqual([
+      { tool: "browser_click", input: { ref: "1:0" } },
+    ]);
+  });
+
+  it("refuses a browser tool the bot's manifest doesn't grant", async () => {
+    const replies: string[] = [];
+    const browserTurn: RunTurn = async ({ permissions }) => {
+      const call = rpc("tools/call", { name: "browser_snapshot", arguments: {} });
+      const response = await mcp(permissions, call);
+      const { result } = (await response.json()) as { result: { content: [{ text: string }] } };
+      replies.push(result.content[0].text);
+      return { kind: "completed", text: "done" };
+    };
+    const { send, bodies } = await boxBoot({ runTurn: browserTurn, decide: policyDecide });
+    await send("look");
+    await vi.waitFor(() => expect(bodies().at(-1)).toBe("done"));
+    expect(JSON.parse(replies[0] ?? "")).toMatchObject({
+      status: "refused",
+      reason: "not_granted",
+    });
   });
 
   it("is closed by a stop, with nothing sent back", async () => {

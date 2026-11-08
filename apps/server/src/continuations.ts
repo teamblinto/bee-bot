@@ -15,6 +15,9 @@ export const waitingMessage = (id: string) =>
 
 export const isWaitingMessage = (message: string) => message.startsWith(waitingPrefix);
 
+// Anywhere in a text, since an engine can wrap the message in words of its own.
+export const waitingPattern = /waiting: [0-9a-f-]{36}\. The owner has to answer first\./;
+
 const ContinuationRow = Continuation.extend({
   sessionId: z.string(),
   toolUseId: z.string(),

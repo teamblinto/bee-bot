@@ -8,8 +8,9 @@ import {
 import type { WebSocket } from "ws";
 import { z } from "zod";
 
+import type { Execute } from "./approvals.ts";
 import type { AuditRecord } from "./audit.ts";
-import type { Decide, PolicyContext, ToolLabels } from "./broker.ts";
+import type { PolicyDecision } from "./broker.ts";
 import { detectChallenge } from "./browserChallenge.ts";
 import {
   afterSnapshot,
@@ -74,15 +75,6 @@ const Args = {
 type BrowserTool = keyof typeof Args;
 const isBrowserTool = (name: string): name is BrowserTool => Object.hasOwn(Args, name);
 
-// Static, never from the model. A page is someone else's content, and a click or a typed value can
-// change something out there.
-const browserLabels: Record<BrowserTool, ToolLabels> = {
-  browser_navigate: { readsUntrusted: true, readsPrivate: false, sideEffect: false },
-  browser_snapshot: { readsUntrusted: true, readsPrivate: false, sideEffect: false },
-  browser_click: { readsUntrusted: true, readsPrivate: false, sideEffect: true },
-  browser_type: { readsUntrusted: true, readsPrivate: false, sideEffect: true },
-};
-
 // The sidecar's own egress policy still applies: this only keeps the bot to web pages.
 export function resolveUrl(raw: string) {
   const url = URL.parse(raw);
@@ -113,17 +105,14 @@ export type HandoffPeer = { send: (message: HandoffServerMessage) => void };
 
 export type BrowserDeps = {
   runtime: BrowserRuntime;
-  decide: Decide;
-  policyContext: (run: BrowserRun) => PolicyContext | undefined;
+  // The broker's check, which keeps the session's legs and audits the call.
+  check: (run: BrowserRun, tool: string, args: unknown) => PolicyDecision;
   appendAudit: (record: AuditRecord) => void;
   // Sets or clears the bot's `browser_session` pause.
   setPaused: (botId: string, paused: boolean) => void;
   notify: (run: BrowserRun, text: string) => void;
-  // Workstream 5's continuation: answers the bot now, and calls `perform` once the owner approves.
-  requestApproval: (
-    run: BrowserRun,
-    call: { tool: string; args: unknown; digest: string },
-  ) => string;
+  // A continuation: answers the bot now, and calls `perform` once the owner approves.
+  requestApproval: (run: BrowserRun, tool: string, args: Record<string, unknown>) => string;
 };
 
 type Tab = {
@@ -287,22 +276,15 @@ export function createBrowserBroker(deps: BrowserDeps) {
     if (data.url !== undefined && !resolveUrl(data.url)) {
       return refused("Only http and https URLs without credentials can be opened.");
     }
-    const context = deps.policyContext(run);
-    if (!context) {
-      return refused("run_ended");
+    // Before the sidecar is touched, so a bot without the grant never opens a page.
+    const decision = deps.check(run, name, data);
+    if (decision.kind === "deny") {
+      return refused(decision.reason);
     }
-    const digest = digestOf({ tool: name, args: data });
-    const audit = (status: string, reason: string | null = null) =>
-      deps.appendAudit({
-        runId: run.id,
-        botId: run.botId,
-        status,
-        reason,
-        tool: name,
-        initiator: "bot",
-        attended: run.attended,
-        digest,
-      });
+    // `perform` checks who holds the browser once the owner has approved.
+    if (decision.kind === "approve") {
+      return deps.requestApproval(run, name, data);
+    }
     let tab: Tab;
     try {
       tab = await open(run.botId);
@@ -311,26 +293,22 @@ export function createBrowserBroker(deps: BrowserDeps) {
       return refused("browser_unavailable");
     }
     if (tab.lease.holder === "human") {
-      audit("refused", "human_has_control");
+      deps.appendAudit({
+        runId: run.id,
+        botId: run.botId,
+        status: "refused",
+        reason: "human_has_control",
+        tool: name,
+        initiator: "bot",
+        attended: run.attended,
+      });
       return refused("The owner has control of the browser. Try again later.");
     }
-    const decision = deps.decide(
-      { botId: run.botId, runId: run.id, tool: name, labels: browserLabels[name] },
-      context,
-    );
     switch (decision.kind) {
-      case "deny":
-        audit("denied", decision.reason);
-        return refused(decision.reason);
-      case "approve":
-        audit("approval");
-        return deps.requestApproval(run, { tool: name, args: data, digest });
       case "hand_off":
-        audit("hand_off", decision.reason);
         requestHandoff(run, tab, "hand_off", decision.reason);
         return answer({ status: "handed_off", reason: decision.reason, note: endTurn });
       case "allow":
-        audit("allowed");
         try {
           return await perform(run, name, data);
         } catch (error) {
@@ -467,15 +445,22 @@ export function createBrowserBroker(deps: BrowserDeps) {
 
 export type BrowserBroker = ReturnType<typeof createBrowserBroker>;
 
-const noLegs = { readsUntrusted: false, readsPrivate: false, sideEffect: false };
+const ApprovedCall = z.object({ input: z.record(z.string(), z.unknown()) });
+const Answer = z.object({ status: z.string() });
+
+// The owner approved it, so it runs as attended. Only a page actually acted on counts as done.
+export function browserExecutors(broker: Pick<BrowserBroker, "perform">) {
+  const execute: Execute = async ({ botId, runId, tool, payload }) => {
+    const { input } = ApprovedCall.parse(JSON.parse(payload));
+    const text = await broker.perform({ id: runId, botId, attended: true }, tool, input);
+    return { ok: Answer.safeParse(JSON.parse(text)).data?.status === "ok", output: text };
+  };
+  return browserTools.map(({ name }) => [name, execute] as const);
+}
 
 export function storeBrowserDeps(store: EventStore) {
   return {
-    // Until workstream 4 keeps a session's legs and reads the bot's manifest.
-    policyContext: (run: BrowserRun) => {
-      const bot = store.getBot(run.botId);
-      return bot && { profile: bot.profile, manifest: [], session: noLegs, attended: run.attended };
-    },
+    check: (run: BrowserRun, tool: string, args: unknown) => store.policy.check(run, tool, args),
     appendAudit: store.appendAudit,
     // The owner's own pause, or one for the engine, is left alone.
     setPaused: (botId: string, paused: boolean) => {
@@ -494,9 +479,7 @@ export function storeBrowserDeps(store: EventStore) {
         store.tasks.postFrom({ botId: run.botId, chainId, hop, depth }, room, "notify", text);
       }
     },
-    // Until workstream 5's continuations can hold a browser action.
-    requestApproval: () => refused("Browser actions that need approval can't be asked for yet."),
-  } satisfies Omit<BrowserDeps, "runtime" | "decide">;
+  } satisfies Omit<BrowserDeps, "runtime" | "requestApproval">;
 }
 
 export const noBrowser: BrowserRuntime = {

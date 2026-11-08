@@ -259,6 +259,7 @@ const bot: Bot = {
   access: "supervised",
   profile: "operator",
   boundary: "host",
+  manifest: [],
   avatarSeed: 7,
   projectPath: null,
 };

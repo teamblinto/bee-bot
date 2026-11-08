@@ -1,5 +1,4 @@
-import type { BotProfile } from "@beebot/contracts";
-import { z } from "zod";
+import { type BotProfile, browserGrant, Manifest } from "@beebot/contracts";
 
 // Static per tool, never taken from the model: the Rule of Two legs a call touches.
 export type ToolLabels = { readsUntrusted: boolean; readsPrivate: boolean; sideEffect: boolean };
@@ -14,10 +13,14 @@ export const profileLegs: Record<BotProfile, ToolLabels> = {
   operator: { readsUntrusted: false, readsPrivate: true, sideEffect: true },
 };
 
-// Grants as data, such as `gmail.read` or `gmail.send(to-allowlist)`. Egress hosts are kept apart,
-// in `bot_egress_hosts`.
-export const Manifest = z.array(z.string().trim().min(1).max(200));
-export type Manifest = z.infer<typeof Manifest>;
+// A manifest that doesn't parse grants nothing.
+export function parseManifest(text: string): Manifest {
+  try {
+    return Manifest.safeParse(JSON.parse(text)).data ?? [];
+  } catch {
+    return [];
+  }
+}
 
 export type ToolRule = {
   labels: ToolLabels;
@@ -67,13 +70,16 @@ const engineRules: Record<string, ToolRule> = {
   Bash: { labels: legs("readsPrivate", "sideEffect") },
 };
 
-// Slot for the browser sidecar (workstream 7), which owns the names. Every page is untrusted.
+// Every page is untrusted, and a click or a typed value can change something out there.
 const browserRules: Record<string, ToolRule> = {
-  browser_open: { labels: legs("readsUntrusted"), grant: "browser" },
-  browser_read: { labels: legs("readsUntrusted"), grant: "browser" },
-  browser_act: { labels: legs("readsUntrusted", "sideEffect"), grant: "browser" },
-  browser_type: { labels: legs("readsUntrusted", "sideEffect"), grant: "browser", typed: true },
-  browser_sign_in: { labels: legs("readsUntrusted"), grant: "browser", humanOnly: true },
+  browser_navigate: { labels: legs("readsUntrusted"), grant: browserGrant },
+  browser_snapshot: { labels: legs("readsUntrusted"), grant: browserGrant },
+  browser_click: { labels: legs("readsUntrusted", "sideEffect"), grant: browserGrant },
+  browser_type: {
+    labels: legs("readsUntrusted", "sideEffect"),
+    grant: browserGrant,
+    typed: true,
+  },
 };
 
 export const toolRules: Record<string, ToolRule> = {

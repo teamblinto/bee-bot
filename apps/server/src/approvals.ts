@@ -15,6 +15,7 @@ import {
 import { z } from "zod";
 
 import { type Decide, decide as policyDecide, type PolicyDecision } from "./broker.ts";
+import { browserToolNames } from "./browser.ts";
 import { waitingMessage } from "./continuations.ts";
 import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
@@ -44,6 +45,7 @@ const Arguments = z.object({
 // Runs the action a Box bot's owner approved, once. A throw means the outcome is unknown.
 export type Execute = (call: {
   botId: string;
+  runId: string;
   tool: string;
   payload: string;
 }) => Promise<{ ok: boolean; output: string }>;
@@ -78,7 +80,7 @@ export function boxVerdict(
 
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text);
 
-const Request = z.object({ tool: ApprovalTool, input: z.record(z.string(), z.unknown()) });
+const Request = z.object({ tool: z.string(), input: z.record(z.string(), z.unknown()) });
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -93,6 +95,12 @@ function stable(value: unknown): unknown {
 
 export const inputDigest = (tool: ApprovalTool, input: Record<string, unknown>) =>
   sha256(JSON.stringify(stable({ tool, input }))).digest("hex");
+
+const sealed = (payload: string, shown: string) => ({
+  payload,
+  shown,
+  digest: sha256(JSON.stringify({ payload, shown })).digest("hex"),
+});
 
 // Exactly what the model sent: the owner is approving this text.
 function detailText(
@@ -335,8 +343,45 @@ export function createApprovals({
     if (shown === undefined) {
       return undefined;
     }
-    const payload = JSON.stringify(stable({ tool, input, target }));
-    return { payload, shown, digest: sha256(JSON.stringify({ payload, shown })).digest("hex") };
+    return sealed(JSON.stringify(stable({ tool, input, target })), shown);
+  }
+
+  // A browser action is shown as exactly what the bot sent.
+  function resolveAny(botId: string, tool: string, input: Record<string, unknown>) {
+    const native = ApprovalTool.safeParse(tool);
+    if (native.success) {
+      return resolveCall(botId, native.data, input);
+    }
+    if (!browserToolNames.has(tool)) {
+      return undefined;
+    }
+    const exact = JSON.stringify(stable(input));
+    return sealed(JSON.stringify(stable({ tool, input })), `${tool}: ${exact}`);
+  }
+
+  // What the bot is told: the call waits, or it can't be asked for.
+  function openWaiting(
+    run: Pick<Run, "id" | "botId">,
+    kind: ContinuationKind,
+    tool: string,
+    input: Record<string, unknown>,
+    toolUseId: string,
+  ) {
+    const resolved = resolveAny(run.botId, tool, input);
+    if (!resolved) {
+      return "Refused: this can't be shown in full, so it can't be approved.";
+    }
+    const { id } = continuations.openContinuation({
+      ...resolved,
+      botId: run.botId,
+      runId: run.id,
+      toolUseId,
+      kind,
+      tool,
+      request: JSON.stringify({ tool, input }),
+      ttlMs: continuationTtlMs,
+    });
+    return waitingMessage(id);
   }
 
   function boxApprove(
@@ -355,24 +400,7 @@ export function createApprovals({
     if (verdict.answer === "deny") {
       return { behavior: "deny", message: verdict.message };
     }
-    const resolved = resolveCall(run.botId, tool, input);
-    if (!resolved) {
-      return {
-        behavior: "deny",
-        message: "Refused: this can't be shown in full, so it can't be approved.",
-      };
-    }
-    const { id } = continuations.openContinuation({
-      ...resolved,
-      botId: run.botId,
-      runId: run.id,
-      toolUseId,
-      kind: verdict.kind,
-      tool,
-      request: JSON.stringify({ tool, input }),
-      ttlMs: continuationTtlMs,
-    });
-    return { behavior: "deny", message: waitingMessage(id) };
+    return { behavior: "deny", message: openWaiting(run, verdict.kind, tool, input, toolUseId) };
   }
 
   // Claimed before it runs, and never run again: a crash from here on leaves it unknown.
@@ -384,7 +412,7 @@ export function createApprovals({
     }
     const { tool, input } = Request.parse(JSON.parse(row.request));
     const execute = executorFor(bot, tool);
-    if (!execute || resolveCall(row.botId, tool, input)?.digest !== row.digest) {
+    if (!execute || resolveAny(row.botId, tool, input)?.digest !== row.digest) {
       continuations.denyContinuation(id, "payload_changed");
       return;
     }
@@ -394,7 +422,12 @@ export function createApprovals({
     let status: "succeeded" | "failed" | "unknown" = "unknown";
     let output = "";
     try {
-      const result = await execute({ botId: row.botId, tool, payload: row.payload });
+      const result = await execute({
+        botId: row.botId,
+        runId: row.runId,
+        tool,
+        payload: row.payload,
+      });
       status = result.ok ? "succeeded" : "failed";
       output = capped(result.output, maxResultChars);
     } catch (error) {
@@ -529,6 +562,21 @@ export function createApprovals({
         return { behavior: "deny", message: after.message };
       }
       return decision;
+    },
+
+    // For a tool on /mcp that the broker says needs the owner: never held, as for a Box bot (R17).
+    requestApproval: (
+      run: Pick<Run, "id" | "botId">,
+      tool: string,
+      input: Record<string, unknown>,
+    ) => {
+      const bot = store.getBot(run.botId);
+      const executable = bot !== undefined && executorFor(bot, tool) !== undefined;
+      const verdict = boxVerdict({ kind: "approve" }, { surface: hasSurface(), executable });
+      if (verdict.answer === "wait") {
+        return openWaiting(run, verdict.kind, tool, input, "");
+      }
+      return verdict.answer === "deny" ? verdict.message : refusedText({ kind: "approve" });
     },
 
     decide: ({ approvalId, digest, decision }: Extract<Command, { type: "decide-approval" }>) => {

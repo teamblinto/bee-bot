@@ -62,10 +62,10 @@ describe("broker taint", () => {
     expect(store.policy.check(run, "memory_search", { query: "x" }).kind).toBe("allow");
     expect(legs(run.id)).toEqual({ a: 0, b: 1, c: 0, tainted: 0 });
     // Not in the manifest: refused, and the session stays clean of untrusted input.
-    expect(store.policy.check(run, "browser_open", { url: "https://x" }).kind).toBe("deny");
+    expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("deny");
     expect(legs(run.id)).toMatchObject({ a: 0 });
     db.prepare("UPDATE bots SET manifest = ? WHERE id = ?").run('["browser"]', bot.id);
-    expect(store.policy.check(run, "browser_open", { url: "https://x" }).kind).toBe("approve");
+    expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("approve");
     expect(legs(run.id)).toEqual({ a: 1, b: 1, c: 0, tainted: 1 });
   });
 

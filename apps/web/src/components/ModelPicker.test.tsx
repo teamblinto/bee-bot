@@ -247,6 +247,7 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   access: "supervised",
   profile: "operator",
   boundary: "host",
+  manifest: [],
   avatarSeed: 7,
   projectPath: null,
 });

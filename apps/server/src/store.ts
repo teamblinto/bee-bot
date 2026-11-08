@@ -37,6 +37,7 @@ import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
+import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
@@ -69,6 +70,7 @@ export function seedFromId(id: string) {
 }
 
 const IdRow = z.object({ id: z.string() });
+const BotRow = Bot.extend({ manifest: z.string().transform(parseManifest) });
 
 export const migrations: Array<{
   name: string;
@@ -864,7 +866,7 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.profile, b.boundary, b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
+    b.profile, b.boundary, b.manifest, b.avatar_seed AS avatarSeed, b.project_path AS projectPath`;
   const selectBots = db.prepare(
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
      ORDER BY b.rowid`,
@@ -1315,7 +1317,7 @@ export function openEventStore(dataDir: string) {
 
   const getBot = (id: string) => {
     const row = selectBot.get(id);
-    return row ? Bot.parse(row) : undefined;
+    return row ? BotRow.parse(row) : undefined;
   };
   const getRun = (id: string) => {
     const row = selectRun.get(id);
@@ -1422,7 +1424,7 @@ export function openEventStore(dataDir: string) {
       recordRun(RunRow.parse(parked));
       return;
     }
-    const { engineAccountId } = Bot.parse(selectBot.get(wake.botId));
+    const { engineAccountId } = BotRow.parse(selectBot.get(wake.botId));
     const id = NodeCrypto.randomUUID();
     const now = new Date().toISOString();
     const endedAt = status === "Refused" ? now : null;
@@ -1787,7 +1789,7 @@ export function openEventStore(dataDir: string) {
   }
 
   function clearEnginePauses(engineAccountId: string, reasons: PauseReason[] = enginePauses) {
-    for (const bot of z.array(Bot).parse(selectBots.all())) {
+    for (const bot of z.array(BotRow).parse(selectBots.all())) {
       const paused = bot.pauseReason && reasons.includes(bot.pauseReason);
       if (bot.engineAccountId === engineAccountId && paused) {
         setPause(bot.id, null);
@@ -1803,7 +1805,7 @@ export function openEventStore(dataDir: string) {
       db.exec("DELETE FROM memory_items; DELETE FROM memory_fts;");
       const botIds = new Set(
         z
-          .array(Bot)
+          .array(BotRow)
           .parse(selectBots.all())
           .map(({ id }) => id),
       );
@@ -1871,7 +1873,7 @@ export function openEventStore(dataDir: string) {
     ...ingest,
     // shortcut: sends the whole history, page it once rooms get long.
     state: (): ChatState => ({
-      bots: z.array(Bot).parse(selectBots.all()),
+      bots: z.array(BotRow).parse(selectBots.all()),
       accounts: z.array(EngineAccount).parse(selectAccounts.all()),
       messages: z.array(MessageRow).parse(selectMessages.all()),
       runs: z.array(Run).parse(selectLatestRuns.all()),
@@ -1909,7 +1911,7 @@ export function openEventStore(dataDir: string) {
         insertBot.run(id, name, personality, engineAccountId, model, avatarSeed, projectPath, now);
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
-        const bot = Bot.parse(selectBot.get(id));
+        const bot = BotRow.parse(selectBot.get(id));
         emit({ type: "bot.changed", bot });
         return bot;
       }),
@@ -1949,7 +1951,7 @@ export function openEventStore(dataDir: string) {
       }),
     botsWithoutSummary: () =>
       z
-        .array(Bot)
+        .array(BotRow)
         .parse(selectBots.all())
         .filter(({ personality, summary }) => personality && summary === null),
     setBotEngine: (id: string, fields: Pick<Bot, "model" | "effort" | "mode" | "access">) =>
@@ -1969,7 +1971,7 @@ export function openEventStore(dataDir: string) {
     // An owner's pause is left alone: its reason says what the owner has to undo.
     pauseReadyBots: (engineAccountId: string, reason: PauseReason) =>
       transaction(() => {
-        for (const bot of z.array(Bot).parse(selectBots.all())) {
+        for (const bot of z.array(BotRow).parse(selectBots.all())) {
           if (bot.engineAccountId === engineAccountId && bot.status === "ready") {
             setPause(bot.id, reason);
           }
@@ -2109,7 +2111,7 @@ export function openEventStore(dataDir: string) {
           endOpenFiring(routine.id, "skipped", "too_late");
           return "too_late";
         }
-        const { id: botId, roomId, status } = Bot.parse(selectBot.get(routine.botId));
+        const { id: botId, roomId, status } = BotRow.parse(selectBot.get(routine.botId));
         if (status === "paused") {
           return "bot_paused";
         }
@@ -2172,13 +2174,13 @@ export function openEventStore(dataDir: string) {
     queuedRuns: () => z.array(QueuedRun).parse(selectQueuedRuns.all()),
     botIds: () =>
       z
-        .array(Bot)
+        .array(BotRow)
         .parse(selectBots.all())
         .map(({ id }) => id),
     botStatus: (id: string) => getBot(id)?.status,
 
     wakeContext: (wake: Wake, now: string) => {
-      const bot = Bot.parse(selectBot.get(wake.botId));
+      const bot = BotRow.parse(selectBot.get(wake.botId));
       const account = EngineAccount.parse(selectAccount.get(bot.engineAccountId));
       const dayAgo = new Date(Date.parse(now) - 86_400_000).toISOString();
       return {
@@ -2227,7 +2229,7 @@ export function openEventStore(dataDir: string) {
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         pinInput.run(highSeq, id);
         recordRun(run);
-        const { name, personality, model, effort, mode, projectPath } = Bot.parse(
+        const { name, personality, model, effort, mode, projectPath } = BotRow.parse(
           selectBot.get(run.botId),
         );
         return {

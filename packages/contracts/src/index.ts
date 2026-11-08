@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 18;
+export const protocolVersion = 19;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -96,6 +96,11 @@ export type BotProfile = z.infer<typeof BotProfile>;
 export const BotBoundary = z.enum(["host", "box"]);
 export type BotBoundary = z.infer<typeof BotBoundary>;
 
+// Grants as data, such as `browser` or `gmail.send(to-allowlist)`.
+export const Manifest = z.array(z.string().trim().min(1).max(200)).max(100);
+export type Manifest = z.infer<typeof Manifest>;
+export const browserGrant = "browser";
+
 export const EngineModel = z.object({
   id: BotModel,
   label: z.string(),
@@ -129,6 +134,7 @@ export const Bot = z.object({
   access: BotAccess,
   profile: BotProfile,
   boundary: BotBoundary,
+  manifest: Manifest,
   avatarSeed: AvatarSeed,
   // The real path of the owner's folder. Null keeps the bot in its private workspace.
   projectPath: z.string().nullable(),
@@ -810,6 +816,7 @@ export const Command = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("delete-api-key"), engineAccountId: ApiKeyAccountId }),
   z.object({ type: z.literal("acknowledge-automated-access") }),
+  z.object({ type: z.literal("set-bot-manifest"), botId: z.uuid(), manifest: Manifest }),
 ]);
 export type Command = z.infer<typeof Command>;
 

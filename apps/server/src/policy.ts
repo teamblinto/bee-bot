@@ -1,7 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { type AuditPage, type Bot, BotProfile } from "@beebot/contracts";
+import { type AuditPage, type Bot, BotProfile, type Manifest } from "@beebot/contracts";
 import { z } from "zod";
 
 import { type AuditQuery, openAudit } from "./audit.ts";
@@ -9,7 +9,7 @@ import {
   type Decide,
   decide as brokerDecide,
   decideTool,
-  Manifest,
+  parseManifest,
   type PolicyDecision,
   ruleFor,
 } from "./broker.ts";
@@ -20,15 +20,6 @@ export type BrokerRun = { id: string; botId: string; attended: boolean };
 const flag = z.number().transform((value) => value === 1);
 const Legs = z.object({ readsUntrusted: flag, readsPrivate: flag, sideEffect: flag });
 const BotPolicy = z.object({ profile: BotProfile, manifest: z.string() });
-
-// A manifest that doesn't parse grants nothing.
-function parseManifest(text: string) {
-  try {
-    return Manifest.safeParse(JSON.parse(text)).data ?? [];
-  } catch {
-    return [];
-  }
-}
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -57,6 +48,7 @@ export function openPolicy(
   const { appendAudit, auditPage, brokenAuditRow } = openAudit(db);
   const selectBotPolicy = db.prepare("SELECT profile, manifest FROM bots WHERE id = ?");
   const updateProfile = db.prepare("UPDATE bots SET profile = ? WHERE id = ?");
+  const updateManifest = db.prepare("UPDATE bots SET manifest = ? WHERE id = ?");
   const selectLegs = db.prepare(
     `SELECT s.legs_untrusted AS readsUntrusted, s.legs_private AS readsPrivate,
        s.legs_side_effect AS sideEffect
@@ -131,6 +123,26 @@ export function openPolicy(
             attended: true,
             status: "profile_set",
             reason: profile,
+          });
+        }
+        return bot;
+      }),
+
+    // Takes effect at the next call: every call reads the manifest afresh.
+    setBotManifest: (botId: string, manifest: Manifest) =>
+      transaction(() => {
+        const sorted = [...new Set(manifest)].sort();
+        updateManifest.run(JSON.stringify(sorted), botId);
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+          appendAudit({
+            runId: null,
+            botId,
+            initiator: "human",
+            attended: true,
+            status: "manifest_set",
+            reason: sorted.join(",").slice(0, 200),
           });
         }
         return bot;

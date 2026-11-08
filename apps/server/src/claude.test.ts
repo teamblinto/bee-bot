@@ -373,6 +373,10 @@ describe("a turn", () => {
           "mcp__bee__handoff",
           "mcp__bee__ask_user",
           "mcp__bee__create_routine",
+          "mcp__bee__browser_navigate",
+          "mcp__bee__browser_snapshot",
+          "mcp__bee__browser_click",
+          "mcp__bee__browser_type",
         ],
       },
     });
@@ -513,6 +517,8 @@ describe("outcomes", () => {
     ["limit-overage", { kind: "completed", text: "noted" }],
     ["no-conversation", { kind: "session_lost" }],
     ["no-final-newline", { kind: "completed", text: "noted" }],
+    ["waiting-hook", { kind: "waiting", text: "noted" }],
+    ["tool-detail", { kind: "completed", text: "noted" }],
   ])("maps %s", async (scenario, expected) => {
     expect(await turn(scenario).outcome).toEqual(expected);
   });

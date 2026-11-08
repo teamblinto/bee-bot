@@ -106,6 +106,36 @@ it("switches the engine's login before saving, and only when it changed", async 
   });
 });
 
+it("grants the browser on save, keeping the bot's other grants", async () => {
+  const bot: Bot = {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "Ada",
+    personality: "",
+    summary: null,
+    status: "ready",
+    pauseReason: null,
+    roomId: "r",
+    engineAccountId: "claude",
+    model: "sonnet",
+    effort: null,
+    mode: "build",
+    access: "supervised",
+    profile: "operator",
+    boundary: "box",
+    manifest: ["gmail.read"],
+    avatarSeed: 7,
+    projectPath: null,
+  };
+  postCommand.mockResolvedValue({ ok: true, body: bot });
+  show(bot);
+  act(() => host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.click());
+  await act(async () => host.querySelector("form")?.requestSubmit());
+  expect(postCommand.mock.calls.map(([command]) => command)).toEqual([
+    expect.objectContaining({ type: "update-bot" }),
+    { type: "set-bot-manifest", botId: bot.id, manifest: ["gmail.read", "browser"] },
+  ]);
+});
+
 it("warns when editing a bot that's already on Codex", () => {
   show({
     id: "b",
@@ -122,6 +152,7 @@ it("warns when editing a bot that's already on Codex", () => {
     access: "supervised",
     profile: "operator",
     boundary: "host",
+    manifest: [],
     avatarSeed: 7,
     projectPath: null,
   });

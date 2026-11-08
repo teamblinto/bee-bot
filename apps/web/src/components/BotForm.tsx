@@ -1,4 +1,11 @@
-import { Bot, BotProfile, defaultBotModel, EngineAccountId, EngineLane } from "@beebot/contracts";
+import {
+  Bot,
+  BotProfile,
+  browserGrant,
+  defaultBotModel,
+  EngineAccountId,
+  EngineLane,
+} from "@beebot/contracts";
 import { Dices } from "lucide-react";
 import {
   type FormEvent,
@@ -59,6 +66,7 @@ export function BotForm({
   );
   const [laneChoice, setLaneChoice] = useState<EngineLane>();
   const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
+  const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? false);
   const [avatarSeed, setAvatarSeed] = useState(() => bot?.avatarSeed ?? randomSeed());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -105,9 +113,19 @@ export function BotForm({
       created && created.profile !== profile
         ? await postCommand({ type: "set-bot-profile", botId: created.id, profile })
         : undefined;
+    const manifestResult =
+      created && created.manifest.includes(browserGrant) !== browser
+        ? await postCommand({
+            type: "set-bot-manifest",
+            botId: created.id,
+            manifest: browser
+              ? [...created.manifest, browserGrant]
+              : created.manifest.filter((grant) => grant !== browserGrant),
+          })
+        : undefined;
     saving.current = false;
     setBusy(false);
-    const last = profileResult ?? result;
+    const last = manifestResult ?? profileResult ?? result;
     const saved = last.ok ? Bot.safeParse(last.body).data : undefined;
     if (saved) {
       onSaved(saved);
@@ -209,6 +227,18 @@ export function BotForm({
       </label>
       <p id="profile-help" className="text-small text-ink-secondary">
         {profileLabels[profile].help} With nobody watching, it is refused.
+      </p>
+      <label className="flex items-center gap-2 text-label text-ink-secondary">
+        <input
+          type="checkbox"
+          aria-describedby="browser-help"
+          checked={browser}
+          onChange={(event) => setBrowser(event.target.checked)}
+        />
+        Browser
+      </label>
+      <p id="browser-help" className="text-small text-ink-secondary">
+        Lets the bot open web pages in its own browser. Every page counts as untrusted content.
       </p>
       <label className={labelClass}>
         Project folder (optional)
