@@ -947,9 +947,13 @@ export function openEventStore(dataDir: string) {
   );
   // A tainted bot's text is untrusted input: leg A, and the memory gate's flag.
   const taintScope = db.prepare("UPDATE scopes SET tainted = 1, legs_untrusted = 1 WHERE id = ?");
-  const selectUntrusted = db.prepare("SELECT legs_untrusted AS untrusted FROM scopes WHERE id = ?");
-  const isUntrusted = (scopeId: string) =>
-    z.object({ untrusted: z.number() }).parse(selectUntrusted.get(scopeId)).untrusted === 1;
+  const selectHeldLegs = db.prepare(
+    "SELECT legs_untrusted AS untrusted, legs_private AS private FROM scopes WHERE id = ?",
+  );
+  const heldLegs = (scopeId: string) =>
+    z.object({ untrusted: z.number(), private: z.number() }).parse(selectHeldLegs.get(scopeId));
+  const isUntrusted = (scopeId: string) => heldLegs(scopeId).untrusted === 1;
+  const holdPrivate = db.prepare("UPDATE scopes SET legs_private = 1 WHERE id = ?");
   // A scope's input is every message in its room but its own bot's. Bot rows from before bot_id
   // are the scope's own bot.
   const inputColumns = `m.id, m.body, m.event_seq AS seq, m.author, m.bot_id AS botId, b.name,
@@ -1513,10 +1517,26 @@ export function openEventStore(dataDir: string) {
     return allowed.readsPrivate && (allowed.readsUntrusted || !isUntrusted(scopeId));
   };
 
+  const hasTaintedInput = (scope: Scope, highSeq: number) =>
+    selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId) !== undefined;
+
   const taintFromInput = (scope: Scope, highSeq: number) => {
-    if (selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId)) {
+    if (hasTaintedInput(scope, highSeq)) {
       taintScope.run(scope.id);
     }
+  };
+
+  // A profile that may not read untrusted input could still answer it from private data its
+  // transcript already holds, and a reply passes no broker check. So that input opens a new session.
+  const needsCleanSession = (scope: Scope, profile: BotProfile, highSeq: number) => {
+    const held = heldLegs(scope.id);
+    return (
+      scope.sessionStarted &&
+      !profileLegs[profile].readsUntrusted &&
+      held.private === 1 &&
+      held.untrusted === 0 &&
+      hasTaintedInput(scope, highSeq)
+    );
   };
 
   // A pending wake on a scope already carries new input, so a burst coalesces into it.
@@ -2299,18 +2319,29 @@ export function openEventStore(dataDir: string) {
           return undefined;
         }
         const run = RunRow.parse(row);
-        const scope = getScope(run.scopeId);
-        const sessionId = scope.sessionId ?? NodeCrypto.randomUUID();
-        if (!scope.sessionId) {
-          saveSession.run(sessionId, scope.id);
-        }
-        const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
-        pinInput.run(highSeq, id);
-        taintFromInput(scope, highSeq);
-        recordRun(run);
         const { name, personality, model, effort, mode, projectPath, profile } = BotRow.parse(
           selectBot.get(run.botId),
         );
+        let scope = getScope(run.scopeId);
+        const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
+        let sessionId = scope.sessionId;
+        if (!sessionId || needsCleanSession(scope, profile, highSeq)) {
+          sessionId = NodeCrypto.randomUUID();
+          saveSession.run(sessionId, scope.id);
+          scope = getScope(scope.id);
+        }
+        pinInput.run(highSeq, id);
+        taintFromInput(scope, highSeq);
+        recordRun(run);
+        // Memory is private data: a Researcher never holds it (§12), and an Operator only while its
+        // session has taken in nothing untrusted, since its reply can reach a bot. The session
+        // holds it from here on, so the broker counts it.
+        const memory = withMemory(profile, scope.id)
+          ? buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId)))
+          : "";
+        if (memory) {
+          holdPrivate.run(scope.id);
+        }
         return {
           id,
           attended: Attended.parse(selectWakeAttended.get(run.wakeId)).attended,
@@ -2327,11 +2358,7 @@ export function openEventStore(dataDir: string) {
             effort,
             mode,
             projectPath,
-            // Memory is private data: a Researcher never holds it (§12), and an Operator only
-            // while its session has taken in nothing untrusted, since its reply can reach a bot.
-            memory: withMemory(profile, scope.id)
-              ? buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId)))
-              : "",
+            memory,
           },
         };
       }),
@@ -2359,6 +2386,11 @@ export function openEventStore(dataDir: string) {
       if (highSeq === undefined || !selectAnyPendingWake.get(scope.id)) {
         return undefined;
       }
+      // Left to the pending wake, whose claim opens the new session.
+      const { profile } = BotRow.parse(selectBot.get(run.botId));
+      if (needsCleanSession(scope, profile, highSeq)) {
+        return undefined;
+      }
       return { text: inputText(scope, input), highSeq };
     },
 
@@ -2378,12 +2410,18 @@ export function openEventStore(dataDir: string) {
 
     // The new ID is durable before the engine starts. If this turn dies first, the next one still
     // finds an unstarted session and sends the digest.
-    restartSession: (id: string) =>
+    // The new session gets the same input and memory, so it holds the same legs.
+    restartSession: (id: string, heldMemory: boolean) =>
       transaction(() => {
         const { inputHighSeq, scopeId } = RunRow.parse(selectRun.get(id));
         const sessionId = NodeCrypto.randomUUID();
         saveSession.run(sessionId, scopeId);
-        return { sessionId, prompt: turnPrompt(getScope(scopeId), inputHighSeq ?? 0) };
+        const scope = getScope(scopeId);
+        taintFromInput(scope, inputHighSeq ?? 0);
+        if (heldMemory) {
+          holdPrivate.run(scopeId);
+        }
+        return { sessionId, prompt: turnPrompt(scope, inputHighSeq ?? 0) };
       }),
 
     finishRun: (id: string, bootId: string, finished: FinishedRun) =>

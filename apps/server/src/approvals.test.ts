@@ -1567,6 +1567,7 @@ describe("in Box mode a tool call", () => {
     const { send, waiting, answer, bodies } = await boxBoot({ runTurn: hookTurn });
     await send("go");
     const card = await waiting();
+    await vi.waitFor(() => expect(answers).toHaveLength(4));
     const decision = (answer: unknown) =>
       (
         answer as {

@@ -74,8 +74,11 @@ describe("broker taint", () => {
     store.policy.check(run, "send_message", { text: "x" });
     store.policy.check(run, "Read", { file_path: "a" });
     expect(legs(run.id)).toMatchObject({ b: 1, c: 1 });
-    store.restartSession(run.id);
+    store.restartSession(run.id, false);
     expect(legs(run.id)).toEqual({ a: 0, b: 0, c: 0, tainted: 0 });
+    // A new session launched with memory holds it again.
+    store.restartSession(run.id, true);
+    expect(legs(run.id)).toEqual({ a: 0, b: 1, c: 0, tainted: 0 });
   });
 
   it("follows a profile change on the next call", () => {
