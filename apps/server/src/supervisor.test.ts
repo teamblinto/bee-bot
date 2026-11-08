@@ -1,4 +1,3 @@
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import { once } from "node:events";
 import * as NodeFS from "node:fs";
@@ -6,7 +5,6 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeReadline from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -24,6 +22,7 @@ import { boxLayout } from "./boxEngine.ts";
 import { createFakeBoxRuntime } from "./boxRuntime.ts";
 import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome } from "./engine.ts";
+import { daemonTestTimeoutMs, spawnBeebotd } from "./fixtures/beebotd.ts";
 import { startServer } from "./server.ts";
 import { buildDigest, type EventStore, openEventStore } from "./store.ts";
 
@@ -677,61 +676,53 @@ describe("restart", () => {
     expect(response.status).toBe(409);
   });
 
-  it("survives a hard kill mid-tool with history intact and the effect never repeated", async () => {
-    const probe = NodeNet.createServer().listen(0, "127.0.0.1");
-    await once(probe, "listening");
-    const { port } = probe.address() as NodeNet.AddressInfo;
-    await new Promise((resolve) => probe.close(resolve));
+  it(
+    "survives a hard kill mid-tool with history intact and the effect never repeated",
+    async () => {
+      const daemon = spawnBeebotd({
+        port: 0,
+        token,
+        dataDir,
+        allowedOrigins: [],
+        fakeEngine: true,
+        claudeCommand: ["beebot-no-such-cli"],
+      });
+      cleanups.push(daemon.kill);
+      const port = await daemon.listening;
 
-    const entry = NodePath.join(import.meta.dirname, "index.ts");
-    const child = NodeChildProcess.spawn(process.execPath, [entry], {
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    cleanups.push(() => void child.kill());
-    const bootstrap = {
-      port,
-      token,
-      dataDir,
-      allowedOrigins: [],
-      fakeEngine: true,
-      claudeCommand: ["beebot-no-such-cli"],
-    };
-    child.stdin.write(`${JSON.stringify(bootstrap)}\n`);
-    for await (const line of NodeReadline.createInterface({ input: child.stderr })) {
-      if (line.includes("listening")) {
-        break;
-      }
-    }
+      await connect(port).ready;
+      const created = await postCommand(port, {
+        type: "create-bot",
+        name: "Ada",
+        personality: "",
+        engineAccountId: "fake",
+      });
+      const bot = (await created.json()) as Bot;
+      await postCommand(port, {
+        type: "send-message",
+        messageId: NodeCrypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "/approve Bash ls",
+      });
+      await vi.waitFor(
+        () =>
+          expect(query("SELECT status FROM external_effects")).toEqual([{ status: "intended" }]),
+        { timeout: daemonTestTimeoutMs },
+      );
+      expect(query("SELECT status FROM runs")).toEqual([{ status: "Running" }]);
+      daemon.child.kill("SIGKILL");
+      await daemon.exited;
 
-    await connect(port).ready;
-    const created = await postCommand(port, {
-      type: "create-bot",
-      name: "Ada",
-      personality: "",
-      engineAccountId: "fake",
-    });
-    const bot = (await created.json()) as Bot;
-    await postCommand(port, {
-      type: "send-message",
-      messageId: NodeCrypto.randomUUID(),
-      roomId: bot.roomId,
-      body: "/approve Bash ls",
-    });
-    await vi.waitFor(() =>
-      expect(query("SELECT status FROM external_effects")).toEqual([{ status: "intended" }]),
-    );
-    expect(query("SELECT status FROM runs")).toEqual([{ status: "Running" }]);
-    child.kill("SIGKILL");
-    await once(child, "exit");
-
-    const after = scriptedEngine();
-    const { store } = await boot(after.runTurn);
-    expect(run(store, bot)?.status).toBe("Interrupted");
-    expect(query("SELECT status FROM external_effects")).toEqual([{ status: "uncertain" }]);
-    expect(store.state().messages.map(({ body }) => body)).toEqual(["/approve Bash ls"]);
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-    expect(after.turns).toEqual([]);
-  }, 20_000);
+      const after = scriptedEngine();
+      const { store } = await boot(after.runTurn);
+      expect(run(store, bot)?.status).toBe("Interrupted");
+      expect(query("SELECT status FROM external_effects")).toEqual([{ status: "uncertain" }]);
+      expect(store.state().messages.map(({ body }) => body)).toEqual(["/approve Bash ls"]);
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      expect(after.turns).toEqual([]);
+    },
+    2 * daemonTestTimeoutMs,
+  );
 });
 
 describe("delivery", () => {
