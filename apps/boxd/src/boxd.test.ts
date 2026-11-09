@@ -239,7 +239,7 @@ describe("boxd", () => {
     expect(browserExecs()[0]?.args.slice(-3)).toEqual([
       "socat",
       "STDIO",
-      "UNIX-CONNECT:/tmp/bee-display/view.sock",
+      "UNIX-CONNECT:/tmp/bee-display/view.sock,retry=50,interval=0.1",
     ]);
     expect(await call("display", { channel: 4, mode: "control", lease })).toMatchObject({
       ok: true,

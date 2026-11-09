@@ -339,21 +339,20 @@ export function execReapArgs(container: string) {
 }
 
 // The sidecar's DevTools, which Chromium binds to its own loopback. The server reaches it only
-// through boxd, so no network path to it exists from any box or from the egress proxy.
-export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222"];
+// through boxd, so no network path to it exists from any box or from the egress proxy. A box that
+// just started may not be listening yet, so the connect retries.
+export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222,retry=100,interval=0.1"];
 
 // The sidecar desktop's VNC servers listen on Unix sockets and no TCP port. The view-only one runs
 // all the time; a lease's input-capable one exists only while beebotd holds its `control` attach.
 const displayDir = "/tmp/bee-display";
 const controlSocket = (lease: string) => `${displayDir}/control-${lease}.sock`;
 
-// A lease's server can still be starting when its viewer connects, so that connect retries.
+// The box, or a lease's server, can still be starting when its viewer connects, so that retries.
 export const displayArgv = (lease?: string) => [
   "socat",
   "STDIO",
-  lease === undefined
-    ? `UNIX-CONNECT:${displayDir}/view.sock`
-    : `UNIX-CONNECT:${controlSocket(lease)},retry=50,interval=0.1`,
+  `UNIX-CONNECT:${lease === undefined ? `${displayDir}/view.sock` : controlSocket(lease)},retry=50,interval=0.1`,
 ];
 
 // One driver: no -shared, and no -viewonly. A killed x11vnc leaves its socket file behind, so it is

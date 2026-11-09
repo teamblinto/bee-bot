@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
+  cdpArgv,
   controlArgv,
   controlCleanupArgs,
   displayArgv,
@@ -200,6 +201,13 @@ describe.skipIf(!podmanUp)("box image", () => {
 
   it("browser keeps headed Chromium's sandbox under the shipped seccomp profile", async () => {
     const id = await startBox("browser", ["profile"], ["-p", "127.0.0.1::9223"]);
+
+    // A viewer can open a box that has only just started: boxd's connects wait for it to listen.
+    const banner = `sleep 1 | ${displayArgv().join(" ")}`;
+    expect((await exec(id, banner)).stdout).toMatch(/^RFB /);
+    const request = "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    const devtools = `{ printf '${request}'; sleep 1; } | ${cdpArgv.join(" ")}`;
+    expect((await exec(id, devtools)).stdout).toContain("webSocketDebuggerUrl");
 
     // boxd reaches DevTools and the VNC socket through `podman exec`. Chromium starts last, so
     // once DevTools listens the desktop is up, and it adds no TCP listener of its own.
