@@ -58,9 +58,10 @@ export type Bootstrap = {
   testUpstreams?: Record<string, string>;
 };
 
-// `cdp` attaches to the sidecar's DevTools, `display` to its view-only VNC socket, `egress` to the
-// proxy's control socket, `put` writes a file into the bot's read-only directory, and `collect`
-// copies a download into the workspace.
+// `cdp` attaches to the sidecar's DevTools, `display` to its view-only VNC socket (or, with a lease,
+// to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
+// the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
+// read-only directory, and `collect` copies a download into the workspace.
 export type Verb =
   | "create"
   | "start"
@@ -72,7 +73,7 @@ export type Verb =
   | "egress"
   | "put"
   | "collect"
-  | "display";
+  | "control";
 
 export type ExecRequest = {
   argv: string[];
@@ -90,6 +91,7 @@ export type Request = {
   account?: string;
   channel?: number;
   mode?: "view" | "control";
+  lease?: string;
   put?: { name: string; content: string };
   collect?: { file: string; name: string };
 };
@@ -103,6 +105,8 @@ export type Hello = { ready: true } | { fatal: string };
 export const botIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const accountPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const botFileName = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+// A takeover lease ID names a socket file, so only a lowercase UUID passes.
+export const leasePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // Not a bot ID, so no bot's token opens the proxy's control socket.
 export const egressId = "-egress";

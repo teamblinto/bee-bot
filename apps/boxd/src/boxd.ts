@@ -15,6 +15,9 @@ import {
   boxState,
   cdpArgv,
   containerSpec,
+  controlArgv,
+  controlCleanupArgs,
+  controlReapArgs,
   copyInArgs,
   copyOutArgs,
   createArgs,
@@ -42,6 +45,7 @@ import {
   egressId,
   frame,
   jsonFrame,
+  leasePattern,
   sameHex,
 } from "./protocol.ts";
 
@@ -69,6 +73,7 @@ const verbs = new Set<string>([
   "exec",
   "cdp",
   "display",
+  "control",
   "egress",
   "put",
   "collect",
@@ -109,6 +114,8 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
     Number.isInteger(channel) &&
     channel >= 1 &&
     channel < boxdChannels;
+  const isLease = (lease: unknown): lease is string =>
+    typeof lease === "string" && leasePattern.test(lease);
   const field = (object: unknown, key: string) =>
     object && typeof object === "object" ? Reflect.get(object, key) : undefined;
   switch (verb) {
@@ -128,13 +135,25 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
     }
     case "display": {
       const channel = get("channel");
+      const mode = get("mode");
+      const lease = get("lease");
       if (!isChannel(channel)) {
         return { id, error: "bad channel" };
       }
-      // Control (input) waits for the takeover lease.
-      return get("mode") === "view"
-        ? { ...base, channel, mode: "view" }
+      if (mode === "view") {
+        return { ...base, channel, mode };
+      }
+      return mode === "control" && isLease(lease)
+        ? { ...base, channel, mode, lease }
         : { id, error: "bad mode" };
+    }
+    case "control": {
+      const channel = get("channel");
+      const lease = get("lease");
+      if (!isChannel(channel)) {
+        return { id, error: "bad channel" };
+      }
+      return isLease(lease) ? { ...base, channel, lease } : { id, error: "bad lease" };
     }
     case "put": {
       const put = get("put");
@@ -403,17 +422,25 @@ export function createBoxd(options: BoxdOptions) {
     entry.child.kill();
   }
 
-  function attach(channel: number, botId: string, child: Child, stop: () => Promise<void>) {
+  function attach(
+    channel: number,
+    botId: string,
+    child: Child,
+    stop: () => Promise<void>,
+    after: () => Promise<unknown> = async () => {},
+  ) {
     attached.set(channel, { child, botId, stop });
     child.stdout.on("data", (chunk: Buffer) => send(frame(channel, Kind.data, chunk)));
     child.stdout.on("end", () => send(frame(channel, Kind.eof)));
-    void child.exited.then((code) => {
+    void child.exited.then(async (code) => {
+      await after().catch(() => {});
       attached.delete(channel);
       send(frame(channel, Kind.exit, JSON.stringify(code)));
     });
   }
 
-  async function exec(box: Box, role: Role, request: ExecRequest) {
+  // `cleanup` runs in the same container once the process is gone, before the exit is reported.
+  async function exec(box: Box, role: Role, request: ExecRequest, cleanup?: string[]) {
     if (attached.has(request.channel)) {
       throw new Error(`channel ${request.channel} in use`);
     }
@@ -421,9 +448,15 @@ export function createBoxd(options: BoxdOptions) {
     const container = boxNames(box).container[role];
     const execId = NodeCrypto.randomUUID();
     const child = podman.spawn(execArgs(container, execId, request), request.env);
-    attach(request.channel, box.botId, child, async () => {
-      await podman.run(execKillArgs(container, execId));
-    });
+    attach(
+      request.channel,
+      box.botId,
+      child,
+      async () => {
+        await podman.run(execKillArgs(container, execId));
+      },
+      async () => cleanup && podman.run(cleanup),
+    );
   }
 
   async function put(box: Box, name: string, content: string) {
@@ -492,7 +525,22 @@ export function createBoxd(options: BoxdOptions) {
           await exec(box, "browser", { argv: cdpArgv, env: {}, channel: request.channel ?? 0 });
           return { id, ok: true };
         case "display":
-          await exec(box, "browser", { argv: displayArgv, env: {}, channel: request.channel ?? 0 });
+          await exec(box, "browser", {
+            argv: displayArgv(request.lease),
+            env: {},
+            channel: request.channel ?? 0,
+          });
+          return { id, ok: true };
+        case "control":
+          if (request.lease === undefined) {
+            return { id, ok: false, error: "bad lease" };
+          }
+          await exec(
+            box,
+            "browser",
+            { argv: controlArgv(request.lease), env: {}, channel: request.channel ?? 0 },
+            controlCleanupArgs(boxNames(box).container.browser, request.lease),
+          );
           return { id, ok: true };
         case "put":
           if (request.put === undefined) {
@@ -596,6 +644,9 @@ export function createBoxd(options: BoxdOptions) {
       for (const role of roles) {
         for (const { name } of await owned(role)) {
           await podman.run(execReapArgs(name));
+          if (role === "browser") {
+            await podman.run(controlReapArgs(name));
+          }
         }
       }
     },

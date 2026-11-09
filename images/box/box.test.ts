@@ -1,9 +1,16 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import {
+  controlArgv,
+  controlCleanupArgs,
+  displayArgv,
+  execArgs,
+  execKillArgs,
+} from "@beebot/boxd/policy";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { runArgs, type BoxEntry } from "./index.ts";
@@ -205,8 +212,9 @@ describe.skipIf(!podmanUp)("box image", () => {
       "1280 800",
     );
 
-    // A pointer move to 640,400 sent as RFB bytes; only a server without -viewonly obeys it.
-    const pointAt = (socket: string) =>
+    // A pointer move to 640,400 sent as RFB bytes through boxd's own display argv; only a server
+    // without -viewonly obeys it.
+    const pointAt = (argv: string[]) =>
       podmanOk([
         "exec",
         "-e",
@@ -214,29 +222,30 @@ describe.skipIf(!podmanUp)("box image", () => {
         id,
         "sh",
         "-c",
-        `xdotool mousemove 100 100; { printf 'RFB 003.008\\n\\001\\001\\005\\000\\002\\200\\001\\220'; sleep 1; } | socat STDIO UNIX-CONNECT:${socket} >/dev/null; xdotool getmouselocation`,
+        `xdotool mousemove 100 100; { printf 'RFB 003.008\\n\\001\\001\\005\\000\\002\\200\\001\\220'; sleep 1; } | ${argv.join(" ")} >/dev/null; xdotool getmouselocation`,
       ]);
-    expect(await pointAt("/tmp/bee-display/view.sock")).toMatch(/^x:100 y:100 /);
-    await podmanOk([
-      "exec",
-      "-d",
-      id,
-      "x11vnc",
-      "-display",
-      ":1",
-      "-unixsock",
-      "/tmp/control.sock",
-      "-rfbport",
-      "0",
-      "-rfbportv6",
-      "-1",
-      "-nopw",
-    ]);
-    await until(
-      async () => ((await exec(id, "test -S /tmp/control.sock")).code === 0 ? true : undefined),
-      "control socket",
-    );
-    expect(await pointAt("/tmp/control.sock")).toMatch(/^x:640 y:400 /);
+    expect(await pointAt(displayArgv())).toMatch(/^x:100 y:100 /);
+
+    // A lease's control server, started and killed the way boxd does it. The viewer connects
+    // while the server may still be starting.
+    const lease = randomUUID();
+    const socket = `/tmp/bee-display/control-${lease}.sock`;
+    const hasSocket = async () => (await exec(id, `test -S ${socket}`)).code === 0;
+    const running = async () =>
+      (await exec(id, `grep -l "control-${lease}.soc[k]" /proc/[0-9]*/cmdline`)).stdout.trim() !==
+      "";
+    expect(await hasSocket()).toBe(false);
+    const execId = randomUUID();
+    const server = podman(execArgs(id, execId, { argv: controlArgv(lease) }));
+    expect(await pointAt(displayArgv(lease))).toMatch(/^x:640 y:400 /);
+    expect(await hasSocket()).toBe(true);
+    expect(await pointAt(displayArgv())).toMatch(/^x:100 y:100 /);
+    await podmanOk(execKillArgs(id, execId));
+    await server;
+    expect(await running()).toBe(false);
+    await podmanOk(controlCleanupArgs(id, lease));
+    expect(await hasSocket()).toBe(false);
+    expect(await listeners(id)).toEqual(["0100007F:2406"]);
 
     // Only for this test: a relay so the WebSocket below can reach DevTools from the host.
     await podmanOk(["exec", "-d", id, "socat", "TCP-LISTEN:9223,fork", "TCP:127.0.0.1:9222"]);

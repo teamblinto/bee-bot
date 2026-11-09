@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     "./install": "./src/install.ts",
+    "./policy": "./src/policy.ts",
     "./protocol": "./src/protocol.ts",
     "./testing": "./src/testing.ts"
   },
