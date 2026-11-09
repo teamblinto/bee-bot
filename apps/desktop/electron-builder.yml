@@ -15,5 +15,20 @@ files:
 extraResources:
   - from: ../../THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
+  # What the server copies into the Podman machine, outside the asar so Podman can read it.
+  - from: ../boxd/src
+    to: box/apps/boxd/src
+    filter: ["*.ts", "!*.test.ts"]
+  - from: ../boxd/egress/dist/egress.mjs
+    to: box/apps/boxd/egress/dist/egress.mjs
+  - from: ../../images/box
+    to: box/images/box
+    filter:
+      - Containerfile
+      - .containerignore
+      - "*.sh"
+      - "*.json"
+      - "*.conf"
+      - "*.xml"
 win:
   target: nsis

@@ -19,6 +19,11 @@ import { loadVaultKey } from "./vault.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
 
+// The server inherits this: boxd's sources and the box image ship beside the app, not in a repo.
+if (app.isPackaged) {
+  process.env.BEEBOT_BOX_ROOT = NodePath.join(process.resourcesPath, "box");
+}
+
 // Windows drops notifications from an app whose ID doesn't match its Start Menu shortcut.
 if (process.platform === "win32") {
   app.setAppUserModelId("com.teamblinto.beebot");

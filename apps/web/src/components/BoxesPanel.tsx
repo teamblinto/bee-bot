@@ -14,7 +14,7 @@ function Check({ label, done }: { label: string; done: boolean }) {
 
 function statusLine(availability: BoxAvailability) {
   if (availability.settingUp) {
-    return "Setting up. Building the box image the first time takes several minutes.";
+    return availability.problem ?? "Setting up.";
   }
   return availability.available ? "Boxes are ready." : availability.problem;
 }
@@ -97,7 +97,7 @@ export function BoxesPanel() {
           <button
             type="button"
             className="button button-primary"
-            disabled={busy || settingUp || !machineFound}
+            disabled={busy || settingUp}
             onClick={() => void run({ type: "set-up-boxes" })}
           >
             Set up boxes

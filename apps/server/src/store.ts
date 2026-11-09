@@ -651,6 +651,11 @@ export const migrations: Array<{
     ALTER TABLE bots ADD COLUMN egress_any_site INTEGER NOT NULL DEFAULT 1;
     UPDATE bots SET access = 'full';`,
   },
+  {
+    name: "box_machine_set_up",
+    // The Podman machine boxes last came up in, which Bee starts again after a reboot.
+    sql: "ALTER TABLE settings ADD COLUMN box_machine_set_up TEXT",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1191,6 +1196,8 @@ export function openEventStore(dataDir: string) {
   );
   const selectBoxMachine = db.prepare("SELECT box_machine AS machine FROM settings");
   const updateBoxMachine = db.prepare("UPDATE settings SET box_machine = ?");
+  const selectBoxMachineSetUp = db.prepare("SELECT box_machine_set_up AS machine FROM settings");
+  const updateBoxMachineSetUp = db.prepare("UPDATE settings SET box_machine_set_up = ?");
   const { environmentId } = z
     .object({ environmentId: z.string().min(1) })
     .parse(db.prepare("SELECT environment_id AS environmentId FROM settings").get());
@@ -2065,6 +2072,11 @@ export function openEventStore(dataDir: string) {
       z.object({ machine: z.string().nullable() }).parse(selectBoxMachine.get()).machine,
     setBoxMachine: (machine: string) => {
       updateBoxMachine.run(machine);
+    },
+    boxMachineSetUp: () =>
+      z.object({ machine: z.string().nullable() }).parse(selectBoxMachineSetUp.get()).machine,
+    setBoxMachineSetUp: (machine: string) => {
+      updateBoxMachineSetUp.run(machine);
     },
 
     createBot: ({
