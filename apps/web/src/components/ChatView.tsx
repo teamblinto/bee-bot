@@ -1,5 +1,5 @@
 import type { Bot } from "@beebot/contracts";
-import { Ellipsis, Folder, PanelLeft, ShieldOff } from "lucide-react";
+import { Ellipsis, Folder, Monitor, PanelLeft, ShieldOff } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { connectionLines, folderName, pauseLine, runLine } from "../labels";
@@ -13,12 +13,12 @@ import {
 import { buildTranscript } from "../transcript";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
-import { HandoffView } from "./HandoffView";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
+import { useWorkspace, Workspace } from "./Workspace";
 
 const menuItemClass =
   "w-full rounded-field px-2.5 py-1.5 text-left text-small transition-colors hover:bg-hover disabled:text-ink-faint";
@@ -31,7 +31,6 @@ function BotMenu({
   onMemory,
   onRoutines,
   onLogin,
-  onBrowser,
 }: {
   bot: Bot;
   connected: boolean;
@@ -40,7 +39,6 @@ function BotMenu({
   onMemory: () => void;
   onRoutines: () => void;
   onLogin: () => void;
-  onBrowser: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -78,15 +76,6 @@ function BotMenu({
             Log in
           </button>
         )}
-        <button
-          type="button"
-          {...hide}
-          className={menuItemClass}
-          disabled={!connected}
-          onClick={onBrowser}
-        >
-          Browser
-        </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
           Edit
         </button>
@@ -124,6 +113,7 @@ export function ChatView({
   connection,
   composerText,
   onComposerText,
+  openComputer,
   onEdit,
   onOpenDrawer,
 }: {
@@ -131,6 +121,7 @@ export function ChatView({
   connection: ConnectionState;
   composerText: string;
   onComposerText: (update: (current: string) => string) => void;
+  openComputer: boolean;
   onEdit: () => void;
   onOpenDrawer: () => void;
 }) {
@@ -167,7 +158,7 @@ export function ChatView({
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
-  const [browserOpen, setBrowserOpen] = useState(false);
+  const workspace = useWorkspace(bot, run, tools, connection.activity[bot.id], openComputer);
 
   useEffect(() => {
     if (lastBotMessageId && lastBotMessageId !== seenId) {
@@ -183,103 +174,135 @@ export function ChatView({
   ].filter((line) => typeof line === "string");
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col" aria-label={`Chat with ${bot.name}`}>
-      <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-edge px-3">
-        <button
-          type="button"
-          aria-label="Open bot list"
-          className="button !px-2 md:hidden"
-          onClick={onOpenDrawer}
-        >
-          <PanelLeft {...iconProps} />
-        </button>
-        <Avatar seed={bot.avatarSeed} className="size-7" />
-        <h2 className="truncate text-name font-medium">{bot.name}</h2>
-        <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
-          {bot.boundary === "box" ? "In a box" : "Attended only"}
-        </span>
-        {bot.projectPath && (
-          <span
-            title={bot.projectPath}
-            className="flex min-w-0 items-center gap-1 rounded-full border border-edge px-2 py-px text-micro text-ink-faint"
+    <section className="relative flex min-w-0 flex-1" aria-label={`Chat with ${bot.name}`}>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-edge px-3">
+          <button
+            type="button"
+            aria-label="Open bot list"
+            className="button !px-2 md:hidden"
+            onClick={onOpenDrawer}
           >
-            <Folder {...iconProps} size={12} className="shrink-0" />
-            <span className="truncate">{folderName(bot.projectPath)}</span>
-          </span>
-        )}
-        {bot.access === "full" && (
-          <span className="flex shrink-0 items-center gap-1 rounded-full border border-danger/40 bg-danger-surface px-2 py-px text-micro text-danger">
-            <ShieldOff {...iconProps} size={12} />
-            Full access
-          </span>
-        )}
-        {bot.engineAccountId === "fake" && (
+            <PanelLeft {...iconProps} />
+          </button>
+          <Avatar seed={bot.avatarSeed} className="size-7" />
+          <h2 className="truncate text-name font-medium">{bot.name}</h2>
           <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
-            Test engine
+            {bot.boundary === "box" ? "In a box" : "Attended only"}
           </span>
-        )}
-        <span className="flex-1" />
-        <BotMenu
-          bot={bot}
-          connected={connected}
-          pendingMemories={memories.filter(({ status }) => status === "pending").length}
-          onEdit={onEdit}
-          onMemory={() => setMemoryOpen(true)}
-          onRoutines={() => setRoutinesOpen(true)}
-          onLogin={() => setLoginOpen(true)}
-          onBrowser={() => setBrowserOpen(true)}
-        />
-      </header>
-      {empty ? (
-        <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
-          <p className="text-empty">{bot.name}</p>
-          {bot.summary && (
-            <p className="line-clamp-3 text-small text-ink-secondary">{bot.summary}</p>
+          {bot.projectPath && (
+            <span
+              title={bot.projectPath}
+              className="flex min-w-0 items-center gap-1 rounded-full border border-edge px-2 py-px text-micro text-ink-faint"
+            >
+              <Folder {...iconProps} size={12} className="shrink-0" />
+              <span className="truncate">{folderName(bot.projectPath)}</span>
+            </span>
           )}
+          {bot.access === "full" && (
+            <span className="flex shrink-0 items-center gap-1 rounded-full border border-danger/40 bg-danger-surface px-2 py-px text-micro text-danger">
+              <ShieldOff {...iconProps} size={12} />
+              Full access
+            </span>
+          )}
+          {bot.engineAccountId === "fake" && (
+            <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
+              Test engine
+            </span>
+          )}
+          <span className="flex-1" />
+          {workspace.liveTab && !workspace.open && (
+            <button
+              type="button"
+              className="button button-outline !min-h-7 shrink-0 rounded-full"
+              onClick={() => workspace.show(workspace.liveTab)}
+            >
+              <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-honey-fill" />
+              Watch
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Computer"
+            aria-pressed={workspace.open}
+            className="button !px-2"
+            onClick={() => (workspace.open ? workspace.close() : workspace.show())}
+          >
+            <Monitor {...iconProps} />
+          </button>
+          <BotMenu
+            bot={bot}
+            connected={connected}
+            pendingMemories={memories.filter(({ status }) => status === "pending").length}
+            onEdit={onEdit}
+            onMemory={() => setMemoryOpen(true)}
+            onRoutines={() => setRoutinesOpen(true)}
+            onLogin={() => setLoginOpen(true)}
+          />
+        </header>
+        {empty ? (
+          <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
+            <p className="text-empty">{bot.name}</p>
+            {bot.summary && (
+              <p className="line-clamp-3 text-small text-ink-secondary">{bot.summary}</p>
+            )}
+          </div>
+        ) : (
+          <Transcript
+            bot={bot}
+            items={items}
+            connected={connected}
+            finishedTools={finishedTools}
+            draft={draft}
+            liveTools={tools}
+            workingSince={run?.status === "Running" ? run.startedAt : undefined}
+            endedWork={
+              run?.startedAt && run.endedAt
+                ? Date.parse(run.endedAt) - Date.parse(run.startedAt)
+                : undefined
+            }
+            thought={showThinking ? (thinkingState?.text ?? "") : undefined}
+            systemLine={systemLine}
+            onContinue={
+              canContinue
+                ? () => void sendCommand({ type: "continue-run", runId: run.id })
+                : undefined
+            }
+          />
+        )}
+        <div className={columnClass}>
+          <div role="status">
+            {notices.map((notice) => (
+              <p key={notice} className="mb-2 text-small text-ink-secondary">
+                {notice}
+              </p>
+            ))}
+          </div>
+          <Composer
+            key={bot.id}
+            bot={bot}
+            catalog={models}
+            runId={active ? run?.id : undefined}
+            canSend={connected && bot.status === "ready"}
+            canStop={active || Boolean(limited && account?.blockedUntil)}
+            connected={connected}
+            value={composerText}
+            onChange={onComposerText}
+          />
         </div>
-      ) : (
-        <Transcript
+      </div>
+      {workspace.open && (
+        <Workspace
           bot={bot}
-          items={items}
-          connected={connected}
-          finishedTools={finishedTools}
-          draft={draft}
-          liveTools={tools}
-          workingSince={run?.status === "Running" ? run.startedAt : undefined}
-          endedWork={
-            run?.startedAt && run.endedAt
-              ? Date.parse(run.endedAt) - Date.parse(run.startedAt)
-              : undefined
-          }
-          thought={showThinking ? (thinkingState?.text ?? "") : undefined}
-          systemLine={systemLine}
-          onContinue={
-            canContinue
-              ? () => void sendCommand({ type: "continue-run", runId: run.id })
-              : undefined
-          }
+          boxes={connection.boxAvailability}
+          activity={connection.activity[bot.id]}
+          tab={workspace.tab}
+          liveTab={workspace.liveTab}
+          onTab={workspace.choose}
+          onClose={workspace.close}
+          onEdit={onEdit}
         />
       )}
-      <div className={columnClass}>
-        <div role="status">
-          {notices.map((notice) => (
-            <p key={notice} className="mb-2 text-small text-ink-secondary">
-              {notice}
-            </p>
-          ))}
-        </div>
-        <Composer
-          key={bot.id}
-          bot={bot}
-          catalog={models}
-          runId={active ? run?.id : undefined}
-          canSend={connected && bot.status === "ready"}
-          canStop={active || Boolean(limited && account?.blockedUntil)}
-          connected={connected}
-          value={composerText}
-          onChange={onComposerText}
-        />
-      </div>
       {memoryOpen && (
         <MemoryPanel
           bot={bot}
@@ -296,13 +319,6 @@ export function ChatView({
           firings={chat.firings}
           connected={connected}
           onClose={() => setRoutinesOpen(false)}
-        />
-      )}
-      {browserOpen && (
-        <HandoffView
-          bot={bot}
-          activity={connection.activity[bot.id]}
-          onClose={() => setBrowserOpen(false)}
         />
       )}
     </section>

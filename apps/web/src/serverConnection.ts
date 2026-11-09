@@ -1,6 +1,8 @@
 import {
   AuditPage,
+  type Bot,
   type BoxAvailability,
+  browserGrant,
   type ChatState,
   type ClientMessage,
   type Command,
@@ -79,6 +81,10 @@ export const waitingOnOwner = (chat: ChatState, botId: string) =>
   chat.approvals.some((approval) => approval.botId === botId && approval.status === "pending") ||
   chat.continuations.some((continuation) => continuation.botId === botId) ||
   openCards(chat, botId).length > 0;
+
+// Boxes run the computer, for a bot in one and for a bot with a browser.
+export const hasComputer = (bot: Bot, boxes: BoxAvailability | undefined) =>
+  boxes?.available === true && (bot.boundary === "box" || bot.manifest.includes(browserGrant));
 
 function upsert<T extends { id: string }>(items: T[], item: T) {
   return items.some(({ id }) => id === item.id)

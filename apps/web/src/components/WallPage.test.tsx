@@ -13,24 +13,11 @@ const { watchWall, unwatch } = vi.hoisted(() => {
 vi.mock("../serverConnection", async (actual) => ({
   ...(await actual<typeof import("../serverConnection")>()),
   watchWall,
-  postCommand: vi.fn(async () => ({ ok: false, message: "no" })),
-  socketUrl: (path: string) => new URL(`ws://127.0.0.1${path}`),
-  displaySocketUrl: (ticket: string) => new URL(`ws://127.0.0.1/display?ticket=${ticket}`),
 }));
-vi.mock("@novnc/novnc", () => ({ default: class extends EventTarget {} }));
 
 const { WallPage } = await import("./WallPage");
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-
-class FakeSocket {
-  static OPEN = 1;
-  readyState = 1;
-  onmessage = null;
-  onclose = null;
-  send() {}
-  close() {}
-}
 
 let root: Root;
 let host: HTMLElement;
@@ -38,8 +25,6 @@ let host: HTMLElement;
 beforeEach(() => {
   watchWall.mockClear();
   unwatch.mockClear();
-  vi.stubGlobal("WebSocket", FakeSocket);
-  HTMLDialogElement.prototype.showModal = vi.fn();
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -48,11 +33,17 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
-  vi.unstubAllGlobals();
 });
 
 const bot = (id: string, name: string) =>
-  ({ id, name, boundary: "box", pauseReason: null, status: "ready" }) as Bot;
+  ({
+    id,
+    name,
+    boundary: "box",
+    manifest: [] as string[],
+    pauseReason: null,
+    status: "ready",
+  }) as Bot;
 const running = (botId: string) => ({ botId, state: "running" }) as BoxStatus;
 
 function connection(): ConnectionState {
@@ -61,6 +52,7 @@ function connection(): ConnectionState {
       bot("ada", "Ada"),
       bot("bo", "Bo"),
       { ...bot("cy", "Cy"), boundary: "host" },
+      { ...bot("ed", "Ed"), boundary: "host", manifest: ["browser"] },
       bot("di", "Di"),
     ],
     runs: [{ id: "run-ada", botId: "ada", status: "Running" } as Run],
@@ -75,19 +67,23 @@ function connection(): ConnectionState {
     liveTools: {
       "run-ada": [{ id: "t1", name: "Bash", detail: "ls", status: "running" }],
     },
+    boxAvailability: { available: true },
     thumbnails: { ada: "AAAA" },
     held: ["bo"],
     activity: {},
   } as unknown as ConnectionState;
 }
 
-it("shows each box bot's screen, status, tool and controller, and opens its focus view", async () => {
-  await act(async () => root.render(<WallPage connection={connection()} onOpenDrawer={vi.fn()} />));
+it("shows each computer's screen, status, tool and controller, and opens its bot", async () => {
+  const onOpen = vi.fn();
+  await act(async () =>
+    root.render(<WallPage connection={connection()} onOpenDrawer={vi.fn()} onOpen={onOpen} />),
+  );
   expect(watchWall).toHaveBeenCalledTimes(1);
 
   const tiles = [...host.querySelectorAll("li")];
-  expect(tiles).toHaveLength(3);
-  const [ada, bo, di] = tiles;
+  expect(tiles).toHaveLength(4);
+  const [ada, bo, , di] = tiles;
   expect(ada?.textContent).toContain("Working");
   expect(ada?.textContent).toContain("Ada has control");
   expect(ada?.textContent).toContain("Running ls");
@@ -97,9 +93,8 @@ it("shows each box bot's screen, status, tool and controller, and opens its focu
   expect(bo?.querySelector("img")).toBeNull();
   expect(di?.textContent).toContain("Waiting for you");
 
-  expect(host.querySelector("dialog")).toBeNull();
   await act(async () => ada?.querySelector("button")?.click());
-  expect(host.querySelector("dialog")?.getAttribute("aria-label")).toBe("Ada browser");
+  expect(onOpen).toHaveBeenCalledWith("ada");
 
   act(() => root.unmount());
   expect(unwatch).toHaveBeenCalledTimes(1);
