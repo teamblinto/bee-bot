@@ -1,11 +1,10 @@
 import type { Bot } from "@beebot/contracts";
 import { Monitor, PanelLeft } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import { toolRowLabel } from "../labels";
-import { type ConnectionState, waitingOnOwner, watchWall } from "../serverConnection";
+import { type ConnectionState, hasComputer, waitingOnOwner, watchWall } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
-import { HandoffView } from "./HandoffView";
 import { iconProps } from "./ui";
 
 function tileStatus(bot: Bot, { chat }: ConnectionState) {
@@ -79,13 +78,13 @@ export function WallTile({
 export function WallPage({
   connection,
   onOpenDrawer,
+  onOpen,
 }: {
   connection: ConnectionState;
   onOpenDrawer: () => void;
+  onOpen: (botId: string) => void;
 }) {
-  const [focusId, setFocusId] = useState<string>();
-  const bots = connection.chat.bots.filter(({ boundary }) => boundary === "box");
-  const focus = bots.find(({ id }) => id === focusId);
+  const bots = connection.chat.bots.filter((bot) => hasComputer(bot, connection.boxAvailability));
 
   useEffect(() => watchWall(), []);
 
@@ -105,7 +104,9 @@ export function WallPage({
       <div className="scroller min-h-0 flex-1 overflow-y-auto">
         {bots.length === 0 ? (
           <p className="px-4 py-6 text-small text-ink-secondary">
-            No bot runs in a box yet, so none has a computer to show.
+            {connection.boxAvailability?.available
+              ? "No bot has a computer yet. Turn on Computer and browser in a bot's settings."
+              : "Computers run in boxes, which aren't set up. Set them up on the Usage page."}
           </p>
         ) : (
           <ul className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2 p-3">
@@ -114,19 +115,12 @@ export function WallPage({
                 key={bot.id}
                 bot={bot}
                 connection={connection}
-                onOpen={() => setFocusId(bot.id)}
+                onOpen={() => onOpen(bot.id)}
               />
             ))}
           </ul>
         )}
       </div>
-      {focus && (
-        <HandoffView
-          bot={focus}
-          activity={connection.activity[focus.id]}
-          onClose={() => setFocusId(undefined)}
-        />
-      )}
     </section>
   );
 }

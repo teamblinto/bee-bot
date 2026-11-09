@@ -25,6 +25,7 @@ function Home() {
   const [roomId, setRoomId] = useState<string>();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [page, setPage] = useState<"usage" | "audit" | "wall">();
+  const [computerFor, setComputerFor] = useState<string>();
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
   const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
@@ -78,6 +79,7 @@ function Home() {
         open={drawerOpen}
         onSelect={(botId) => {
           setSelectedId(botId);
+          setComputerFor(undefined);
           setRoomId(undefined);
           setPage(undefined);
           setDrawerOpen(false);
@@ -115,7 +117,16 @@ function Home() {
         ) : page === "audit" ? (
           <AuditPage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
         ) : page === "wall" ? (
-          <WallPage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
+          <WallPage
+            connection={connection}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onOpen={(botId) => {
+              setSelectedId(botId);
+              setComputerFor(botId);
+              setRoomId(undefined);
+              setPage(undefined);
+            }}
+          />
         ) : room ? (
           <RoomView
             key={room.id}
@@ -130,6 +141,7 @@ function Home() {
             connection={connection}
             composerText={composerTexts[selected.id] ?? ""}
             onComposerText={(update) => updateComposerText(selected.id, update)}
+            openComputer={computerFor === selected.id}
             onEdit={() => setDialog(selected)}
             onOpenDrawer={() => setDrawerOpen(true)}
           />

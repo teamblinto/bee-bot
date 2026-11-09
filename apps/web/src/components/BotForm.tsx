@@ -80,7 +80,6 @@ export function BotForm({
   );
   const [laneChoice, setLaneChoice] = useState<EngineLane>();
   const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
-  const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? false);
   const [inBox, setInBox] = useState(bot?.boundary === "box");
   const [anySite, setAnySite] = useState(bot?.egressAnySite ?? true);
   const [egressHosts, setEgressHosts] = useState(bot?.egressHosts ?? []);
@@ -94,6 +93,9 @@ export function BotForm({
   const boxes = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().boxAvailability,
+  );
+  const [browser, setBrowser] = useState(
+    bot?.manifest.includes(browserGrant) ?? boxes?.available === true,
   );
   const apiKeys = useSyncExternalStore(
     subscribeToConnection,
@@ -301,10 +303,11 @@ export function BotForm({
           checked={browser}
           onChange={(event) => setBrowser(event.target.checked)}
         />
-        Browser
+        Computer and browser
       </label>
       <p id="browser-help" className="text-small text-ink-secondary">
-        Lets the bot open web pages in its own browser. Every page counts as untrusted content.
+        Gives the bot its own browser for web pages and, with boxes set up, its own computer that
+        you can watch and take over. Every page counts as untrusted content.
       </p>
       <label className="flex items-center gap-2 text-label text-ink-secondary">
         <input
