@@ -3,7 +3,7 @@ import { Monitor, PanelLeft } from "lucide-react";
 import { useEffect } from "react";
 
 import { toolRowLabel } from "../labels";
-import { type ConnectionState, hasComputer, waitingOnOwner, watchWall } from "../serverConnection";
+import { type ConnectionState, hasBoxScreen, waitingOnOwner, watchWall } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
 import { iconProps } from "./ui";
 
@@ -84,7 +84,7 @@ export function WallPage({
   onOpenDrawer: () => void;
   onOpen: (botId: string) => void;
 }) {
-  const bots = connection.chat.bots.filter((bot) => hasComputer(bot, connection.boxAvailability));
+  const bots = connection.chat.bots.filter((bot) => hasBoxScreen(bot, connection.boxAvailability));
 
   useEffect(() => watchWall(), []);
 
@@ -105,7 +105,7 @@ export function WallPage({
         {bots.length === 0 ? (
           <p className="px-4 py-6 text-small text-ink-secondary">
             {connection.boxAvailability?.available
-              ? "No bot has a computer yet. Turn on Computer and browser in a bot's settings."
+              ? "No bot has its own computer or browser yet. Choose one in a bot's settings."
               : "Computers run in boxes, which aren't set up. Set them up on the Usage page."}
           </p>
         ) : (

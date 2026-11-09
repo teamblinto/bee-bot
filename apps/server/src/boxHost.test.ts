@@ -587,6 +587,7 @@ describe.skipIf(!available || !keyFile)(
           model: "haiku",
           effort: null,
           mode: "build",
+          control: "none",
         },
         signal: new AbortController().signal,
         onDelta: (text) => {

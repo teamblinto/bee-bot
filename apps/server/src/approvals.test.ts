@@ -10,6 +10,7 @@ import {
   type Bot,
   type Command,
   type Continuation,
+  HostFrame,
   type PendingApproval,
   protocolVersion,
   ServerMessage,
@@ -27,6 +28,7 @@ import {
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
+import type { HostDriver } from "./hostScreen.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
@@ -83,6 +85,7 @@ type BootOptions = {
   continuationTtlMs?: number;
   decide?: Decide;
   executors?: ReadonlyMap<string, Execute>;
+  hostDriver?: () => Promise<HostDriver>;
 };
 
 async function boot(options: BootOptions = {}) {
@@ -232,8 +235,9 @@ const auditRows = () =>
 
 describe("the MCP endpoint", () => {
   it("answers the handshake as plain JSON, and notifications with 202", async () => {
-    const { startTurn } = await boot();
-    const { permissions } = (await startTurn()).turn;
+    const { startTurn, store } = await boot();
+    const { bot, turn } = await startTurn();
+    const { permissions } = turn;
 
     const init = await mcp(permissions, rpc("initialize", { protocolVersion: "2025-06-18" }));
     expect(init.headers.get("content-type")).toBe("application/json");
@@ -242,10 +246,13 @@ describe("the MCP endpoint", () => {
       result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
     });
 
-    const list = (await (await mcp(permissions, rpc("tools/list"))).json()) as {
-      result: { tools: Array<{ name: string; annotations?: unknown }> };
-    };
-    expect(list.result.tools.map(({ name }) => name)).toEqual([
+    const listed = async () =>
+      (
+        (await (await mcp(permissions, rpc("tools/list"))).json()) as {
+          result: { tools: Array<{ name: string; annotations?: unknown }> };
+        }
+      ).result.tools;
+    const own = [
       "approve",
       "memory_search",
       "memory_get",
@@ -257,20 +264,33 @@ describe("the MCP endpoint", () => {
       "handoff",
       "ask_user",
       "create_routine",
+    ];
+    const browsing = [
       "browser_navigate",
       "browser_snapshot",
       "browser_click",
       "browser_type",
       "request_takeover",
+    ];
+    const desktop = [
       "computer_screenshot",
       "computer_click",
       "computer_type",
       "computer_key",
       "computer_scroll",
       "computer_drag",
-    ]);
+    ];
+    const names = async () => (await listed()).map(({ name }) => name);
+    // The tools follow the bot's control mode, and this server can't drive its own desktop.
+    expect(await names()).toEqual(own);
+    store.policy.setBotControl(bot.id, "browser");
+    expect(await names()).toEqual([...own, ...browsing]);
+    store.policy.setBotControl(bot.id, "computer");
+    expect(await names()).toEqual([...own, ...browsing, ...desktop]);
+    store.policy.setBotControl(bot.id, "host");
+    expect(await names()).toEqual(own);
     // A read-only hint would let the CLI run a memory call alongside a tool, ahead of the taint.
-    expect(list.result.tools.every(({ annotations }) => annotations === undefined)).toBe(true);
+    expect((await listed()).every(({ annotations }) => annotations === undefined)).toBe(true);
     expect(await (await mcp(permissions, rpc("ping"))).json()).toMatchObject({ result: {} });
 
     const note = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -1620,8 +1640,8 @@ describe("in Box mode a tool call", () => {
       decide: policyDecide,
       executors: new Map([["browser_click", click]]),
     });
-    await post({ type: "set-bot-manifest", botId: bot.id, manifest: ["browser"] });
-    expect(store.getBot(bot.id)?.manifest).toEqual(["browser"]);
+    await post({ type: "set-bot-control", botId: bot.id, control: "browser" });
+    expect(store.getBot(bot.id)?.control).toBe("browser");
     await send("click it");
     const card = await waiting();
     expect(card).toMatchObject({ tool: "browser_click", shown: 'browser_click: {"ref":"1:0"}' });
@@ -1661,4 +1681,76 @@ describe("in Box mode a tool call", () => {
     expect(bodies().filter((body) => body.startsWith("Denied"))).toEqual([]);
     expect(ran).toEqual([]);
   });
+});
+
+describe("the owner's computer", () => {
+  // A 2000x1000 display, which a bot sees fitted to 1280x640.
+  const fakeDriver = async (): Promise<HostDriver> => ({
+    request: async (request) =>
+      request.op === "shot"
+        ? { width: 2000, height: 1000, data: Buffer.from("jpeg").toString("base64") }
+        : { width: 2000, height: 1000, x: 0, y: 0, ok: true },
+    close: () => {},
+  });
+
+  it("is refused to a bot when this server can't drive the desktop", async () => {
+    const { post } = await boot();
+    const bot = (await (
+      await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId: "claude" })
+    ).json()) as Bot;
+    const answer = await post({ type: "set-bot-control", botId: bot.id, control: "host" });
+    expect(answer.status).toBe(409);
+    expect(await answer.json()).toEqual({ code: "host_control_unavailable" });
+    expect((await post({ type: "host-frame" })).status).toBe(409);
+  });
+
+  // Only Windows can drive its desktop, whatever driver the server is given.
+  it.runIf(process.platform === "win32")(
+    "is given to a bot, shown to the owner, and taken back by them",
+    async () => {
+      const { post, client, startTurn, store } = await boot({ hostDriver: fakeDriver });
+      const hostControl = () => client.messages.filter(({ type }) => type === "host-control");
+      await vi.waitFor(() =>
+        expect(hostControl()).toEqual([
+          { type: "host-control", availability: { available: true, problem: null, held: false } },
+        ]),
+      );
+      const idle = (await (
+        await post({ type: "create-bot", name: "Bo", personality: "", engineAccountId: "claude" })
+      ).json()) as Bot;
+      const set = await post({ type: "set-bot-control", botId: idle.id, control: "host" });
+      expect(set.status).toBe(200);
+      expect(((await set.json()) as Bot).control).toBe("host");
+
+      const frame = await post({ type: "host-frame" });
+      expect(HostFrame.parse(await frame.json())).toEqual({
+        data: Buffer.from("jpeg").toString("base64"),
+        width: 960,
+        height: 480,
+      });
+
+      const { bot, turn } = await startTurn();
+      store.policy.setBotControl(bot.id, "host");
+      const listed = (await (await mcp(turn.permissions, rpc("tools/list"))).json()) as {
+        result: {
+          tools: Array<{
+            name: string;
+            inputSchema: { properties: Record<string, { maximum?: number }> };
+          }>;
+        };
+      };
+      const click = listed.result.tools.find(({ name }) => name === "computer_click");
+      expect(click?.inputSchema.properties.x?.maximum).toBe(1279);
+      expect(click?.inputSchema.properties.y?.maximum).toBe(639);
+      expect(listed.result.tools.some(({ name }) => name.startsWith("browser_"))).toBe(false);
+
+      expect((await post({ type: "host-hold", held: true })).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(hostControl().at(-1)).toEqual({
+          type: "host-control",
+          availability: { available: true, problem: null, held: true },
+        }),
+      );
+    },
+  );
 });

@@ -2,7 +2,7 @@ import {
   Bot,
   type BoxAvailability,
   BotProfile,
-  browserGrant,
+  BotControl,
   defaultBotModel,
   EngineAccountId,
   EngineLane,
@@ -40,6 +40,13 @@ const profileLabels: Record<BotProfile, { name: string; help: string }> = {
     name: "Researcher",
     help: "Reads the web and acts, but holds none of your private data. Reaching your data waits for you.",
   },
+};
+
+const controlLabels: Record<BotControl, { name: string; help: string }> = {
+  browser: { name: "Own browser", help: "Web pages only, in a box apart from your computer" },
+  computer: { name: "Own computer", help: "A private desktop with a browser, in a box" },
+  host: { name: "This computer", help: "Your screen and apps, only while you watch" },
+  none: { name: "None", help: "No browser or computer" },
 };
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
@@ -94,7 +101,15 @@ export function BotForm({
     subscribeToConnection,
     () => getConnectionState().boxAvailability,
   );
-  const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? true);
+  const hostControl = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().hostControl,
+  );
+  const [control, setControl] = useState<BotControl>(bot?.control ?? "computer");
+  const [hostConsent, setHostConsent] = useState(false);
+  // Consent is asked each time a bot is moved onto this computer, not again for one already on it.
+  const needsConsent = control === "host" && bot?.control !== "host" && !hostConsent;
+  const ownScreen = control === "browser" || control === "computer";
   const apiKeys = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().chat.vault.apiKeys,
@@ -112,7 +127,7 @@ export function BotForm({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (saving.current || !name.trim()) {
+    if (saving.current || !name.trim() || needsConsent) {
       return;
     }
     saving.current = true;
@@ -146,15 +161,9 @@ export function BotForm({
       created && created.profile !== profile
         ? await postCommand({ type: "set-bot-profile", botId: created.id, profile })
         : undefined;
-    const manifestResult =
-      created && created.manifest.includes(browserGrant) !== browser
-        ? await postCommand({
-            type: "set-bot-manifest",
-            botId: created.id,
-            manifest: browser
-              ? [...created.manifest, browserGrant]
-              : created.manifest.filter((grant) => grant !== browserGrant),
-          })
+    const controlResult =
+      created && created.control !== control
+        ? await postCommand({ type: "set-bot-control", botId: created.id, control })
         : undefined;
     const boundary = inBox ? "box" : "host";
     const boundaryResult =
@@ -164,7 +173,7 @@ export function BotForm({
     const boxed = boundaryResult?.ok ? Bot.safeParse(boundaryResult.body).data : created;
     const egressResult =
       boxed &&
-      (browser || inBox) &&
+      (ownScreen || inBox) &&
       (boxed.egressAnySite !== anySite ||
         boxed.egressHosts.length !== egressHosts.length ||
         boxed.egressHosts.some((host, index) => host !== egressHosts[index]))
@@ -185,12 +194,18 @@ export function BotForm({
         : undefined;
     saving.current = false;
     setBusy(false);
+    const results = [
+      result,
+      profileResult,
+      controlResult,
+      boundaryResult,
+      egressResult,
+      unattendedResult,
+    ];
+    // The first refusal, so a later step that went through can't hide it.
     const last =
-      unattendedResult ??
-      egressResult ??
-      boundaryResult ??
-      manifestResult ??
-      profileResult ??
+      results.find((step) => step?.ok === false) ??
+      results.findLast((step) => step !== undefined) ??
       result;
     const saved = last.ok ? Bot.safeParse(last.body).data : undefined;
     if (saved) {
@@ -294,19 +309,57 @@ export function BotForm({
       <p id="profile-help" className="text-small text-ink-secondary">
         {profileLabels[profile].help} With nobody watching, it is refused.
       </p>
-      <label className="flex items-center gap-2 text-label text-ink-secondary">
-        <input
-          type="checkbox"
-          aria-describedby="browser-help"
-          checked={browser}
-          onChange={(event) => setBrowser(event.target.checked)}
-        />
-        Computer and browser
-      </label>
-      <p id="browser-help" className="text-small text-ink-secondary">
-        Gives the bot its own browser for web pages and, with boxes set up, its own computer that
-        you can watch and take over. Every page counts as untrusted content.
-      </p>
+      <fieldset className={labelClass}>
+        <legend className="mb-1">Works on</legend>
+        {BotControl.options.map((option) => {
+          // A bot already on this computer can always stay or leave.
+          const unavailable =
+            option === "host" && bot?.control !== "host" && hostControl?.available !== true;
+          return (
+            <label key={option} className="flex items-start gap-2">
+              <input
+                type="radio"
+                name="control"
+                className="mt-1"
+                value={option}
+                checked={control === option}
+                disabled={unavailable}
+                onChange={() => setControl(option)}
+              />
+              <span className="flex flex-col">
+                <span className={unavailable ? "text-ink-faint" : "text-ink"}>
+                  {controlLabels[option].name}
+                </span>
+                <span className="text-small">
+                  {unavailable
+                    ? (hostControl?.problem ?? "Bots can't use this computer from here.")
+                    : controlLabels[option].help}
+                </span>
+              </span>
+            </label>
+          );
+        })}
+        {ownScreen && (
+          <p className="text-small">
+            {boxProblem ?? "Every page counts as untrusted content. You can watch and take over."}
+          </p>
+        )}
+        {control === "host" && bot?.control !== "host" && (
+          <label className="flex items-start gap-2 rounded-md border border-honey/40 px-3 py-2 text-small text-ink">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={hostConsent}
+              onChange={(event) => setHostConsent(event.target.checked)}
+            />
+            <span>
+              I understand {name.trim() || "this bot"} will see screenshots of my screen, which go
+              to its model provider, and will move my mouse and type. It can reach my apps and the
+              accounts I'm signed in to. It works only while I watch, and moving my mouse stops it.
+            </span>
+          </label>
+        )}
+      </fieldset>
       <label className="flex items-center gap-2 text-label text-ink-secondary">
         <input
           type="checkbox"
@@ -350,7 +403,7 @@ export function BotForm({
           </>
         )}
       </div>
-      {(browser || inBox) && (
+      {(ownScreen || inBox) && (
         <div className={labelClass}>
           Sites it can reach
           <label className="flex items-center gap-2">
@@ -399,7 +452,11 @@ export function BotForm({
       )}
       <div className="mt-1 flex items-center justify-end gap-1">
         {children}
-        <button type="submit" className="button button-primary" disabled={busy || !name.trim()}>
+        <button
+          type="submit"
+          className="button button-primary"
+          disabled={busy || !name.trim() || needsConsent}
+        >
           {submitLabel}
         </button>
       </div>

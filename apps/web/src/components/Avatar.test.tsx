@@ -84,6 +84,7 @@ const bot = {
   profile: "operator",
   boundary: "host",
   manifest: [] as string[],
+  control: "none",
   egressAnySite: true,
   egressHosts: [] as string[],
   unattendedLane: "api_key",

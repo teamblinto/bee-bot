@@ -163,6 +163,8 @@ async function start() {
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
       fakeEngine: Boolean(devServerUrl),
       vault: await loadVaultKey(safeStorage, NodePath.join(app.getPath("userData"), "vault-key")),
+      // The server runs in the owner's session, so it can drive this desktop for `host` bots.
+      hostControl: true,
     });
   } catch {
     app.quit();

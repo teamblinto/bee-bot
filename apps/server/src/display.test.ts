@@ -5,13 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
-import {
-  Bot,
-  browserGrant,
-  DisplayTicket,
-  HandoffServerMessage,
-  protocolVersion,
-} from "@beebot/contracts";
+import { Bot, DisplayTicket, HandoffServerMessage, protocolVersion } from "@beebot/contracts";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -169,23 +163,24 @@ function upgradeStatus(url: string, origin = appOrigin) {
   });
 }
 
-it("issues a ticket only for a bot with a computer: one in a box, or with the browser", async () => {
+it("issues a ticket only for a bot whose control mode is its own computer", async () => {
   const { store, bot, command } = await start();
   const ask = { type: "display-ticket", botId: bot.id, mode: "view" };
   const refusal = await command(ask);
   expect(refusal.status).toBe(409);
   expect(await refusal.json()).toEqual({ code: "no_display" });
   expect((await command({ ...ask, botId: crypto.randomUUID() })).status).toBe(404);
-  store.policy.setBotManifest(bot.id, [browserGrant]);
-  expect((await command(ask)).status).toBe(200);
-  store.policy.setBotManifest(bot.id, []);
-  store.policy.setBotBoundary(bot.id, "box");
+  for (const control of ["browser", "host", "none"] as const) {
+    store.policy.setBotControl(bot.id, control);
+    expect((await command(ask)).status, control).toBe(409);
+  }
+  store.policy.setBotControl(bot.id, "computer");
   expect((await command(ask)).status).toBe(200);
 });
 
 it("opens /display only with a fresh ticket, an allowed origin and the current protocol", async () => {
   const { store, bot, ticket, url } = await start();
-  store.policy.setBotBoundary(bot.id, "box");
+  store.policy.setBotControl(bot.id, "computer");
   expect(await upgradeStatus(url({}))).toBe(401);
   expect(await upgradeStatus(url({ token }))).toBe(401);
   expect(await upgradeStatus(url({ ticket: "guess" }))).toBe(401);
@@ -205,7 +200,7 @@ it("opens /display only with a fresh ticket, an allowed origin and the current p
 
 it("relays binary RFB bytes both ways and closes with the box stream", async () => {
   const { store, bot, ticket, url, fromBox, toBox, box } = await start();
-  store.policy.setBotBoundary(bot.id, "box");
+  store.policy.setBotControl(bot.id, "computer");
   const socket = new WebSocket(url({ ticket: await ticket() }), { origin: appOrigin });
   await once(socket, "open");
   fromBox.write(Buffer.from([0x52, 0x46, 0x42, 0x00, 0xff]));
@@ -225,7 +220,7 @@ it("closes with 4404 when the box has no display", async () => {
   const { store, bot, ticket, url } = await start(async () => {
     throw new Error("no display in this box");
   });
-  store.policy.setBotBoundary(bot.id, "box");
+  store.policy.setBotControl(bot.id, "computer");
   const socket = new WebSocket(url({ ticket: await ticket() }), { origin: appOrigin });
   const [code, reason] = await once(socket, "close");
   expect(code).toBe(4404);
@@ -298,7 +293,7 @@ it("issues control only for the held lease, and ends the input server and its vi
       return { stream, exited: never };
     },
   );
-  store.policy.setBotBoundary(bot.id, "box");
+  store.policy.setBotControl(bot.id, "computer");
   const ask = (leaseId?: string) =>
     command({ type: "display-ticket", botId: bot.id, mode: "control", leaseId });
   expect((await ask()).status).toBe(403);
@@ -331,7 +326,7 @@ it("stops the input server when the holder's socket goes", async () => {
     servers.push(stream);
     return { stream, exited: never };
   });
-  store.policy.setBotBoundary(bot.id, "box");
+  store.policy.setBotControl(bot.id, "computer");
   const { handoff } = await takeControl(handoffUrl);
   expect(servers).toHaveLength(1);
   handoff.close();

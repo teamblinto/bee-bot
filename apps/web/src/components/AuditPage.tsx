@@ -19,6 +19,7 @@ const statusLabels: Record<string, string> = {
   hand_off: "Owner only",
   profile_set: "Profile set",
   boundary_set: "Box changed",
+  control_set: "Computer control changed",
 };
 
 const time = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });

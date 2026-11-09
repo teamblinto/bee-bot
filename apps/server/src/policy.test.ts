@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { initiatorOf } from "./audit.ts";
 import { auditQuery } from "./policy.ts";
-import { type EventStore, openEventStore } from "./store.ts";
+import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
 
 let dataDir: string;
 let store: EventStore;
@@ -64,7 +64,7 @@ describe("broker taint", () => {
     // Not in the manifest: refused, and the session stays clean of untrusted input.
     expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("deny");
     expect(legs(run.id)).toMatchObject({ a: 0 });
-    db.prepare("UPDATE bots SET manifest = ? WHERE id = ?").run('["browser"]', bot.id);
+    db.prepare("UPDATE bots SET control = 'browser' WHERE id = ?").run(bot.id);
     expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("approve");
     expect(legs(run.id)).toEqual({ a: 1, b: 1, c: 1, tainted: 1 });
   });
@@ -111,8 +111,7 @@ describe("audit", () => {
 
   it("keeps no digest of typed input", () => {
     const { bot, run } = startRun();
-    db.prepare("UPDATE bots SET manifest = ?, profile = ? WHERE id = ?").run(
-      '["browser"]',
+    db.prepare("UPDATE bots SET control = 'browser', profile = ? WHERE id = ?").run(
       "researcher",
       bot.id,
     );
@@ -170,5 +169,64 @@ describe("audit", () => {
     expect(auditQuery(url("?unattended=1"))).toMatchObject({ unattended: true });
     expect(auditQuery(url("?botId=nope"))).toBeUndefined();
     expect(auditQuery(url("?before=-1"))).toBeUndefined();
+  });
+});
+
+describe("control mode", () => {
+  it("grants the browser and the desktop by the bot's control mode alone", () => {
+    const { bot, run } = startRun();
+    store.policy.setBotManifest(bot.id, ["browser", "computer"]);
+    const reason = (tool: string) => {
+      const decision = store.policy.check(run, tool, {});
+      return decision.kind === "deny" ? decision.reason : "granted";
+    };
+    const granted = () => [reason("browser_snapshot"), reason("computer_screenshot")];
+    expect(granted()).toEqual(["not_granted", "not_granted"]);
+    store.policy.setBotControl(bot.id, "browser");
+    expect(granted()).toEqual(["granted", "not_granted"]);
+    store.policy.setBotControl(bot.id, "computer");
+    expect(granted()).toEqual(["granted", "granted"]);
+    store.policy.setBotControl(bot.id, "host");
+    expect(granted()).toEqual(["not_granted", "granted"]);
+  });
+
+  it("records a change, and nothing when it's the same", () => {
+    const { bot } = startRun();
+    store.policy.setBotControl(bot.id, "host");
+    store.policy.setBotControl(bot.id, "host");
+    const changes = store.policy
+      .auditPage({ unattended: false, limit: 10 })
+      .entries.filter(({ status }) => status === "control_set");
+    expect(changes.map(({ reason }) => reason)).toEqual(["host"]);
+  });
+});
+
+describe("the bot_control migration", () => {
+  it("gives a desktop to a box bot or one with the browser grant, and drops the grant", () => {
+    const old = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-control-"));
+    const before = new DatabaseSync(NodePath.join(old, "beebot.db"));
+    try {
+      migrate(
+        before,
+        migrations.findIndex(({ name }) => name === "bot_control"),
+      );
+      const insert = before.prepare(
+        `INSERT INTO bots (id, name, personality, status, created_at, boundary, manifest)
+         VALUES (?, 'Ada', '', 'ready', 'then', ?, ?)`,
+      );
+      insert.run("granted", "host", '["browser","gmail.send"]');
+      insert.run("boxed", "box", "[]");
+      insert.run("plain", "host", '["gmail.send"]');
+      migrate(before);
+      const rows = before.prepare("SELECT id, control, manifest FROM bots ORDER BY id").all();
+      expect(rows).toEqual([
+        { id: "boxed", control: "computer", manifest: "[]" },
+        { id: "granted", control: "computer", manifest: '["gmail.send"]' },
+        { id: "plain", control: "none", manifest: '["gmail.send"]' },
+      ]);
+    } finally {
+      before.close();
+      NodeFS.rmSync(old, { recursive: true, force: true });
+    }
   });
 });

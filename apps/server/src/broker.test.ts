@@ -69,9 +69,9 @@ describe("rule table", () => {
       kind: "deny",
       reason: "not_granted",
     });
-    const operator = context({ manifest: ["browser"] });
-    const reader = context({ profile: "reader", manifest: ["browser"] });
-    const researcher = context({ profile: "researcher", manifest: ["browser"] });
+    const operator = context({ manifest: ["computer"] });
+    const reader = context({ profile: "reader", manifest: ["computer"] });
+    const researcher = context({ profile: "researcher", manifest: ["computer"] });
     expect(decideTool({ ...ids, tool: "computer_screenshot" }, reader).kind).toBe("allow");
     for (const tool of actions) {
       expect(decideTool({ ...ids, tool }, operator).kind, tool).toBe("approve");

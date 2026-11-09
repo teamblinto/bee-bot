@@ -248,6 +248,7 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   profile: "operator",
   boundary: "host",
   manifest: [],
+  control: "none",
   egressAnySite: true,
   egressHosts: [],
   unattendedLane: "api_key",

@@ -11,6 +11,7 @@ import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
+import { spawnHostDriver } from "./hostScreen.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -154,6 +155,11 @@ async function boot(bootstrap: Bootstrap) {
     box,
     boxes,
     browserRuntime: createCdpBrowserRuntime(boxes.sidecar),
+    // This executable is the desktop app's own (ELECTRON_RUN_AS_NODE), so its windows are Bee Bot's.
+    hostDriver:
+      bootstrap.hostControl && process.platform === "win32"
+        ? () => spawnHostDriver(NodePath.join(dataDir, "runtime"), process.execPath)
+        : undefined,
   });
   port = server.port;
   void boxes.refresh();

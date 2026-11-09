@@ -18,7 +18,10 @@ const stopTimeoutMs = 5000;
 const maxRestarts = 3;
 const stableUptimeMs = 60_000;
 
-type Options = Pick<Bootstrap, "dataDir" | "allowedOrigins" | "fakeEngine" | "vault"> & {
+type Options = Pick<
+  Bootstrap,
+  "dataDir" | "allowedOrigins" | "fakeEngine" | "vault" | "hostControl"
+> & {
   entry: string;
 };
 

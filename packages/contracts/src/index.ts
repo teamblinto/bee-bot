@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 28;
+export const protocolVersion = 29;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -41,6 +41,9 @@ export const Bootstrap = z.object({
   codexCommand: z.array(z.string().min(1)).min(1).optional(),
   // Sent by the desktop, which unwraps it with the OS keyring. Headless reads a key file instead.
   vault: VaultKey.optional(),
+  // Sent only by the desktop app: its server runs in the owner's session, so bots set to `host`
+  // control may drive this desktop.
+  hostControl: z.boolean().optional(),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
@@ -101,6 +104,11 @@ export const Manifest = z.array(z.string().trim().min(1).max(200)).max(100);
 export type Manifest = z.infer<typeof Manifest>;
 export const browserGrant = "browser";
 
+// What a bot drives, one per bot. `browser`: its own browser in a box. `computer`: its own desktop
+// in a box, with that browser on it. `host`: the owner's real desktop, only while the owner watches.
+export const BotControl = z.enum(["browser", "computer", "host", "none"]);
+export type BotControl = z.infer<typeof BotControl>;
+
 export const EngineModel = z.object({
   id: BotModel,
   label: z.string(),
@@ -143,6 +151,7 @@ export const Bot = z.object({
   profile: BotProfile,
   boundary: BotBoundary,
   manifest: Manifest,
+  control: BotControl,
   // Whether its browser and box reach every public site. When off, only `egressHosts`.
   egressAnySite: z.boolean(),
   // Hosts a boxed bot may reach besides its engine's own, granted by the owner.
@@ -280,6 +289,16 @@ export const BoxMachineName = z
   .string()
   .trim()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+
+// Whether a `host` bot may drive this computer's own desktop. Only the desktop app's server can.
+// `problem` is plain words for the owner, null when available.
+export const HostControlAvailability = z.object({
+  available: z.boolean(),
+  problem: z.string().nullable(),
+  // The owner took their computer back from the bots.
+  held: z.boolean(),
+});
+export type HostControlAvailability = z.infer<typeof HostControlAvailability>;
 
 // Whether box bots can run on this computer, and what is missing if not. Never persisted.
 export const BoxAvailability = z.object({
@@ -445,6 +464,10 @@ export const HandoffServerMessage = z.discriminatedUnion("type", [
   }),
 ]);
 export type HandoffServerMessage = z.infer<typeof HandoffServerMessage>;
+
+// A JPEG, base64, of the owner's display, `width` by `height` pixels.
+export const HostFrame = z.object({ data: z.string(), width: z.number(), height: z.number() });
+export type HostFrame = z.infer<typeof HostFrame>;
 
 // Opens one `/display` socket, once, for a short while. `expiresAt` is epoch milliseconds.
 export const DisplayTicket = z.object({ ticket: z.string(), expiresAt: z.number() });
@@ -759,6 +782,8 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("model-catalog"), models: ModelCatalog }),
   // Sent on subscribe and on every change, by a server that can run boxes.
   z.object({ type: z.literal("box-availability"), availability: BoxAvailability }),
+  // Sent on subscribe and on every change.
+  z.object({ type: z.literal("host-control"), availability: HostControlAvailability }),
   // A small JPEG of a bot's screen, base64, sent only to clients watching the wall. Never persisted.
   z.object({
     type: z.literal("thumbnail"),
@@ -900,6 +925,10 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("acknowledge-automated-access") }),
   z.object({ type: z.literal("set-bot-manifest"), botId: z.uuid(), manifest: Manifest }),
   z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
+  z.object({ type: z.literal("set-bot-control"), botId: z.uuid(), control: BotControl }),
+  // The owner's live view of their own display, while a host bot works.
+  z.object({ type: z.literal("host-frame") }),
+  z.object({ type: z.literal("host-hold"), held: z.boolean() }),
   z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
   z.object({ type: z.literal("set-up-boxes") }),
   // Control (input) is issued only for the lease the asker holds.

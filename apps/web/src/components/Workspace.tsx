@@ -1,15 +1,17 @@
 import RFB from "@novnc/novnc";
 import {
   type Bot,
+  type BotControl,
   type BoxAvailability,
-  browserGrant,
   DisplayTicket,
   type HandoffClientMessage,
   type HandoffReason,
   HandoffServerMessage,
+  HostFrame,
+  type HostControlAvailability,
   type Run,
 } from "@beebot/contracts";
-import { ArrowLeft, ArrowRight, Globe, Monitor, RotateCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Globe, Monitor, Laptop, RotateCw, X } from "lucide-react";
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -23,7 +25,8 @@ import {
 import {
   type BotActivity,
   displaySocketUrl,
-  hasComputer,
+  drivesBox,
+  hasBoxScreen,
   isActive,
   type LiveTool,
   postCommand,
@@ -34,12 +37,28 @@ import { SetupProgress } from "./SetupProgress";
 import { keyInput, mouseInput } from "./HandoffMapping";
 import { iconProps } from "./ui";
 
-export type WorkspaceTab = "computer" | "browser";
+export type WorkspaceTab = "computer" | "browser" | "host";
 
-const tabs = [
-  { id: "computer", label: "Computer", Icon: Monitor },
-  { id: "browser", label: "Browser", Icon: Globe },
-] as const;
+const tabInfo = {
+  computer: { label: "Computer", Icon: Monitor },
+  browser: { label: "Browser", Icon: Globe },
+  host: { label: "Your screen", Icon: Laptop },
+} as const;
+
+const controlTabs: Record<BotControl, WorkspaceTab[]> = {
+  browser: ["browser"],
+  computer: ["computer", "browser"],
+  host: ["host"],
+  none: [],
+};
+
+const hostPollMs = { working: 1000, idle: 5000 };
+
+// The tab the bot actually has for `wanted`. A host bot's computer is the owner's own screen.
+function tabFor(control: BotControl, wanted: string | null | undefined): WorkspaceTab {
+  const own = controlTabs[control];
+  return own.find((tab) => tab === wanted) ?? own[0] ?? "computer";
+}
 
 export const minWidth = 360;
 export const maxWidth = 960;
@@ -74,13 +93,14 @@ const roomBeside = () =>
   typeof matchMedia !== "function" || matchMedia("(min-width: 1024px)").matches;
 
 // Bee's tools reach the engine as `mcp__bee__computer_click` and the like.
-export function screenTab(toolName: string): WorkspaceTab | undefined {
+export function screenTab(toolName: string, control: BotControl): WorkspaceTab | undefined {
   const tool = toolName.split("__").at(-1) ?? "";
-  return tool.startsWith("computer_")
+  const tab = tool.startsWith("computer_")
     ? "computer"
     : tool.startsWith("browser_")
       ? "browser"
       : undefined;
+  return tab && tabFor(control, tab);
 }
 
 // Opens on the bot's own use of its screen, unless the owner closed the panel during this run.
@@ -92,31 +112,34 @@ export function useWorkspace(
   openOnComputer: boolean,
 ) {
   const [open, setOpen] = useState(openOnComputer);
-  const [tab, setTab] = useState<WorkspaceTab>(() =>
-    openOnComputer || load(tabKey(bot.id)) !== "browser" ? "computer" : "browser",
+  const [chosen, setChosen] = useState<string | null>(() =>
+    openOnComputer ? "computer" : load(tabKey(bot.id)),
   );
+  // Derived, so a change of the bot's control mode never leaves a tab it no longer has.
+  const tab = tabFor(bot.control, chosen);
+  const screen = tabFor(bot.control, "computer");
   const [closedIn, setClosedIn] = useState<{ runId: string | undefined }>();
   const takeover = bot.pauseReason === "browser_session";
   const used = isActive(run)
     ? tools.flatMap((tool) => {
-        const toolTab = screenTab(tool.name);
+        const toolTab = screenTab(tool.name, bot.control);
         return toolTab ? [{ ...tool, tab: toolTab }] : [];
       })
     : [];
   const latest = used.at(-1);
-  const liveTab = takeover ? "computer" : used.findLast(({ status }) => status === "running")?.tab;
+  const liveTab = takeover ? screen : used.findLast(({ status }) => status === "running")?.tab;
   const cue = takeover
-    ? { key: "takeover", tab: "computer" as const }
+    ? { key: "takeover", tab: screen }
     : latest
       ? { key: latest.id, tab: latest.tab }
-      : activity && { key: `activity ${activity.seq}`, tab: "computer" as const };
+      : activity && { key: `activity ${activity.seq}`, tab: screen };
   const [seenCue, setSeenCue] = useState(cue?.key);
 
   if (cue?.key !== seenCue) {
     setSeenCue(cue?.key);
     if (cue && !open && !(closedIn && closedIn.runId === run?.id) && roomBeside()) {
       setOpen(true);
-      setTab(cue.tab);
+      setChosen(cue.tab);
     }
   }
 
@@ -125,13 +148,13 @@ export function useWorkspace(
     tab,
     liveTab,
     choose(next: WorkspaceTab) {
-      setTab(next);
+      setChosen(next);
       save(tabKey(bot.id), next);
     },
     show(next?: WorkspaceTab) {
       setOpen(true);
       if (next) {
-        setTab(next);
+        setChosen(next);
       }
     },
     close() {
@@ -144,6 +167,8 @@ export function useWorkspace(
 export function Workspace({
   bot,
   boxes,
+  hostControl,
+  working,
   activity,
   tab,
   liveTab,
@@ -153,6 +178,8 @@ export function Workspace({
 }: {
   bot: Bot;
   boxes: BoxAvailability | undefined;
+  hostControl: HostControlAvailability | undefined;
+  working: boolean;
   activity: BotActivity | undefined;
   tab: WorkspaceTab;
   liveTab: WorkspaceTab | undefined;
@@ -162,7 +189,6 @@ export function Workspace({
 }) {
   const [width, setWidth] = useState(loadWidth);
   const drag = useRef<{ x: number; width: number }>(null);
-  const wantsScreen = bot.boundary === "box" || bot.manifest.includes(browserGrant);
 
   function endDrag() {
     if (drag.current) {
@@ -215,26 +241,29 @@ export function Workspace({
           aria-label="Views"
           className="flex gap-0.5 rounded-full bg-raised p-0.5"
         >
-          {tabs.map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={id === tab}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-small transition-colors ${id === tab ? "bg-background text-ink shadow-composer" : "text-ink-secondary hover:text-ink"}`}
-              onClick={() => onTab(id)}
-            >
-              <Icon {...iconProps} size={14} />
-              {label}
-              {id === liveTab && (
-                <span
-                  role="img"
-                  aria-label="In use"
-                  className="size-1.5 animate-pulse rounded-full bg-honey-fill"
-                />
-              )}
-            </button>
-          ))}
+          {controlTabs[bot.control].map((id) => {
+            const { label, Icon } = tabInfo[id];
+            return (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                aria-selected={id === tab}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-small transition-colors ${id === tab ? "bg-background text-ink shadow-composer" : "text-ink-secondary hover:text-ink"}`}
+                onClick={() => onTab(id)}
+              >
+                <Icon {...iconProps} size={14} />
+                {label}
+                {id === liveTab && (
+                  <span
+                    role="img"
+                    aria-label="In use"
+                    className="size-1.5 animate-pulse rounded-full bg-honey-fill"
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
         <span className="flex-1" />
         <button
@@ -246,14 +275,16 @@ export function Workspace({
           <X {...iconProps} />
         </button>
       </header>
-      {hasComputer(bot, boxes) ? (
+      {bot.control === "host" ? (
+        <HostScreen bot={bot} hostControl={hostControl} working={working} activity={activity} />
+      ) : hasBoxScreen(bot, boxes) ? (
         <Screen bot={bot} tab={tab} activity={activity} />
-      ) : wantsScreen ? (
+      ) : drivesBox(bot) ? (
         <SetUp boxes={boxes} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           <p className="text-small text-ink-secondary">
-            {bot.name} has no computer or browser. Turn on Computer and browser in its settings.
+            {bot.name} has no computer or browser. Choose one in its settings.
           </p>
           <button type="button" className="button button-outline" onClick={onEdit}>
             Edit {bot.name}
@@ -302,6 +333,104 @@ function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
       )}
       {error && <p className="text-small text-danger">{error}</p>}
     </div>
+  );
+}
+
+// The owner's own display, polled while it's shown: often while the bot works, rarely otherwise.
+function HostScreen({
+  bot,
+  hostControl,
+  working,
+  activity,
+}: {
+  bot: Bot;
+  hostControl: HostControlAvailability | undefined;
+  working: boolean;
+  activity: BotActivity | undefined;
+}) {
+  const [frame, setFrame] = useState<HostFrame>();
+  const [frameError, setFrameError] = useState<string>();
+  const [holdError, setHoldError] = useState<string>();
+  const available = hostControl?.available === true;
+  const held = hostControl?.held === true;
+
+  useEffect(() => {
+    if (!available) {
+      return undefined;
+    }
+    const ended = new AbortController();
+    async function poll() {
+      if (document.hidden) {
+        return;
+      }
+      const result = await postCommand({ type: "host-frame" });
+      if (ended.signal.aborted) {
+        return;
+      }
+      const next = result.ok ? HostFrame.safeParse(result.body).data : undefined;
+      if (next) {
+        setFrame(next);
+      }
+      setFrameError(result.ok ? undefined : result.message);
+    }
+    void poll();
+    const timer = setInterval(() => void poll(), working ? hostPollMs.working : hostPollMs.idle);
+    return () => {
+      ended.abort();
+      clearInterval(timer);
+    };
+  }, [available, working]);
+
+  async function hold() {
+    const result = await postCommand({ type: "host-hold", held: !held });
+    setHoldError(result.ok ? undefined : result.message);
+  }
+
+  if (!available) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+        <p className="text-small text-ink-secondary">
+          {hostControl?.problem ?? "Bots can't use this computer from here."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
+        <p className="min-w-0 flex-1 text-small text-ink-secondary">
+          {held
+            ? "You have your computer. Bots can't use it until you hand it back."
+            : `${bot.name} can use your screen while you watch. Moving your mouse stops it.`}
+        </p>
+        <button
+          type="button"
+          className={held ? "button button-primary" : "button button-outline"}
+          onClick={() => void hold()}
+        >
+          {held ? "Hand back" : "Take control"}
+        </button>
+      </div>
+      <div className="scroller min-h-0 flex-1 overflow-auto px-2 py-3">
+        <div className="relative">
+          <ActivityOverlay activity={activity} />
+          {frame ? (
+            <img
+              alt="Your screen"
+              src={`data:image/jpeg;base64,${frame.data}`}
+              draggable={false}
+              className="w-full rounded-md border border-edge"
+            />
+          ) : (
+            <p className="text-small text-ink-faint">Waiting for your screen…</p>
+          )}
+        </div>
+        {(holdError ?? frameError) && (
+          <p className="mt-2 text-small text-danger">{holdError ?? frameError}</p>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -374,7 +503,11 @@ function Screen({
 
   // The whole desktop when the box has one, else the screencast stays the view. Holding the lease
   // swaps the view-only stream for the lease's input server, and giving it back swaps it again.
+  const hasDesktop = bot.control === "computer";
   useEffect(() => {
+    if (!hasDesktop) {
+      return undefined;
+    }
     const ended = new AbortController();
     const opening = postCommand(
       controlLease === null
@@ -399,7 +532,7 @@ function Screen({
       setDesktop(false);
       void opening.then((rfb) => rfb?.disconnect());
     };
-  }, [bot.id, controlLease]);
+  }, [bot.id, controlLease, hasDesktop]);
 
   function send(message: HandoffClientMessage) {
     if (socket.current?.readyState === WebSocket.OPEN) {

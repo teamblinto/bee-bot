@@ -40,7 +40,7 @@ const bot = (id: string, name: string) =>
     id,
     name,
     boundary: "box",
-    manifest: [] as string[],
+    control: "computer",
     pauseReason: null,
     status: "ready",
   }) as Bot;
@@ -51,8 +51,9 @@ function connection(): ConnectionState {
     bots: [
       bot("ada", "Ada"),
       bot("bo", "Bo"),
-      { ...bot("cy", "Cy"), boundary: "host" },
-      { ...bot("ed", "Ed"), boundary: "host", manifest: ["browser"] },
+      { ...bot("cy", "Cy"), boundary: "host", control: "none" },
+      { ...bot("fy", "Fy"), control: "host" },
+      { ...bot("ed", "Ed"), boundary: "host", control: "browser" },
       bot("di", "Di"),
     ],
     runs: [{ id: "run-ada", botId: "ada", status: "Running" } as Run],

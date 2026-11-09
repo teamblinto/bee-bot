@@ -295,6 +295,8 @@ export function ChatView({
         <Workspace
           bot={bot}
           boxes={connection.boxAvailability}
+          hostControl={connection.hostControl}
+          working={active}
           activity={connection.activity[bot.id]}
           tab={workspace.tab}
           liveTab={workspace.liveTab}

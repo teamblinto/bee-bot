@@ -656,6 +656,21 @@ export const migrations: Array<{
     // The Podman machine boxes last came up in, which Bee starts again after a reboot.
     sql: "ALTER TABLE settings ADD COLUMN box_machine_set_up TEXT",
   },
+  {
+    name: "bot_control",
+    // Stored events lack the new required field, so they would not parse. Clients get a snapshot.
+    // A box bot or one with the browser grant had both its own desktop and browser. The control
+    // mode replaces that grant, so the grant goes.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN control TEXT NOT NULL DEFAULT 'none'
+      CHECK (control IN ('browser', 'computer', 'host', 'none'));
+    UPDATE bots SET
+      control = CASE WHEN boundary = 'box'
+        OR EXISTS (SELECT 1 FROM json_each(bots.manifest) WHERE value = 'browser')
+        THEN 'computer' ELSE 'none' END,
+      manifest = (SELECT json_group_array(value) FROM
+        (SELECT value FROM json_each(bots.manifest) WHERE value <> 'browser' ORDER BY value));`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -916,7 +931,7 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.profile, b.boundary, b.manifest, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
+    b.profile, b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
     b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
@@ -2379,9 +2394,8 @@ export function openEventStore(dataDir: string) {
           return undefined;
         }
         const run = RunRow.parse(row);
-        const { name, personality, model, effort, mode, projectPath, profile } = BotRow.parse(
-          selectBot.get(run.botId),
-        );
+        const { name, personality, model, effort, mode, projectPath, profile, control } =
+          BotRow.parse(selectBot.get(run.botId));
         let scope = getScope(run.scopeId);
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         let sessionId = scope.sessionId;
@@ -2417,6 +2431,7 @@ export function openEventStore(dataDir: string) {
             model,
             effort,
             mode,
+            control,
             projectPath,
             memory,
           },

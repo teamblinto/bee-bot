@@ -1,35 +1,60 @@
 import type * as NodeHttp from "node:http";
 
+import type { BotControl } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
 import { botToolNames, botTools } from "./botTools.ts";
 import { browserToolNames, browserTools, takeoverTool } from "./browser.ts";
-import { computerToolNames, computerTools, type ToolContent } from "./computer.ts";
+import {
+  boxScreen,
+  computerToolNames,
+  computerTools,
+  type ScreenSize,
+  type ToolContent,
+} from "./computer.ts";
 import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
 
-const tools = [
-  {
-    name: "approve",
-    description: "Asks the owner whether a tool call may run.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tool_name: { type: "string" },
-        input: { type: "object" },
-        tool_use_id: { type: "string" },
-      },
-      required: ["tool_name", "input"],
+type Tool = { name: string; description: string; inputSchema: object };
+
+const approveTool = {
+  name: "approve",
+  description: "Asks the owner whether a tool call may run.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      tool_name: { type: "string" },
+      input: { type: "object" },
+      tool_use_id: { type: "string" },
     },
+    required: ["tool_name", "input"],
   },
-  ...memoryTools,
-  ...botTools,
-  ...browserTools,
-  takeoverTool,
-  ...computerTools,
-];
+};
+
+// The tools a bot sees follow its control mode, so it never reaches for a screen it lacks. Each
+// call is still checked against the mode by the broker.
+export function toolsFor(control: BotControl, screen: ScreenSize | undefined): Tool[] {
+  const browsing = control === "browser" || control === "computer";
+  return [
+    approveTool,
+    ...memoryTools,
+    ...botTools,
+    ...(browsing ? [...browserTools, takeoverTool] : []),
+    ...(control === "computer" ? computerTools(boxScreen, "box") : []),
+    ...(control === "host" && screen ? computerTools(screen, "host") : []),
+  ];
+}
+
+export type McpHandlers = {
+  approve: (args: unknown, closed: AbortSignal) => Promise<Decision>;
+  memory: (name: string, args: unknown) => string;
+  bot: (name: string, args: unknown) => string;
+  browser: (name: string, args: unknown) => Promise<string>;
+  computer: (name: string, args: unknown) => Promise<ToolContent[]>;
+  tools: () => Promise<Tool[]>;
+};
 const memoryNames = new Set(memoryTools.map(({ name }) => name));
 
 const Rpc = z.object({
@@ -84,11 +109,7 @@ async function streamToolCall(
 export async function answerMcp(
   response: NodeHttp.ServerResponse,
   body: string,
-  approve: (args: unknown, closed: AbortSignal) => Promise<Decision>,
-  memory: (name: string, args: unknown) => string,
-  bot: (name: string, args: unknown) => string,
-  browser: (name: string, args: unknown) => Promise<string>,
-  computer: (name: string, args: unknown) => Promise<ToolContent[]>,
+  { approve, memory, bot, browser, computer, tools }: McpHandlers,
   keepaliveMs = defaultKeepaliveMs,
 ) {
   const rpc = parseRpc(body);
@@ -112,7 +133,7 @@ export async function answerMcp(
       });
       return;
     case "tools/list":
-      answer({ tools });
+      answer({ tools: await tools() });
       return;
     case "ping":
       answer({});

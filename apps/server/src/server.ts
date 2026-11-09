@@ -42,7 +42,14 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
-import { computerExecutors, createComputer, hasComputer } from "./computer.ts";
+import {
+  boxScreen,
+  computerExecutors,
+  createComputer,
+  hasBoxDesktop,
+  type Screen,
+} from "./computer.ts";
+import { createHostScreen, type HostDriver, hostAvailability } from "./hostScreen.ts";
 import {
   createDesktopControl,
   createDisplayTickets,
@@ -52,7 +59,7 @@ import {
 import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
-import { answerMcp, sendJson } from "./mcp.ts";
+import { answerMcp, toolsFor, sendJson } from "./mcp.ts";
 import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
@@ -103,6 +110,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   // Setting boxes up and whether they can run. Without it, `box` alone means they can.
   boxes?: BoxService | undefined;
   browserRuntime?: BrowserRuntime | undefined;
+  // Only the desktop app's server on Windows gets it: `host` bots drive this desktop through it.
+  hostDriver?: (() => Promise<HostDriver>) | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -183,8 +192,28 @@ export async function startServer({
   box,
   boxes,
   browserRuntime = noBrowser,
+  hostDriver,
 }: Options) {
   const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
+  const host = hostDriver && createHostScreen({ start: hostDriver, busy: store.botBusy });
+  const hostControl = () => hostAvailability(host !== undefined, host?.held() ?? false);
+  // The screen a bot's control mode names: its box's desktop, or the owner's own.
+  function screenOf(botId: string): Screen | undefined {
+    const bot = store.getBot(botId);
+    if (bot?.control === "host") {
+      return hostControl().available ? host?.screen : undefined;
+    }
+    if (!boxes?.ready() || !hasBoxDesktop(bot)) {
+      return undefined;
+    }
+    const { runtime } = boxes;
+    return {
+      kind: "box",
+      size: boxScreen,
+      screenshot: () => runtime.screenshot(botId),
+      input: (actions, signal) => runtime.input(botId, actions, signal),
+    };
+  }
   const terminals = box && createTerminals({ ...box, dataDir, bot: (id) => store.getBot(id) });
   const expectedToken = Buffer.from(token);
   const subscribers = new Set<WebSocket>();
@@ -267,7 +296,7 @@ export async function startServer({
   const displayTickets = createDisplayTickets();
   const desktop = createDesktopControl((botId, leaseId) => {
     computer.interrupt(botId);
-    return boxes && hasComputer(store.getBot(botId)) ? boxes.control(botId, leaseId) : undefined;
+    return boxes && hasBoxDesktop(store.getBot(botId)) ? boxes.control(botId, leaseId) : undefined;
   });
   const browser = createBrowserBroker({
     runtime: browserRuntime,
@@ -278,8 +307,7 @@ export async function startServer({
     activity: (botId, activity) => broadcast({ type: "activity", botId, ...activity }),
   });
   const computer = createComputer({
-    screen: (botId) =>
-      boxes?.ready() && hasComputer(store.getBot(botId)) ? boxes.runtime : undefined,
+    screen: screenOf,
     check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
     appendAudit: store.appendAudit,
     requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
@@ -717,6 +745,53 @@ export async function startServer({
         const bot = store.policy.setBotUnattendedLane(command.botId, command.lane);
         return bot ? applyEgress(bot) : notFound;
       }
+      case "set-bot-control": {
+        const { botId, control } = command;
+        const current = store.getBot(botId);
+        if (!current) {
+          return notFound;
+        }
+        if (control === current.control) {
+          return { status: 200, body: current };
+        }
+        if (control === "host" && !hostControl().available) {
+          return { status: 409, body: { code: "host_control_unavailable" } };
+        }
+        // A turn keeps the tools it started with, so a change waits for the bot to be idle.
+        if (store.botBusy(botId)) {
+          return { status: 409, body: { code: "bot_busy" } };
+        }
+        computer.interrupt(botId);
+        const bot = store.policy.setBotControl(botId, control);
+        if ((control === "browser" || control === "computer") && boxes?.ready()) {
+          boxes.prepare(botId).catch((error: unknown) => {
+            console.error(`beebotd: box for ${botId} didn't come up: ${(error as Error)?.message}`);
+          });
+        }
+        return { status: 200, body: bot };
+      }
+      case "host-frame":
+        if (!host || !hostControl().available) {
+          return { status: 409, body: { code: "host_control_unavailable" } };
+        }
+        return host.frame().then(
+          (frame) => ({ status: 200, body: frame }),
+          (error: unknown) => {
+            console.error(`beebotd: host frame failed: ${(error as Error)?.message}`);
+            return { status: 503, body: { code: "host_screen_failed" } };
+          },
+        );
+      case "host-hold": {
+        if (!host) {
+          return { status: 409, body: { code: "host_control_unavailable" } };
+        }
+        const driving = host.hold(command.held);
+        if (driving) {
+          computer.interrupt(driving);
+        }
+        broadcast({ type: "host-control", availability: hostControl() });
+        return ok;
+      }
       case "set-box-machine":
         store.setBoxMachine(command.machine);
         void boxes?.refresh();
@@ -726,7 +801,7 @@ export async function startServer({
         if (!bot) {
           return notFound;
         }
-        if (!boxes || !hasComputer(bot)) {
+        if (!boxes || !hasBoxDesktop(bot)) {
           return { status: 409, body: { code: "no_display" } };
         }
         const { mode, leaseId } = command;
@@ -810,15 +885,28 @@ export async function startServer({
     await answerMcp(
       response,
       body,
-      (args, closed) => approvals.approve(run, args, closed),
-      (name, args) =>
-        gateTool(store.policy, run, name, args, () => callMemoryTool(store, run, name, args)),
-      (name, args) =>
-        gateTool(store.policy, run, name, args, () =>
-          callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
-        ),
-      (name, args) => browser.call(run, name, args),
-      (name, args) => computer.call(run, name, args),
+      {
+        approve: (args, closed) => approvals.approve(run, args, closed),
+        memory: (name, args) =>
+          gateTool(store.policy, run, name, args, () => callMemoryTool(store, run, name, args)),
+        bot: (name, args) =>
+          gateTool(store.policy, run, name, args, () =>
+            callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
+          ),
+        browser: (name, args) => browser.call(run, name, args),
+        computer: (name, args) => computer.call(run, name, args),
+        tools: async () => {
+          const control = store.getBot(run.botId)?.control ?? "none";
+          if (control !== "host" || !host || !hostControl().available) {
+            return toolsFor(control, undefined);
+          }
+          // The bot's coordinates are the display's, fitted, so the size is read before it looks.
+          await host.measure().catch((error: unknown) => {
+            console.error(`beebotd: host screen unavailable: ${(error as Error)?.message}`);
+          });
+          return toolsFor(control, host.screen.size);
+        },
+      },
       mcpKeepaliveMs,
     );
   }
@@ -1054,6 +1142,7 @@ export async function startServer({
           if (boxes) {
             send(client, { type: "box-availability", availability: boxes.availability() });
           }
+          send(client, { type: "host-control", availability: hostControl() });
           subscribers.add(client);
         } catch (error) {
           console.error(error);
@@ -1111,6 +1200,7 @@ export async function startServer({
         client.terminate();
       }
       desktop.close();
+      host?.close();
       await browser.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { Bot, BoxAvailability, Run } from "@beebot/contracts";
+import type { Bot, BoxAvailability, HostControlAvailability, Run } from "@beebot/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -74,7 +74,7 @@ const bot = {
   id: "8a6b3c34-6f6e-4b8e-9d1c-3f1a2b4c5d6e",
   name: "Ada",
   boundary: "host",
-  manifest: ["browser"],
+  control: "computer",
   pauseReason: null,
 } as unknown as Bot;
 const leaseId = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b";
@@ -108,6 +108,8 @@ async function show(
       <Workspace
         bot={shown}
         boxes={boxes}
+        hostControl={undefined}
+        working={false}
         activity={undefined}
         tab={tab}
         liveTab={undefined}
@@ -233,7 +235,7 @@ it("resizes within its bounds and remembers the width", async () => {
 
 it("offers the bot's settings instead of a screen when it has no computer or browser", async () => {
   const onEdit = vi.fn();
-  await show("computer", onEdit, { ...bot, manifest: [] });
+  await show("computer", onEdit, { ...bot, control: "none" });
   expect(sockets).toHaveLength(0);
   expect(postCommand).not.toHaveBeenCalled();
   act(() => query<HTMLButtonElement>("aside button.button-outline")?.click());
@@ -266,8 +268,16 @@ let workspace: Hook;
 const report = (hook: Hook) => {
   workspace = hook;
 };
-function Harness({ run, tools }: { run: Run | undefined; tools: LiveTool[] }) {
-  report(useWorkspace(bot, run, tools, undefined, false));
+function Harness({
+  run,
+  tools,
+  shown = bot,
+}: {
+  run: Run | undefined;
+  tools: LiveTool[];
+  shown?: Bot;
+}) {
+  report(useWorkspace(shown, run, tools, undefined, false));
   return null;
 }
 
@@ -314,4 +324,123 @@ it("remembers the tab the owner picks for each bot", async () => {
   root = createRoot(host);
   act(() => root.render(<Harness run={undefined} tools={[]} />));
   expect(workspace.tab).toBe("browser");
+});
+
+it("shows only the tabs the bot's control mode has", async () => {
+  postCommand.mockResolvedValue({ ok: false, message: "no" });
+  const tabNames = () => [...host.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
+  await show("computer");
+  expect(tabNames()).toEqual(["Computer", "Browser"]);
+
+  postCommand.mockClear();
+  await show("browser", vi.fn(), { ...bot, control: "browser" });
+  expect(tabNames()).toEqual(["Browser"]);
+  expect(postCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "display-ticket" }));
+
+  await showHost({ available: true, problem: null, held: false });
+  expect(tabNames()).toEqual(["Your screen"]);
+
+  await show("computer", vi.fn(), { ...bot, control: "none" });
+  expect(tabNames()).toEqual([]);
+});
+
+async function showHost(hostControl: HostControlAvailability | undefined, working = false) {
+  await act(async () =>
+    root.render(
+      <Workspace
+        bot={{ ...bot, control: "host" }}
+        boxes={undefined}
+        hostControl={hostControl}
+        working={working}
+        activity={undefined}
+        tab="host"
+        liveTab={undefined}
+        onTab={vi.fn()}
+        onClose={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    ),
+  );
+}
+
+const frameCalls = () =>
+  postCommand.mock.calls.filter(([command]) => command.type === "host-frame").length;
+
+it("polls the owner's screen, faster while the bot works, and stops when closed", async () => {
+  vi.useFakeTimers();
+  try {
+    postCommand.mockResolvedValue({ ok: true, body: { data: "BBBB", width: 1920, height: 1080 } });
+    const available = { available: true, problem: null, held: false };
+    await showHost(available);
+    expect(frameCalls()).toBe(1);
+    expect(query("img")?.getAttribute("src")).toBe("data:image/jpeg;base64,BBBB");
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(frameCalls()).toBe(1);
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(frameCalls()).toBe(2);
+
+    await showHost(available, true);
+    expect(frameCalls()).toBe(3);
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(frameCalls()).toBe(4);
+
+    act(() => root.unmount());
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(frameCalls()).toBe(4);
+    root = createRoot(host);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("takes the owner's computer back from bots, and hands it back", async () => {
+  postCommand.mockResolvedValue({ ok: true, body: {} });
+  await showHost({ available: true, problem: null, held: false });
+  const holdButton = () => query<HTMLButtonElement>("aside > div.border-b button");
+  await act(async () => holdButton()?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: true });
+
+  await showHost({ available: true, problem: null, held: true });
+  await act(async () => holdButton()?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: false });
+});
+
+it("doesn't ask for the owner's screen when this computer can't be used", async () => {
+  await showHost({ available: false, problem: "Only the Windows app can.", held: false });
+  expect(postCommand).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("Only the Windows app can.");
+});
+
+it("opens a host bot's screen tools and remembered tab on the owner's screen", async () => {
+  const hostBot = { ...bot, control: "host" as const };
+  localStorage.setItem(`beebot.workspaceTab.${bot.id}`, "browser");
+  act(() => root.render(<Harness run={undefined} tools={[]} shown={hostBot} />));
+  expect(workspace.tab).toBe("host");
+  act(() =>
+    root.render(
+      <Harness
+        run={runOf("r1")}
+        tools={[tool("t1", "mcp__bee__computer_click")]}
+        shown={hostBot}
+      />,
+    ),
+  );
+  expect(workspace).toMatchObject({ open: true, tab: "host", liveTab: "host" });
+});
+
+it("gives a browser-only bot's takeover the Browser tab", async () => {
+  localStorage.setItem(`beebot.workspaceTab.${bot.id}`, "computer");
+  const browserBot = { ...bot, control: "browser" as const };
+  act(() => root.render(<Harness run={undefined} tools={[]} shown={browserBot} />));
+  expect(workspace.tab).toBe("browser");
+  act(() =>
+    root.render(
+      <Harness
+        run={undefined}
+        tools={[]}
+        shown={{ ...browserBot, pauseReason: "browser_session" }}
+      />,
+    ),
+  );
+  expect(workspace).toMatchObject({ open: true, tab: "browser", liveTab: "browser" });
 });

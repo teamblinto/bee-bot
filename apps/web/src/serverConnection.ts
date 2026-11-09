@@ -2,11 +2,11 @@ import {
   AuditPage,
   type Bot,
   type BoxAvailability,
-  browserGrant,
   type ChatState,
   type ClientMessage,
   type Command,
   EngineStatus,
+  type HostControlAvailability,
   type ModelCatalog,
   type PendingApproval,
   protocolVersion,
@@ -52,6 +52,8 @@ export type ConnectionState = {
   models: ModelCatalog | undefined;
   // Undefined from a server that can't run boxes.
   boxAvailability: BoxAvailability | undefined;
+  // Whether a `host` bot may use this computer. Undefined until the server sends it.
+  hostControl: HostControlAvailability | undefined;
   engine: EngineStatus | undefined;
   engineChecking: boolean;
   // Last bot message read, by bot ID. Mirrors localStorage.
@@ -82,9 +84,11 @@ export const waitingOnOwner = (chat: ChatState, botId: string) =>
   chat.continuations.some((continuation) => continuation.botId === botId) ||
   openCards(chat, botId).length > 0;
 
-// Boxes run the computer, for a bot in one and for a bot with a browser.
-export const hasComputer = (bot: Bot, boxes: BoxAvailability | undefined) =>
-  boxes?.available === true && (bot.boundary === "box" || bot.manifest.includes(browserGrant));
+// A bot's own browser and computer run in its box.
+export const drivesBox = (bot: Bot) => bot.control === "browser" || bot.control === "computer";
+
+export const hasBoxScreen = (bot: Bot, boxes: BoxAvailability | undefined) =>
+  boxes?.available === true && drivesBox(bot);
 
 function upsert<T extends { id: string }>(items: T[], item: T) {
   return items.some(({ id }) => id === item.id)
@@ -249,6 +253,8 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
       return { ...state, models: message.models };
     case "box-availability":
       return { ...state, boxAvailability: message.availability };
+    case "host-control":
+      return { ...state, hostControl: message.availability };
     case "thumbnail":
       return { ...state, thumbnails: { ...state.thumbnails, [message.botId]: message.data } };
     case "wall":
@@ -339,6 +345,7 @@ let state: ConnectionState = {
   pending: [],
   models: undefined,
   boxAvailability: undefined,
+  hostControl: undefined,
   engine: undefined,
   engineChecking: false,
   lastSeen: readLastSeen(),
@@ -559,6 +566,8 @@ const errorSentences: Record<string, string> = {
   bot_busy: "This bot is working. Wait for it to finish or stop it, then try again.",
   boxes_unavailable: "Boxes aren't available. Set them up on the Usage page first.",
   boxes_unsupported: "This server can't run boxes.",
+  host_control_unavailable: "Bots can't use this computer right now.",
+  host_screen_failed: "Bee Bot couldn't show your screen. Try again in a moment.",
   bad_egress_host:
     "Enter site names only, like pypi.org: no https://, path, port, wildcard, IP address or local name.",
   automated_access_unacknowledged:

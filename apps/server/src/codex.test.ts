@@ -45,6 +45,7 @@ const launch: BotLaunch = {
   model: "gpt-6.1-sol",
   effort: null,
   mode: "build",
+  control: "none",
   projectPath: null,
   memory: "",
 };
@@ -271,7 +272,9 @@ describe("the launch", () => {
       approvalPolicy: "untrusted",
       approvalsReviewer: "user",
       sandbox: "workspace-write",
-      developerInstructions: "Your name is Ada.\n\nTerse.",
+      developerInstructions:
+        "Your name is Ada.\n\nTerse.\n\nYou have no web browser or computer to use. If a task " +
+        "needs one, tell the owner.",
     });
     expect(called("thread/start")).not.toHaveProperty("ephemeral");
     expect(called("turn/start")).toEqual({

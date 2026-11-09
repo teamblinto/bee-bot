@@ -260,6 +260,7 @@ const bot: Bot = {
   profile: "operator",
   boundary: "host",
   manifest: [],
+  control: "none",
   egressAnySite: true,
   egressHosts: [],
   unattendedLane: "api_key",

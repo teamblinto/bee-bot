@@ -48,6 +48,7 @@ const launchFor = (botId: string, engineAccountId: string, lane: BotLaunch["lane
   model: "opus",
   effort: null,
   mode: "build",
+  control: "none",
   projectPath: null,
   memory: "",
 });

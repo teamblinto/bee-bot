@@ -1,4 +1,4 @@
-import { type BotProfile, browserGrant, Manifest } from "@beebot/contracts";
+import { type BotControl, type BotProfile, browserGrant, Manifest } from "@beebot/contracts";
 
 // Static per tool, never taken from the model: the Rule of Two legs a call touches.
 export type ToolLabels = { readsUntrusted: boolean; readsPrivate: boolean; sideEffect: boolean };
@@ -72,6 +72,20 @@ const engineRules: Record<string, ToolRule> = {
   Bash: { labels: legs("readsPrivate", "sideEffect") },
 };
 
+export const computerGrant = "computer";
+const controlGrants: Record<BotControl, string[]> = {
+  browser: [browserGrant],
+  computer: [browserGrant, computerGrant],
+  host: [computerGrant],
+  none: [],
+};
+
+// The browser and the desktop are granted by the control mode alone, never by the manifest.
+export const grantsOf = (manifest: Manifest, control: BotControl) => [
+  ...manifest.filter((grant) => grant !== browserGrant && grant !== computerGrant),
+  ...controlGrants[control],
+];
+
 // Every page is untrusted, and a click, a typed value or the URL itself can send something out.
 const browserRules: Record<string, ToolRule> = {
   browser_navigate: { labels: legs("readsUntrusted", "sideEffect"), grant: browserGrant },
@@ -84,16 +98,16 @@ const browserRules: Record<string, ToolRule> = {
   },
 };
 
-// The desktop is the browser's sidecar, so it takes the same grant. Every screen is untrusted, and
-// any click, key or typed text can send something out.
+// A box desktop or the owner's own one, whichever the bot's control mode names. Every screen is
+// untrusted, and any click, key or typed text can send something out.
 const consequential = legs("readsUntrusted", "sideEffect");
 const computerRules: Record<string, ToolRule> = {
-  computer_screenshot: { labels: legs("readsUntrusted"), grant: browserGrant },
-  computer_click: { labels: consequential, grant: browserGrant },
-  computer_type: { labels: consequential, grant: browserGrant, typed: true },
-  computer_key: { labels: consequential, grant: browserGrant },
-  computer_scroll: { labels: consequential, grant: browserGrant },
-  computer_drag: { labels: consequential, grant: browserGrant },
+  computer_screenshot: { labels: legs("readsUntrusted"), grant: computerGrant },
+  computer_click: { labels: consequential, grant: computerGrant },
+  computer_type: { labels: consequential, grant: computerGrant, typed: true },
+  computer_key: { labels: consequential, grant: computerGrant },
+  computer_scroll: { labels: consequential, grant: computerGrant },
+  computer_drag: { labels: consequential, grant: computerGrant },
 };
 
 export const toolRules: Record<string, ToolRule> = {

@@ -148,7 +148,7 @@ async function subscribe(port: number, afterSeq: number) {
   const waiters: Array<(message: ServerMessage) => void> = [];
   socket.on("message", (data) => {
     const message = ServerMessage.parse(JSON.parse(data.toString()));
-    if (message.type === "pending-approvals" || message.type === "model-catalog") {
+    if (["pending-approvals", "model-catalog", "host-control"].includes(message.type)) {
       return;
     }
     const waiter = waiters.shift();

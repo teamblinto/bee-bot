@@ -238,7 +238,7 @@ async function boot(browserRuntime: BrowserRuntime = browser.runtime) {
   const make = (name: string, profile: "reader" | "researcher" | "operator") => {
     const bot = store.createBot({ name, personality: "", engineAccountId: "fake" });
     store.policy.setBotProfile(bot.id, profile);
-    store.policy.setBotManifest(bot.id, ["browser"]);
+    store.policy.setBotControl(bot.id, "computer");
     store.policy.setBotBoundary(bot.id, "box");
     store.addMemory({ botId: bot.id, type: "user", text: `The vault PIN is ${canary.memory}.` });
     const workspace = workspacePath(dataDir, bot.id);

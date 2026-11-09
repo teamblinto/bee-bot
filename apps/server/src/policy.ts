@@ -5,6 +5,7 @@ import {
   type AuditPage,
   type Bot,
   type BotBoundary,
+  BotControl,
   BotProfile,
   type EngineLane,
   type Manifest,
@@ -16,6 +17,7 @@ import {
   type Decide,
   decide as brokerDecide,
   decideTool,
+  grantsOf,
   parseManifest,
   type PolicyDecision,
   ruleFor,
@@ -26,7 +28,7 @@ export type BrokerRun = { id: string; botId: string; attended: boolean };
 
 const flag = z.number().transform((value) => value === 1);
 const Legs = z.object({ readsUntrusted: flag, readsPrivate: flag, sideEffect: flag });
-const BotPolicy = z.object({ profile: BotProfile, manifest: z.string() });
+const BotPolicy = z.object({ profile: BotProfile, manifest: z.string(), control: BotControl });
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -53,11 +55,14 @@ export function openPolicy(
   getBot: (id: string) => Bot | undefined,
 ) {
   const { appendAudit, auditPage, brokenAuditRow } = openAudit(db);
-  const selectBotPolicy = db.prepare("SELECT profile, manifest FROM bots WHERE id = ?");
+  const selectBotPolicy = db.prepare("SELECT profile, manifest, control FROM bots WHERE id = ?");
   const updateProfile = db.prepare("UPDATE bots SET profile = ? WHERE id = ?");
   const updateManifest = db.prepare("UPDATE bots SET manifest = ? WHERE id = ?");
   const updateBoundary = db.prepare(
     "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
+  );
+  const updateControl = db.prepare(
+    "UPDATE bots SET control = ? WHERE id = ? AND control <> ? RETURNING id",
   );
   const updateAnySite = db.prepare("UPDATE bots SET egress_any_site = ? WHERE id = ?");
   const clearEgressHosts = db.prepare("DELETE FROM bot_egress_hosts WHERE bot_id = ?");
@@ -101,12 +106,12 @@ export function openPolicy(
         const rule = ruleFor(tool);
         let decision: PolicyDecision = { kind: "deny", reason: "unknown_run" };
         if (row && legsRow) {
-          const { profile, manifest } = BotPolicy.parse(row);
+          const { profile, manifest, control } = BotPolicy.parse(row);
           decision = decideTool(
             { botId: run.botId, runId: run.id, tool },
             {
               profile,
-              manifest: parseManifest(manifest),
+              manifest: grantsOf(parseManifest(manifest), control),
               session: Legs.parse(legsRow),
               attended: run.attended,
             },
@@ -227,6 +232,26 @@ export function openPolicy(
             attended: true,
             status: "boundary_set",
             reason: boundary,
+          });
+        }
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+        }
+        return bot;
+      }),
+
+    // Takes effect at the next call, like the manifest.
+    setBotControl: (botId: string, control: BotControl) =>
+      transaction(() => {
+        if (updateControl.get(control, botId, control)) {
+          appendAudit({
+            runId: null,
+            botId,
+            initiator: "human",
+            attended: true,
+            status: "control_set",
+            reason: control,
           });
         }
         const bot = getBot(botId);

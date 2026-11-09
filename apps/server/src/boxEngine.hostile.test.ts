@@ -282,6 +282,7 @@ describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () =>
         model: "mock-model",
         effort: null,
         mode: "build",
+        control: "none",
         projectPath: null,
         memory: "",
       },

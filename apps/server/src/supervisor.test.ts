@@ -1200,6 +1200,7 @@ describe("fake engine", () => {
         model: "sonnet",
         effort: null,
         mode: "build",
+        control: "none",
         projectPath: null,
         memory: "",
       },

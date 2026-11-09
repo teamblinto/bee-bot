@@ -3,7 +3,7 @@ import { once } from "node:events";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers/promises";
 
-import type { ApprovalTool, Bot, EngineLane, PauseReason } from "@beebot/contracts";
+import type { ApprovalTool, Bot, BotControl, EngineLane, PauseReason } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
@@ -24,6 +24,7 @@ export type TurnOutcome =
 export type EngineChoice = Pick<Bot, "model" | "effort" | "mode">;
 
 export type BotLaunch = EngineChoice & {
+  control: BotControl;
   projectPath: string | null;
   botId: string;
   name: string;
@@ -42,8 +43,31 @@ export const workingFolder = (dataDir: string, botId: string, projectPath: strin
 const planNote =
   "This turn is in Plan mode. The owner can't see your plan file, so put the whole plan in your reply.";
 
-export function personaText({ name, personality, memory, mode }: BotLaunch) {
-  return [`Your name is ${name}.`, personality, memory, mode === "plan" ? planNote : ""]
+// Written from the mode the turn starts in, which is also the tools it is given.
+const controlNotes: Record<BotControl, string> = {
+  browser:
+    "You have your own web browser, apart from the owner's computer. Use it with the browser_* " +
+    "tools. When a page needs the owner, such as a sign-in, ask with request_takeover.",
+  computer:
+    "You have your own computer: a Linux desktop apart from the owner's computer, with a web " +
+    "browser on it. See and use the desktop with the computer_* tools, and use the browser_* " +
+    "tools for web pages. When a step needs the owner, ask with request_takeover.",
+  host:
+    "You may use the owner's own computer, their real desktop with their apps and accounts, " +
+    "with the computer_* tools, and only while they watch. Take a screenshot first. Do only what " +
+    "they asked, and ask before anything you can't undo. If they move the mouse, stop and ask. " +
+    "Bee Bot's own window is off limits.",
+  none: "You have no web browser or computer to use. If a task needs one, tell the owner.",
+};
+
+export function personaText({ name, personality, memory, mode, control }: BotLaunch) {
+  return [
+    `Your name is ${name}.`,
+    personality,
+    memory,
+    controlNotes[control],
+    mode === "plan" ? planNote : "",
+  ]
     .filter(Boolean)
     .join("\n\n");
 }

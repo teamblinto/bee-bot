@@ -8,7 +8,15 @@ import type { AuditRecord } from "./audit.ts";
 import type { Activity } from "./browser.ts";
 import type { PolicyDecision } from "./broker.ts";
 import type { Desk } from "./browserLease.ts";
-import { computerExecutors, createComputer, glide, type ToolContent } from "./computer.ts";
+import {
+  boxScreen,
+  computerExecutors,
+  createComputer,
+  glide,
+  type Screen,
+  ScreenRefusal,
+  type ToolContent,
+} from "./computer.ts";
 import { answerMcp } from "./mcp.ts";
 
 const run = { id: "run-1", botId: "bot-1", attended: true };
@@ -28,7 +36,9 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
     screen: (botId) =>
       botId === "bot-1"
         ? {
-            input: async (_botId, actions, signal) => {
+            kind: "box",
+            size: boxScreen,
+            input: async (actions, signal) => {
               inputs.push(actions);
               while (state.stuck) {
                 signal?.throwIfAborted();
@@ -205,6 +215,69 @@ describe("computer tools", () => {
   });
 });
 
+describe("the owner's computer", () => {
+  function hostSetup(screen: Pick<Screen, "input" | "refuse">) {
+    const audits: AuditRecord[] = [];
+    const computer = createComputer({
+      screen: () => ({
+        kind: "host",
+        size: { width: 1280, height: 720 },
+        screenshot: async () => Buffer.from("desktop"),
+        ...screen,
+      }),
+      check: () => ({ kind: "allow" }),
+      appendAudit: (record) => audits.push(record),
+      requestApproval: () => "",
+      lease: () => {
+        throw new Error("the host screen has no box lease");
+      },
+      observed: () => {},
+    });
+    return { computer, audits };
+  }
+
+  it("answers the screen's own refusal and audits it, without touching the screen", async () => {
+    const inputs: InputAction[][] = [];
+    const { computer, audits } = hostSetup({
+      input: async (actions) => {
+        inputs.push(actions);
+      },
+      refuse: () => "Another bot is using the owner's computer.",
+    });
+    const answer = await computer.call(run, "computer_click", { x: 1, y: 1 });
+    expect(refusal(answer)).toMatchObject({
+      status: "refused",
+      reason: "Another bot is using the owner's computer.",
+    });
+    expect(inputs).toEqual([]);
+    expect(audits).toMatchObject([
+      { status: "refused", reason: "screen_refused", tool: "computer_click", botId: "bot-1" },
+    ]);
+  });
+
+  it("answers a refusal mid-input with its words, not as an unavailable computer", async () => {
+    const { computer, audits } = hostSetup({
+      input: async () => {
+        throw new ScreenRefusal("The owner moved the mouse, so you stopped.");
+      },
+    });
+    const answer = await computer.call(run, "computer_type", { text: "hi" });
+    expect(refusal(answer)).toMatchObject({
+      status: "refused",
+      reason: "The owner moved the mouse, so you stopped.",
+    });
+    expect(audits).toMatchObject([{ reason: "screen_refused", tool: "computer_type" }]);
+  });
+
+  it("takes coordinates on the host's fitted screen, not the box's", async () => {
+    const { computer } = hostSetup({ input: async () => {} });
+    expect(refusal(await computer.call(run, "computer_click", { x: 1, y: 720 }))).toMatchObject({
+      status: "refused",
+    });
+    expect(await computer.call(run, "computer_click", { x: 1, y: 719 })).toEqual(image("desktop"));
+  });
+});
+
 describe("MCP", () => {
   it("answers a computer tool with its image content", async () => {
     const shot = image("png-bytes");
@@ -213,15 +286,14 @@ describe("MCP", () => {
       for await (const chunk of request) {
         chunks.push(chunk as Buffer);
       }
-      await answerMcp(
-        response,
-        String(Buffer.concat(chunks)),
-        async () => ({ behavior: "deny", message: "" }),
-        () => "",
-        () => "",
-        async () => "",
-        async () => shot,
-      );
+      await answerMcp(response, String(Buffer.concat(chunks)), {
+        approve: async () => ({ behavior: "deny", message: "" }),
+        memory: () => "",
+        bot: () => "",
+        browser: async () => "",
+        computer: async () => shot,
+        tools: async () => [],
+      });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {

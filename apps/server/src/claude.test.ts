@@ -39,11 +39,14 @@ const launch: BotLaunch = {
   model: "opus",
   effort: null,
   mode: "build",
+  control: "none",
   projectPath: null,
   memory: "",
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };
+const noComputer =
+  "You have no web browser or computer to use. If a task needs one, tell the owner.";
 
 let dataDir: string;
 let logPath: string;
@@ -333,10 +336,12 @@ describe("a turn", () => {
     const personaPath = NodePath.join(dataDir, "bots", launch.botId, "persona.md");
     await turn("success", undefined, false, "[Saved memory]\n- likes tea").outcome;
     expect(NodeFS.readFileSync(personaPath, "utf8")).toBe(
-      "Your name is Ada.\n\nTerse.\n\n[Saved memory]\n- likes tea",
+      `Your name is Ada.\n\nTerse.\n\n[Saved memory]\n- likes tea\n\n${noComputer}`,
     );
     await turn("success").outcome;
-    expect(NodeFS.readFileSync(personaPath, "utf8")).toBe("Your name is Ada.\n\nTerse.");
+    expect(NodeFS.readFileSync(personaPath, "utf8")).toBe(
+      `Your name is Ada.\n\nTerse.\n\n${noComputer}`,
+    );
   });
 
   it("passes the prompt on stdin only, with no banned flag", async () => {
