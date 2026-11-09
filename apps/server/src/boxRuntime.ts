@@ -2,6 +2,7 @@ import * as NodeChildProcess from "node:child_process";
 import { once } from "node:events";
 import { Duplex, finished } from "node:stream";
 
+import type { InputAction } from "@beebot/boxd/protocol";
 import type { BoxState } from "@beebot/contracts";
 
 import { killTree } from "./engine.ts";
@@ -16,13 +17,16 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 // itself (R24). `writeBotFile` fills the bot's read-only directory in the box, `cdp` attaches to
 // the sidecar's DevTools, `display` to its desktop's view-only VNC server (or, with a lease, to that
 // lease's input server), `control` runs a lease's input server for as long as the attach lasts,
-// `capture` takes a small JPEG of a running box's desktop, and `collect` copies a finished download
-// into the workspace.
+// `capture` takes a small JPEG of a running box's desktop, `screenshot` a full-size PNG of it, `input`
+// runs mouse and keyboard actions on it, and `collect` copies a finished download into the
+// workspace.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
   writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
   cdp: (botId: string) => Promise<BoxAttach>;
   capture: (botId: string) => Promise<Buffer>;
+  screenshot: (botId: string) => Promise<Buffer>;
+  input: (botId: string, actions: InputAction[]) => Promise<void>;
   display: (botId: string, lease?: string) => Promise<BoxAttach>;
   control: (botId: string, lease: string) => Promise<BoxAttach>;
   collect: (botId: string, file: string, name: string) => Promise<void>;
@@ -62,6 +66,12 @@ export function createFakeBoxRuntime(): BoxRuntime {
       throw new Error("no sidecar in the fake box runtime");
     },
     capture: async () => {
+      throw new Error("no display in the fake box runtime");
+    },
+    screenshot: async () => {
+      throw new Error("no display in the fake box runtime");
+    },
+    input: async () => {
       throw new Error("no display in the fake box runtime");
     },
     display: async () => {

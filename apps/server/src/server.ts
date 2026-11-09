@@ -42,6 +42,7 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
+import { computerExecutors, createComputer } from "./computer.ts";
 import {
   createDesktopControl,
   createDisplayTickets,
@@ -275,6 +276,16 @@ export async function startServer({
     requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
     activity: (botId, activity) => broadcast({ type: "activity", botId, ...activity }),
   });
+  const computer = createComputer({
+    screen: (botId) =>
+      boxes?.ready() && store.getBot(botId)?.boundary === "box" ? boxes.runtime : undefined,
+    check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
+    appendAudit: store.appendAudit,
+    requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
+    lease: browser.lease,
+    observed: browser.observed,
+    activity: (botId, activity) => broadcast({ type: "activity", botId, ...activity }),
+  });
 
   // Only the wall's watchers get its messages. A slow one misses thumbnails rather than queueing them.
   const wallViewers = new Set<WebSocket>();
@@ -351,6 +362,7 @@ export async function startServer({
     decide,
     executors: new Map([
       ...browserExecutors(browser),
+      ...computerExecutors(computer),
       ...(box ? boxExecutors(box) : []),
       ...(executors ?? []),
     ]),
@@ -805,6 +817,7 @@ export async function startServer({
           callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
         ),
       (name, args) => browser.call(run, name, args),
+      (name, args) => computer.call(run, name, args),
       mcpKeepaliveMs,
     );
   }

@@ -57,6 +57,34 @@ describe("rule table", () => {
     });
   });
 
+  it("lets a granted bot look at its screen, and asks before it acts there unless the profile allows it", () => {
+    const actions = [
+      "computer_click",
+      "computer_type",
+      "computer_key",
+      "computer_scroll",
+      "computer_drag",
+    ];
+    expect(decideTool({ ...ids, tool: "computer_screenshot" }, context())).toEqual({
+      kind: "deny",
+      reason: "not_granted",
+    });
+    const operator = context({ manifest: ["browser"] });
+    const reader = context({ profile: "reader", manifest: ["browser"] });
+    const researcher = context({ profile: "researcher", manifest: ["browser"] });
+    expect(decideTool({ ...ids, tool: "computer_screenshot" }, reader).kind).toBe("allow");
+    for (const tool of actions) {
+      expect(decideTool({ ...ids, tool }, operator).kind, tool).toBe("approve");
+      expect(decideTool({ ...ids, tool }, reader).kind, tool).toBe("approve");
+      expect(decideTool({ ...ids, tool }, { ...operator, attended: false }), tool).toEqual({
+        kind: "deny",
+        reason: "nobody_watching",
+      });
+      expect(decideTool({ ...ids, tool }, researcher).kind, tool).toBe("allow");
+    }
+    expect(toolRules.computer_type?.typed).toBe(true);
+  });
+
   it("hands a human-only tool to a person, even when watched", () => {
     const signIn = { ...call("sign_in", noLegs), humanOnly: true };
     expect(decide(signIn, context({ profile: "researcher" })).kind).toBe("hand_off");

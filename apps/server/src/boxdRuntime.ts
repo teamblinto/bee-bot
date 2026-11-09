@@ -44,6 +44,7 @@ export type BoxdHooks = { relay?: () => Duplex };
 
 const chunkSize = 1024 * 1024;
 const maxCaptureBytes = 1024 * 1024;
+const maxScreenshotBytes = 8 * 1024 * 1024;
 const captureTimeoutMs = 10_000;
 
 // Speaks boxd's framed protocol over any byte stream: boxd's stdio through `podman machine ssh`,
@@ -256,11 +257,12 @@ export async function connectBoxd(
     return { stream: entry.stream, exited };
   }
 
-  // A thumbnail is about 10 KB; a stuck or oversized capture is cut off, which kills it in the box.
-  async function capture(botId: string) {
-    const { stream, exited } = await attach((channel) => request("capture", botId, { channel }));
+  // A thumbnail is about 10 KB and a full screenshot under 2 MB; a stuck or oversized output is cut
+  // off, which kills its process in the box.
+  async function output(open: (channel: number) => Promise<Response>, maxBytes: number) {
+    const { stream, exited } = await attach(open);
     const timer = setTimeout(
-      () => stream.destroy(new Error("capture timed out")),
+      () => stream.destroy(new Error("box output timed out")),
       captureTimeoutMs,
     );
     try {
@@ -269,19 +271,30 @@ export async function connectBoxd(
       let size = 0;
       for await (const chunk of stream as AsyncIterable<Buffer>) {
         size += chunk.length;
-        if (size > maxCaptureBytes) {
-          throw new Error("capture too large");
+        if (size > maxBytes) {
+          throw new Error("box output too large");
         }
         chunks.push(chunk);
       }
-      if ((await exited) !== 0 || size === 0) {
-        throw new Error("capture failed");
+      if ((await exited) !== 0) {
+        throw new Error("box command failed");
       }
       return Buffer.concat(chunks);
     } finally {
       clearTimeout(timer);
       stream.destroy();
     }
+  }
+
+  async function image(botId: string, full: boolean) {
+    const data = await output(
+      (channel) => request("capture", botId, full ? { channel, full } : { channel }),
+      full ? maxScreenshotBytes : maxCaptureBytes,
+    );
+    if (data.length === 0) {
+      throw new Error("capture failed");
+    }
+    return data;
   }
 
   transport.write(
@@ -307,7 +320,11 @@ export async function connectBoxd(
       await request("put", botId, { put: { name, content } });
     },
     cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
-    capture,
+    capture: (botId) => image(botId, false),
+    screenshot: (botId) => image(botId, true),
+    input: async (botId, input) => {
+      await output((channel) => request("input", botId, { channel, input }), 0);
+    },
     display: (botId, lease) =>
       attach((channel) =>
         request(

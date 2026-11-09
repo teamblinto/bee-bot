@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Decision } from "./approvals.ts";
 import { botToolNames, botTools } from "./botTools.ts";
 import { browserToolNames, browserTools, takeoverTool } from "./browser.ts";
+import { computerToolNames, computerTools, type ToolContent } from "./computer.ts";
 import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
@@ -27,6 +28,7 @@ const tools = [
   ...botTools,
   ...browserTools,
   takeoverTool,
+  ...computerTools,
 ];
 const memoryNames = new Set(memoryTools.map(({ name }) => name));
 
@@ -86,6 +88,7 @@ export async function answerMcp(
   memory: (name: string, args: unknown) => string,
   bot: (name: string, args: unknown) => string,
   browser: (name: string, args: unknown) => Promise<string>,
+  computer: (name: string, args: unknown) => Promise<ToolContent[]>,
   keepaliveMs = defaultKeepaliveMs,
 ) {
   const rpc = parseRpc(body);
@@ -147,6 +150,17 @@ export async function answerMcp(
           text = "The browser is unavailable right now.";
         }
         answer({ content: [{ type: "text", text }] });
+        return;
+      }
+      if (typeof params?.name === "string" && computerToolNames.has(params.name)) {
+        let content: ToolContent[];
+        try {
+          content = await computer(params.name, params.arguments);
+        } catch (error) {
+          console.error(`beebotd: computer tool ${params.name} failed: ${(error as Error)?.name}`);
+          content = [{ type: "text", text: "The computer is unavailable right now." }];
+        }
+        answer({ content });
         return;
       }
       const args = params?.name === "approve" ? params.arguments : undefined;

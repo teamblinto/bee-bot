@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 24;
+export const protocolVersion = 25;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -747,11 +747,12 @@ export const ServerMessage = z.discriminatedUnion("type", [
   // The bots a person controls right now, sent to wall watchers on joining and on every change.
   z.object({ type: z.literal("wall"), held: z.array(z.string()) }),
   // An action the bot just took on its screen. `x` and `y` are fractions of the screen's width and
-  // height. Typed text is masked as `•••` when it may be secret.
+  // height. Typed text is masked as `•••` when it may be secret; `key` carries the keys pressed and
+  // `scroll` the direction.
   z.object({
     type: z.literal("activity"),
     botId: z.string(),
-    kind: z.enum(["click", "type"]),
+    kind: z.enum(["click", "type", "key", "scroll"]),
     x: z.number().min(0).max(1),
     y: z.number().min(0).max(1),
     text: z.string().nullable(),

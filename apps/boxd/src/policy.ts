@@ -1,6 +1,6 @@
 import type { BoxState } from "@beebot/contracts";
 
-import { labelMac, sameHex } from "./protocol.ts";
+import { labelMac, maxTypedText, sameHex, screenSize, validKeys } from "./protocol.ts";
 
 export type Role = "engine" | "browser";
 export const roles: Role[] = ["engine", "browser"];
@@ -356,6 +356,88 @@ export const captureArgv = [
   "70",
   "jpeg:-",
 ];
+
+// What the bot sees when it takes a screenshot: the whole desktop at full size.
+export const fullCaptureArgv = ["import", "-display", ":1", "-window", "root", "png:-"];
+
+export const maxInputActions = 80;
+const wheel = { up: "4", down: "5", left: "6", right: "7" };
+
+function inputStep(action: unknown, last: boolean): string[] | undefined {
+  const field = (key: string): unknown =>
+    action && typeof action === "object" ? Reflect.get(action, key) : undefined;
+  // Only an integer in range reaches argv, so every number there is plain ASCII digits.
+  const int = (key: string, min: number, max: number) => {
+    const value = field(key);
+    return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max
+      ? String(value)
+      : undefined;
+  };
+  // A step is refused whole if any of its parts is.
+  const shape = (...parts: Array<string | undefined>) =>
+    parts.every((part) => part !== undefined) ? (parts as string[]) : undefined;
+  const button = int("button", 1, 3);
+  switch (field("type")) {
+    case "move": {
+      const x = int("x", 0, screenSize.width - 1);
+      const y = int("y", 0, screenSize.height - 1);
+      return shape("mousemove", "--", x, y);
+    }
+    case "click": {
+      const count = field("count") === undefined ? "1" : int("count", 1, 3);
+      return shape("click", "--repeat", count, button);
+    }
+    case "down":
+      return shape("mousedown", button);
+    case "up":
+      return shape("mouseup", button);
+    case "scroll": {
+      const direction = field("direction");
+      const amount = int("amount", 1, 20);
+      return typeof direction === "string" && Object.hasOwn(wheel, direction)
+        ? shape("click", "--repeat", amount, wheel[direction as keyof typeof wheel])
+        : undefined;
+    }
+    case "wait": {
+      const ms = int("ms", 0, 500);
+      return shape("sleep", ms && (Number(ms) / 1000).toFixed(3));
+    }
+    case "key": {
+      const keys = field("keys");
+      return last && typeof keys === "string" && validKeys(keys)
+        ? ["key", "--clearmodifiers", keys]
+        : undefined;
+    }
+    case "type": {
+      const text = field("text");
+      return last &&
+        typeof text === "string" &&
+        text.length > 0 &&
+        text.length <= maxTypedText &&
+        !text.includes("\0")
+        ? ["type", "--clearmodifiers", "--", text]
+        : undefined;
+    }
+  }
+  return undefined;
+}
+
+// One xdotool invocation chains every action. `key` and `type` take the rest of argv as theirs,
+// so they may only come last.
+export function inputArgv(actions: unknown): string[] | undefined {
+  if (!Array.isArray(actions) || actions.length === 0 || actions.length > maxInputActions) {
+    return undefined;
+  }
+  const argv = ["xdotool"];
+  for (const [index, action] of actions.entries()) {
+    const step = inputStep(action, index === actions.length - 1);
+    if (!step) {
+      return undefined;
+    }
+    argv.push(...step);
+  }
+  return argv;
+}
 
 // The sidecar desktop's VNC servers listen on Unix sockets and no TCP port. The view-only one runs
 // all the time; a lease's input-capable one exists only while beebotd holds its `control` attach.

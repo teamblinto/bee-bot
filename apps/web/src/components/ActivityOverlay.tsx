@@ -9,12 +9,14 @@ export function ActivityOverlay({ activity }: { activity: BotActivity | undefine
   const at = { left: `${activity.x * 100}%`, top: `${activity.y * 100}%` };
   return (
     <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
-      <span
-        key={activity.seq}
-        data-activity="click"
-        className="activity-ripple absolute -mt-4 -ml-4 size-8 rounded-full border-2 border-honey-fill bg-honey-surface"
-        style={at}
-      />
+      {activity.kind !== "key" && (
+        <span
+          key={activity.seq}
+          data-activity="click"
+          className="activity-ripple absolute -mt-4 -ml-4 size-8 rounded-full border-2 border-honey-fill bg-honey-surface"
+          style={at}
+        />
+      )}
       {activity.text !== null && (
         <span
           key={`text-${activity.seq}`}

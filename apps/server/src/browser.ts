@@ -114,7 +114,7 @@ const digestOf = (value: unknown) =>
   NodeCrypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
-const refused = (reason: string) =>
+export const refused = (reason: string) =>
   answer({ status: "refused", reason, note: "This is an answer, not an error. Tell the user." });
 const endTurn = "End your turn now. The owner was asked to step in.";
 
@@ -548,6 +548,14 @@ export function createBrowserBroker(deps: BrowserDeps) {
         : Promise.resolve(refused(`unknown tool ${tool}`)),
     attach,
     held: (botId: string) => opened.get(botId)?.lease.holder === "human",
+    // The same lease covers the desktop, for the computer tools.
+    lease: (botId: string) => opened.get(botId)?.lease,
+    observed: (botId: string) => {
+      const tab = opened.get(botId);
+      if (tab) {
+        tab.lease = { ...tab.lease, mustObserve: false };
+      }
+    },
     // A thumbnail from a tab that is already open, while the bot has control.
     screenshot: async (botId: string) => {
       const tab = opened.get(botId);
@@ -567,7 +575,7 @@ export function createBrowserBroker(deps: BrowserDeps) {
 
 export type BrowserBroker = ReturnType<typeof createBrowserBroker>;
 
-const ApprovedCall = z.object({ input: z.record(z.string(), z.unknown()) });
+export const ApprovedCall = z.object({ input: z.record(z.string(), z.unknown()) });
 const Answer = z.object({ status: z.string() });
 
 // The owner approved it, so it runs as attended. Only a page actually acted on counts as done.

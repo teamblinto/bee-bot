@@ -378,6 +378,12 @@ describe("a turn", () => {
           "mcp__bee__browser_click",
           "mcp__bee__browser_type",
           "mcp__bee__request_takeover",
+          "mcp__bee__computer_screenshot",
+          "mcp__bee__computer_click",
+          "mcp__bee__computer_type",
+          "mcp__bee__computer_key",
+          "mcp__bee__computer_scroll",
+          "mcp__bee__computer_drag",
         ],
       },
     });
