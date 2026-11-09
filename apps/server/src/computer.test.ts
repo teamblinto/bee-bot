@@ -175,6 +175,14 @@ describe("computer tools", () => {
     state.lease = { ...freshLease, holder: "human", leaseId: "lease-1" };
     expect(await execute?.(call)).toMatchObject({ ok: false });
   });
+
+  it("runs an approved screenshot, which an Operator's first one needs", async () => {
+    const { computer } = setup({ kind: "approve" });
+    const execute = new Map(computerExecutors(computer)).get("computer_screenshot");
+    const payload = JSON.stringify({ tool: "computer_screenshot", input: {} });
+    const call = { botId: "bot-1", runId: "run-1", tool: "computer_screenshot", payload };
+    expect(await execute?.(call)).toMatchObject({ ok: true });
+  });
 });
 
 describe("MCP", () => {

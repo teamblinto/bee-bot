@@ -128,6 +128,11 @@ const defaultLimitSeconds = 30;
 const ToolResult = z.object({
   result: z.object({ content: z.tuple([z.object({ text: z.string() })]) }),
 });
+const BeeToolResult = z.object({
+  result: z.object({
+    content: z.array(z.object({ text: z.string().optional(), data: z.string().optional() })),
+  }),
+});
 const Answer = z.object({ behavior: z.enum(["allow", "deny"]), message: z.string().optional() });
 
 // A Map, because a tool name is whatever the engine reports and could be "constructor".
@@ -206,7 +211,10 @@ async function beeTool(
   signal: AbortSignal,
 ) {
   const response = await callTool(permissions, { name, arguments: args }, signal);
-  return ToolResult.parse(await response.json()).result.content[0].text;
+  const { content } = BeeToolResult.parse(await response.json()).result;
+  return content
+    .map(({ text, data }) => text ?? `[image, ${data?.length} base64 chars]`)
+    .join("\n");
 }
 
 // Each session's prompts, oldest first. Gone with the process, so a resume after a restart finds
@@ -217,7 +225,7 @@ const lastLine = (text: string) => (text.split("\n").at(-1) ?? "").trim();
 
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
 // /approve <Tool> <detail...>, /remember <text...>, /takeover <reason...>, /bee <tool> [json args]
-// (any of the run's bee tools), /work [thought] (a
+// (any of the run's bee tools; consecutive /bee lines all run, in one turn), /work [thought] (a
 // scripted multi-tool turn), /recall (the last line of each earlier turn in the session). Anything
 // else streams a reply word by word.
 export const fakeRunTurn: RunTurn = async ({
@@ -290,10 +298,16 @@ export const fakeRunTurn: RunTurn = async ({
       return { kind: "completed", text };
     }
     case "/bee": {
-      const [, tool = "", json = "{}"] = /^\S+\s+(\S+)\s*(.*)$/.exec(line) ?? [];
-      onToolStart({ id: "fake-bee", name: `mcp__bee__${tool}`, detail: null });
-      const text = await beeTool(permissions, tool, JSON.parse(json || "{}"), signal);
-      onToolEnd("fake-bee", false);
+      const lines = prompt.split("\n").map((each) => each.trim());
+      const calls = lines.slice(lines.findLastIndex((each) => !/^\/bee(\s|$)/.test(each)) + 1);
+      const texts: string[] = [];
+      for (const [index, call] of calls.entries()) {
+        const [, tool = "", json = "{}"] = /^\S+\s+(\S+)\s*(.*)$/.exec(call) ?? [];
+        onToolStart({ id: `fake-bee-${index}`, name: `mcp__bee__${tool}`, detail: null });
+        texts.push(await beeTool(permissions, tool, JSON.parse(json || "{}"), signal));
+        onToolEnd(`fake-bee-${index}`, false);
+      }
+      const text = texts.join("\n");
       onDelta(text);
       return { kind: "completed", text };
     }

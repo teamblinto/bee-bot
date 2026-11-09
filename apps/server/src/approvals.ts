@@ -327,8 +327,9 @@ export function createApprovals({
       },
     );
 
+  // The test engine fakes only what Bee has no executor for, so its browser and computer calls act.
   const executorFor = (bot: Bot, tool: string) =>
-    bot.engineAccountId === "fake" ? testExecute : executors.get(tool);
+    executors.get(tool) ?? (bot.engineAccountId === "fake" ? testExecute : undefined);
 
   // Resolved again just before it runs, so a target that moved after the owner saw it is refused.
   function resolveCall(botId: string, tool: ApprovalTool, input: Record<string, unknown>) {

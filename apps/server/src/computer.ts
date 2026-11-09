@@ -345,7 +345,6 @@ export function computerExecutors(computer: Pick<Computer, "perform">) {
       output: ok ? `${tool} ran. Take a screenshot to see the screen now.` : said.join("\n"),
     };
   };
-  return computerTools
-    .filter(({ name }) => name !== "computer_screenshot")
-    .map(({ name }) => [name, execute] as const);
+  // A screenshot too: an Operator's first one adds the untrusted-read leg, so it asks.
+  return computerTools.map(({ name }) => [name, execute] as const);
 }
