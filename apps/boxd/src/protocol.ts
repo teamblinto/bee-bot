@@ -71,7 +71,8 @@ export type Verb =
   | "display"
   | "egress"
   | "put"
-  | "collect";
+  | "collect"
+  | "display";
 
 export type ExecRequest = {
   argv: string[];

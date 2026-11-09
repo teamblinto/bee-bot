@@ -58,7 +58,7 @@ export function createFakeBoxRuntime(): BoxRuntime {
       throw new Error("no sidecar in the fake box runtime");
     },
     display: async () => {
-      throw new Error("no sidecar in the fake box runtime");
+      throw new Error("no display in the fake box runtime");
     },
     collect: async (botId) => expect(botId, ["running"]),
     execAttach: async (botId, { argv: [command = "", ...args], env, cwd }) => {

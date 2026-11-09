@@ -20,6 +20,7 @@ function setup(machines: Record<string, MachineProbe>) {
         prepare: async () => {},
         applyEgress: async () => {},
         sidecar: async () => Promise.reject(new Error("no sidecar")),
+        display: async () => Promise.reject(new Error("no display")),
         closed: new Promise(() => {}),
         close: async () => {
           calls.push(`close ${name}`);
