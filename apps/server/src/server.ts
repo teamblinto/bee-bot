@@ -265,9 +265,12 @@ export async function startServer({
     maxPayload: maxDisplayClientBytes,
   });
   const displayTickets = createDisplayTickets();
-  const desktop = createDesktopControl((botId, leaseId) =>
-    boxes && store.getBot(botId)?.boundary === "box" ? boxes.control(botId, leaseId) : undefined,
-  );
+  const desktop = createDesktopControl((botId, leaseId) => {
+    computer.interrupt(botId);
+    return boxes && store.getBot(botId)?.boundary === "box"
+      ? boxes.control(botId, leaseId)
+      : undefined;
+  });
   const browser = createBrowserBroker({
     runtime: browserRuntime,
     ...storeBrowserDeps(store),
@@ -982,7 +985,11 @@ export async function startServer({
       return;
     }
     // Browsers can't set headers on a WebSocket, so the token rides in the query.
-    const grant = display ? displayTickets.consume(url.searchParams.get("ticket")) : undefined;
+    // Only an allowed origin spends a ticket, so a hostile page can't burn the owner's.
+    const grant =
+      display && originAllowed(request.headers.origin)
+        ? displayTickets.consume(url.searchParams.get("ticket"))
+        : undefined;
     const authorized = display ? grant !== undefined : tokenMatches(url.searchParams.get("token"));
     const refused = refusal(request.headers.origin, authorized, url);
     if (refused) {

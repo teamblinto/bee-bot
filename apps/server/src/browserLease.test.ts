@@ -41,8 +41,6 @@ describe("browser control lease", () => {
     const back = giveLease(taken(seen, "a"), "a").lease;
     expect(back && botMay(back, ref)).toBe("stale_ref");
     expect(back && botMay(back)).toBe("ok");
-    expect(back?.mustObserve).toBe(true);
-    expect(back && afterSnapshot(back).mustObserve).toBe(false);
   });
 
   it("honours only refs from the latest snapshot", () => {

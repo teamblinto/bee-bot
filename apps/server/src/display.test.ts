@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -6,13 +7,13 @@ import * as NodeStream from "node:stream";
 
 import { Bot, DisplayTicket, HandoffServerMessage, protocolVersion } from "@beebot/contracts";
 import { afterEach, expect, it, vi } from "vite-plus/test";
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 import { displayView } from "./boxHost.ts";
 import { createFakeBoxRuntime } from "./boxRuntime.ts";
 import { type BoxHost, createBoxService } from "./boxSetup.ts";
 import { createFakeBrowserRuntime } from "./browserRuntime.ts";
-import { createDisplayTickets } from "./display.ts";
+import { createDisplayTickets, serveDisplay } from "./display.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
 
@@ -171,13 +172,14 @@ it("opens /display only with a fresh ticket, an allowed origin and the current p
   expect(await upgradeStatus(url({}))).toBe(401);
   expect(await upgradeStatus(url({ token }))).toBe(401);
   expect(await upgradeStatus(url({ ticket: "guess" }))).toBe(401);
-  expect(await upgradeStatus(url({ ticket: await ticket() }), "https://evil.example")).toBe(403);
+  // A refused origin doesn't spend the ticket.
+  const used = await ticket();
+  expect(await upgradeStatus(url({ ticket: used }), "https://evil.example")).toBe(403);
   expect(
     await upgradeStatus(
       url({ ticket: await ticket(), protocolVersion: String(protocolVersion - 1) }),
     ),
   ).toBe(426);
-  const used = await ticket();
   const socket = new WebSocket(url({ ticket: used }), { origin: appOrigin });
   await once(socket, "open");
   socket.terminate();
@@ -219,6 +221,35 @@ const idle = () =>
     readable: new NodeStream.PassThrough(),
     writable: new NodeStream.PassThrough(),
   });
+
+it("stops reading the viewer while the box is slow to take its bytes", async () => {
+  const sockets = new WebSocketServer({ port: 0 });
+  cleanups.push(() => new Promise<void>((resolve) => sockets.close(() => resolve())));
+  const pending: Array<() => void> = [];
+  const box = new NodeStream.Duplex({
+    highWaterMark: 1,
+    read() {},
+    write(_chunk, _encoding, callback) {
+      pending.push(callback);
+    },
+  });
+  const served = new Promise<WebSocket>((resolve) =>
+    sockets.on("connection", (client) => {
+      void serveDisplay(client, async () => ({ stream: box, exited: never }));
+      resolve(client);
+    }),
+  );
+  const viewer = new WebSocket(`ws://127.0.0.1:${(sockets.address() as AddressInfo).port}`);
+  cleanups.push(() => viewer.terminate());
+  const client = await served;
+  await once(viewer, "open");
+  viewer.send(Buffer.from([1, 2, 3]));
+  await vi.waitFor(() => expect(client.isPaused).toBe(true));
+  for (const done of pending.splice(0)) {
+    done();
+  }
+  await vi.waitFor(() => expect(client.isPaused).toBe(false));
+});
 
 async function takeControl(handoffUrl: string) {
   const handoff = new WebSocket(handoffUrl, { origin: appOrigin });

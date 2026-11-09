@@ -19,6 +19,7 @@ import {
   elementRef,
   freshLease,
   giveLease,
+  type Desk,
   type Lease,
   parseRef,
   takeLease,
@@ -174,6 +175,9 @@ export function createBrowserBroker(deps: BrowserDeps) {
   const tabs = new Map<string, Promise<Tab>>();
   // Opened tabs, for the wall's synchronous checks.
   const opened = new Map<string, Tab>();
+  // The desktop's side of the lease, by bot: a lost tab must not forget that the owner still
+  // drives, or that the bot hasn't looked since the handback.
+  const desks = new Map<string, Desk>();
 
   function open(botId: string) {
     const existing = tabs.get(botId);
@@ -280,10 +284,14 @@ export function createBrowserBroker(deps: BrowserDeps) {
     broadcastLease(tab);
   }
 
-  // A takeover that ended without the owner: its notice and the pause go.
+  // A takeover that ended without the owner: its notice and the pause go, unless something else
+  // has since asked for the owner.
   function dropTakeover(botId: string, tab: Tab | undefined) {
+    if (tab?.requested && tab.requested.reason !== "takeover") {
+      return;
+    }
     deps.setPaused(botId, false);
-    if (tab?.requested?.reason === "takeover") {
+    if (tab?.requested) {
       tab.requested = null;
       broadcastLease(tab);
     }
@@ -424,6 +432,7 @@ export function createBrowserBroker(deps: BrowserDeps) {
       return;
     }
     tab.lease = given.lease;
+    desks.set(botId, { holder: "bot", mustObserve: true });
     tab.holder = null;
     tab.typing = flushTyping(tab.typing);
     const desktop = deps.desktop.give(leaseId);
@@ -468,6 +477,7 @@ export function createBrowserBroker(deps: BrowserDeps) {
       const taken = takeLease(tab.lease, NodeCrypto.randomUUID());
       if (taken.lease) {
         tab.lease = taken.lease;
+        desks.set(botId, { holder: "human", mustObserve: true });
         tab.holder = peer;
         const desktop = deps.desktop.take(botId, taken.lease.leaseId);
         deps.appendAudit({
@@ -549,11 +559,10 @@ export function createBrowserBroker(deps: BrowserDeps) {
     attach,
     held: (botId: string) => opened.get(botId)?.lease.holder === "human",
     // The same lease covers the desktop, for the computer tools.
-    lease: (botId: string) => opened.get(botId)?.lease,
+    lease: (botId: string) => desks.get(botId) ?? { holder: "bot" as const, mustObserve: false },
     observed: (botId: string) => {
-      const tab = opened.get(botId);
-      if (tab) {
-        tab.lease = { ...tab.lease, mustObserve: false };
+      if (desks.get(botId)?.holder === "bot") {
+        desks.delete(botId);
       }
     },
     // A thumbnail from a tab that is already open, while the bot has control.
@@ -594,23 +603,31 @@ const handedBack =
 const notTaken =
   "The owner didn't take over in time, so nothing on your computer changed. Carry on without " +
   "that step, or tell them what you still need.";
+const restarted =
+  "Bee restarted, so the takeover ended. Your computer may have changed: take a fresh snapshot " +
+  "or screenshot before you act, and ask again if you still need the owner.";
+
+// Answers the bot's waiting reply in its room, like a continuation's outcome. The fixed ID makes a
+// repeat a no-op.
+function resumeTakeover(store: EventStore, takeover: Takeover | undefined, body: string) {
+  const target = takeover && store.takeovers.takeoverTarget(takeover.id);
+  if (takeover && target) {
+    store.sendMessage({
+      id: `takeover:${takeover.id}`,
+      roomId: target.roomId,
+      body,
+      attended: true,
+      ...(target.replyToId && { replyToId: target.replyToId }),
+    });
+  }
+  return takeover;
+}
+
+// A restart ends every open takeover, and each bot that asked hears so.
+export const recoverTakeovers = (store: EventStore) =>
+  store.recoverTakeovers().map((takeover) => resumeTakeover(store, takeover, restarted));
 
 export function storeBrowserDeps(store: EventStore) {
-  // Answers the bot's waiting reply in its room, like a continuation's outcome. The fixed ID makes
-  // a repeat a no-op.
-  const resume = (takeover: Takeover | undefined, body: string) => {
-    const target = takeover && store.takeovers.takeoverTarget(takeover.id);
-    if (takeover && target) {
-      store.sendMessage({
-        id: `takeover:${takeover.id}`,
-        roomId: target.roomId,
-        body,
-        attended: true,
-        ...(target.replyToId && { replyToId: target.replyToId }),
-      });
-    }
-    return takeover;
-  };
   return {
     check: (run: BrowserRun, tool: string, args: unknown) => store.policy.check(run, tool, args),
     appendAudit: store.appendAudit,
@@ -636,14 +653,18 @@ export function storeBrowserDeps(store: EventStore) {
         store.takeovers.requestTakeover(run.botId, run.id, reason),
       take: (botId: string) => store.takeovers.moveTakeover(botId, "waiting", "taken"),
       complete: (botId: string) =>
-        resume(store.takeovers.moveTakeover(botId, "taken", "completed"), handedBack),
+        resumeTakeover(
+          store,
+          store.takeovers.moveTakeover(botId, "taken", "completed"),
+          handedBack,
+        ),
       // A paused bot's wake is refused, so the pause lifts before the answer is posted.
       expire: (id: string, release: () => void) => {
         const takeover = store.takeovers.expireTakeover(id);
         if (takeover) {
           release();
         }
-        return resume(takeover, notTaken);
+        return resumeTakeover(store, takeover, notTaken);
       },
       cancel: (botId: string) =>
         store.takeovers.moveTakeover(botId, "waiting", "cancelled") ??

@@ -8,7 +8,7 @@ import type { AuditRecord } from "./audit.ts";
 import type { BoxRuntime } from "./boxRuntime.ts";
 import type { PolicyDecision } from "./broker.ts";
 import { type Activity, ApprovedCall, type BrowserRun, refused } from "./browser.ts";
-import type { Lease } from "./browserLease.ts";
+import type { Desk } from "./browserLease.ts";
 
 export type ToolContent =
   | { type: "text"; text: string }
@@ -167,7 +167,7 @@ export type ComputerDeps = {
   check: (run: BrowserRun, tool: string, args: unknown) => PolicyDecision;
   appendAudit: (record: AuditRecord) => void;
   requestApproval: (run: BrowserRun, tool: string, args: Record<string, unknown>) => string;
-  lease: (botId: string) => Lease | undefined;
+  lease: (botId: string) => Desk;
   // The bot has seen the screen since the owner handed it back.
   observed: (botId: string) => void;
   activity?: (botId: string, activity: Activity) => void;
@@ -177,6 +177,8 @@ export function createComputer(deps: ComputerDeps) {
   const cursors = new Map<string, Point>();
   // Only the latest screenshot's hash per bot, for its run: no screenshot is ever kept.
   const lastShot = new Map<string, { runId: string; hash: string }>();
+  // Aborted when the owner takes control, which ends the bot's input still running.
+  const takes = new Map<string, AbortController>();
 
   function plan(botId: string, tool: ComputerTool, data: Record<string, unknown>) {
     const at = cursors.get(botId) ?? centre;
@@ -266,7 +268,7 @@ export function createComputer(deps: ComputerDeps) {
       return { ok: false, content: text(refused("Only a bot in a box has a computer.")) };
     }
     const lease = deps.lease(run.botId);
-    if (lease?.holder === "human") {
+    const ownerHasControl = () => {
       deps.appendAudit({
         runId: run.id,
         botId: run.botId,
@@ -280,8 +282,11 @@ export function createComputer(deps: ComputerDeps) {
         ok: false,
         content: text(refused("The owner has control of the computer. Try again later.")),
       };
+    };
+    if (lease.holder === "human") {
+      return ownerHasControl();
     }
-    if (lease?.mustObserve && tool !== "computer_screenshot") {
+    if (lease.mustObserve && tool !== "computer_screenshot") {
       return {
         ok: false,
         content: text(
@@ -293,16 +298,22 @@ export function createComputer(deps: ComputerDeps) {
       };
     }
     const { actions, show, end } = plan(run.botId, tool, parsed.data);
+    const take = takes.get(run.botId) ?? new AbortController();
+    takes.set(run.botId, take);
     try {
       if (actions.length > 0) {
         show();
-        await screen.input(run.botId, actions);
+        await screen.input(run.botId, actions, take.signal);
         cursors.set(run.botId, end);
       }
+      take.signal.throwIfAborted();
       const png = await screen.screenshot(run.botId);
       deps.observed(run.botId);
       return { ok: true, content: remember(run, png) };
     } catch (error) {
+      if (take.signal.aborted) {
+        return ownerHasControl();
+      }
       console.error(`beebotd: computer ${tool} failed: ${(error as Error)?.name}`);
       return { ok: false, content: text(refused("computer_unavailable")) };
     }
@@ -324,7 +335,15 @@ export function createComputer(deps: ComputerDeps) {
     return (await perform(run, name, data)).content;
   }
 
-  return { call, perform };
+  return {
+    call,
+    perform,
+    // The owner is taking control: the bot's input stops now, not when it finishes.
+    interrupt: (botId: string) => {
+      takes.get(botId)?.abort();
+      takes.delete(botId);
+    },
+  };
 }
 
 export type Computer = ReturnType<typeof createComputer>;

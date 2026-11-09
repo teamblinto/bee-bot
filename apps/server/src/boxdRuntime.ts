@@ -7,6 +7,7 @@ import { Duplex } from "node:stream";
 import type { BoxState } from "@beebot/contracts";
 import {
   type Hello,
+  type InputAction,
   Kind,
   type Request,
   type Response,
@@ -46,6 +47,20 @@ const chunkSize = 1024 * 1024;
 const maxCaptureBytes = 1024 * 1024;
 const maxScreenshotBytes = 8 * 1024 * 1024;
 const captureTimeoutMs = 10_000;
+// xdotool types about one character every 12 ms; this leaves room for a busy machine.
+const typeMsPerChar = 25;
+
+export const inputTimeoutMs = (actions: InputAction[]) =>
+  actions.reduce(
+    (ms, action) =>
+      ms +
+      (action.type === "wait"
+        ? action.ms
+        : action.type === "type"
+          ? action.text.length * typeMsPerChar
+          : 0),
+    captureTimeoutMs,
+  );
 
 // Speaks boxd's framed protocol over any byte stream: boxd's stdio through `podman machine ssh`,
 // or a pipe in tests. The server holds this stream and never the Podman socket.
@@ -259,13 +274,18 @@ export async function connectBoxd(
 
   // A thumbnail is about 10 KB and a full screenshot under 2 MB; a stuck or oversized output is cut
   // off, which kills its process in the box.
-  async function output(open: (channel: number) => Promise<Response>, maxBytes: number) {
+  async function output(
+    open: (channel: number) => Promise<Response>,
+    maxBytes: number,
+    timeoutMs = captureTimeoutMs,
+    signal?: AbortSignal,
+  ) {
     const { stream, exited } = await attach(open);
-    const timer = setTimeout(
-      () => stream.destroy(new Error("box output timed out")),
-      captureTimeoutMs,
-    );
+    const timer = setTimeout(() => stream.destroy(new Error("box output timed out")), timeoutMs);
+    const abort = () => stream.destroy(new Error("box output aborted"));
+    signal?.addEventListener("abort", abort);
     try {
+      signal?.throwIfAborted();
       stream.end();
       const chunks: Buffer[] = [];
       let size = 0;
@@ -282,6 +302,7 @@ export async function connectBoxd(
       return Buffer.concat(chunks);
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       stream.destroy();
     }
   }
@@ -322,8 +343,13 @@ export async function connectBoxd(
     cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
     capture: (botId) => image(botId, false),
     screenshot: (botId) => image(botId, true),
-    input: async (botId, input) => {
-      await output((channel) => request("input", botId, { channel, input }), 0);
+    input: async (botId, input, signal) => {
+      await output(
+        (channel) => request("input", botId, { channel, input }),
+        0,
+        inputTimeoutMs(input),
+        signal,
+      );
     },
     display: (botId, lease) =>
       attach((channel) =>

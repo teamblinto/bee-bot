@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 
 import { afterEach, expect, it } from "vite-plus/test";
 
-import { storeBrowserDeps } from "./browser.ts";
+import { recoverTakeovers, storeBrowserDeps } from "./browser.ts";
 import { openEventStore } from "./store.ts";
 
 const cleanups: Array<() => void> = [];
@@ -60,7 +60,7 @@ it("wakes the bot when nobody took over, once the pause is lifted", () => {
   expect(order).not.toContain("again");
 });
 
-it("a restart interrupts open takeovers and lifts only the pause they set", () => {
+it("a restart interrupts open takeovers, tells the bot, and lifts only the pause they set", () => {
   const { store, bot, run } = setup();
   const other = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
   const { takeovers } = storeBrowserDeps(store);
@@ -70,7 +70,9 @@ it("a restart interrupts open takeovers and lifts only the pause they set", () =
   takeovers.take(other.id);
   store.setBotPause(other.id, "owner");
 
-  store.recoverTakeovers();
+  recoverTakeovers(store);
+  const resend = { id: `takeover:${waiting.id}`, roomId: bot.roomId, body: "x", attended: true };
+  expect(store.sendMessage(resend)).toBe("conflict");
   expect(store.getBot(bot.id)).toMatchObject({ status: "ready", pauseReason: null });
   expect(store.getBot(other.id)).toMatchObject({ status: "paused", pauseReason: "owner" });
   expect(takeovers.take(bot.id)).toBeUndefined();

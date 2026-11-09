@@ -2,6 +2,7 @@ import * as NodeCrypto from "node:crypto";
 
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
+import { recoverTakeovers } from "./browser.ts";
 import { outcomeText } from "./continuations.ts";
 import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
@@ -150,7 +151,7 @@ export function createSupervisor({
     }),
   );
   store.continuations.recoverContinuations();
-  store.recoverTakeovers();
+  recoverTakeovers(store);
 
   // An outcome is the owner's answer to the bot's waiting reply, so the next turn resumes the
   // saved session with it. The fixed message ID makes a repeat after a crash a no-op.

@@ -1,7 +1,8 @@
+import { maxTypedText } from "@beebot/boxd/protocol";
 import { createFakePodman, serveInProcess } from "@beebot/boxd/testing";
 import { describe, expect, it } from "vite-plus/test";
 
-import { connectBoxd, machineSsh, podmanEnv } from "./boxdRuntime.ts";
+import { connectBoxd, inputTimeoutMs, machineSsh, podmanEnv } from "./boxdRuntime.ts";
 
 const node = (script: string) => ({
   argv: [process.execPath, "-e", script],
@@ -19,7 +20,19 @@ async function read(stream: NodeJS.ReadableStream) {
 describe("boxd adapter", () => {
   async function connect() {
     const fake = createFakePodman();
-    const transport = serveInProcess(fake.podman);
+    // xdotool isn't here: input runs a process that never ends instead.
+    const transport = serveInProcess({
+      ...fake.podman,
+      spawn: (args, env) => {
+        const at = args.indexOf("-c") + 3;
+        return fake.podman.spawn(
+          args[at] === "xdotool"
+            ? [...args.slice(0, at), process.execPath, "-e", "setInterval(() => {}, 1000)"]
+            : args,
+          env,
+        );
+      },
+    });
     const { runtime, closed } = await connectBoxd(transport, {
       secret: Buffer.alloc(32, 1),
       owner: "env-1",
@@ -62,6 +75,22 @@ describe("boxd adapter", () => {
     );
     stream.destroy();
     expect(await exited).not.toBe(0);
+  });
+
+  it("kills the bot's input in the box when it is aborted", async () => {
+    const { runtime } = await connect();
+    await runtime.create("bot-1");
+    await runtime.start("bot-1");
+    const controller = new AbortController();
+    const typing = runtime.input("bot-1", [{ type: "type", text: "a" }], controller.signal);
+    setTimeout(() => controller.abort(), 200);
+    await expect(typing).rejects.toThrow("aborted");
+  });
+
+  it("gives typing the time xdotool takes, a character every 12 ms or more", () => {
+    const longest = inputTimeoutMs([{ type: "type", text: "x".repeat(maxTypedText) }]);
+    expect(longest).toBeGreaterThan(10_000 + maxTypedText * 12 * 1.5);
+    expect(inputTimeoutMs([{ type: "wait", ms: 500 }])).toBe(10_500);
   });
 
   it("ends every attach when boxd goes away", async () => {

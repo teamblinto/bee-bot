@@ -127,7 +127,10 @@ export async function serveDisplay(client: WebSocket, open: () => Promise<BoxAtt
       client.close(1003, "binary only");
       return;
     }
-    stream.write(data);
+    if (!stream.write(data) && !client.isPaused) {
+      client.pause();
+      stream.once("drain", () => client.resume());
+    }
   });
   client.on("close", () => stream.destroy());
   stream.on("data", (chunk: Buffer) => {

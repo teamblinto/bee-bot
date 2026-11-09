@@ -18,7 +18,7 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 // the sidecar's DevTools, `display` to its desktop's view-only VNC server (or, with a lease, to that
 // lease's input server), `control` runs a lease's input server for as long as the attach lasts,
 // `capture` takes a small JPEG of a running box's desktop, `screenshot` a full-size PNG of it, `input`
-// runs mouse and keyboard actions on it, and `collect` copies a finished download into the
+// runs mouse and keyboard actions on it until done or aborted, and `collect` copies a finished download into the
 // workspace.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
@@ -26,7 +26,7 @@ export type BoxRuntime = {
   cdp: (botId: string) => Promise<BoxAttach>;
   capture: (botId: string) => Promise<Buffer>;
   screenshot: (botId: string) => Promise<Buffer>;
-  input: (botId: string, actions: InputAction[]) => Promise<void>;
+  input: (botId: string, actions: InputAction[], signal?: AbortSignal) => Promise<void>;
   display: (botId: string, lease?: string) => Promise<BoxAttach>;
   control: (botId: string, lease: string) => Promise<BoxAttach>;
   collect: (botId: string, file: string, name: string) => Promise<void>;

@@ -322,6 +322,15 @@ describe("takeover", () => {
     expect(view.lease()).toMatchObject({ requested: null });
   });
 
+  it("an expired takeover leaves the pause of a sign-in wall found since", async () => {
+    const { call, paused, takeoverStates } = setup({ kind: "allow" }, 20);
+    await call("request_takeover", { reason: "solve the puzzle" });
+    await call("browser_navigate", { url: "https://example.com/" });
+    expect(await call("browser_click", { ref: "1:0" })).toMatchObject({ reason: "login" });
+    await vi.waitFor(() => expect(takeoverStates()).toMatchObject([{ state: "expired" }]));
+    expect(paused.get(run.botId)).toBe(true);
+  });
+
   it("a stopped bot's takeover leaves no pause and no notice behind", async () => {
     const { call, owner, paused, takeoverStates, broker } = setup();
     const view = await owner();
@@ -333,7 +342,7 @@ describe("takeover", () => {
   });
 
   it("tells watchers when the browser goes away, and ends the person's control", async () => {
-    const { owner, fake, desktop } = setup();
+    const { owner, fake, desktop, broker } = setup();
     const view = await owner();
     view.send({ type: "take" });
     fake.lose(run.botId);
@@ -341,6 +350,10 @@ describe("takeover", () => {
     expect(view.received).toContainEqual({ type: "unavailable" });
     expect(desktop.map((line) => line.split(" ")[0])).toEqual(["take", "give"]);
     expect(view.lease()).toMatchObject({ holder: "bot" });
+    // The desktop outlives the tab: the bot still looks before it acts.
+    expect(broker.lease(run.botId)).toEqual({ holder: "bot", mustObserve: true });
+    broker.observed(run.botId);
+    expect(broker.lease(run.botId)).toEqual({ holder: "bot", mustObserve: false });
     await owner();
     expect(fake.opened()).toBe(2);
   });

@@ -214,7 +214,7 @@ export function createBoxService({
     cdp: async (botId) => current().runtime.cdp(botId),
     capture: async (botId) => current().runtime.capture(botId),
     screenshot: async (botId) => current().runtime.screenshot(botId),
-    input: async (botId, actions) => current().runtime.input(botId, actions),
+    input: async (botId, actions, signal) => current().runtime.input(botId, actions, signal),
     display: async (botId, lease) => current().runtime.display(botId, lease),
     control: async (botId, lease) => current().runtime.control(botId, lease),
     collect: async (botId, file, name) => current().runtime.collect(botId, file, name),

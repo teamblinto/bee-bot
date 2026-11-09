@@ -7,7 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { AuditRecord } from "./audit.ts";
 import type { Activity } from "./browser.ts";
 import type { PolicyDecision } from "./broker.ts";
-import { freshLease, type Lease } from "./browserLease.ts";
+import type { Desk } from "./browserLease.ts";
 import { computerExecutors, createComputer, glide, type ToolContent } from "./computer.ts";
 import { answerMcp } from "./mcp.ts";
 
@@ -18,13 +18,22 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
   const audits: AuditRecord[] = [];
   const activities: Activity[] = [];
   const approvals: unknown[] = [];
-  const state = { lease: freshLease as Lease, screen: "screen-1", observed: 0 };
+  const state = {
+    lease: { holder: "bot", mustObserve: false } as Desk,
+    screen: "screen-1",
+    observed: 0,
+    stuck: false,
+  };
   const computer = createComputer({
     screen: (botId) =>
       botId === "bot-1"
         ? {
-            input: async (_botId, actions) => {
+            input: async (_botId, actions, signal) => {
               inputs.push(actions);
+              while (state.stuck) {
+                signal?.throwIfAborted();
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
             },
             screenshot: async () => Buffer.from(state.screen),
           }
@@ -93,7 +102,7 @@ describe("computer tools", () => {
 
   it("refuses, never queues, while the owner holds the computer, and audits it", async () => {
     const { computer, inputs, audits, state } = setup();
-    state.lease = { ...freshLease, holder: "human", leaseId: "lease-1" };
+    state.lease = { holder: "human", mustObserve: true };
     for (const tool of ["computer_screenshot", "computer_scroll"]) {
       const answer = await computer.call(run, tool, { x: 1, y: 1, direction: "down" });
       expect(refusal(answer)).toMatchObject({ status: "refused" });
@@ -105,9 +114,20 @@ describe("computer tools", () => {
     ]);
   });
 
+  it("stops the bot's running input the moment the owner takes control", async () => {
+    const { computer, audits, state } = setup();
+    state.stuck = true;
+    const typing = computer.call(run, "computer_type", { text: "a long letter" });
+    computer.interrupt("bot-1");
+    expect(refusal(await typing)).toMatchObject({ status: "refused" });
+    expect(audits).toMatchObject([{ reason: "human_has_control", tool: "computer_type" }]);
+    state.stuck = false;
+    expect(await computer.call(run, "computer_screenshot", {})).toEqual(image("screen-1"));
+  });
+
   it("after a handback, acts only once the bot has taken a screenshot", async () => {
     const { computer, inputs, state } = setup();
-    state.lease = { ...freshLease, generation: 3, mustObserve: true };
+    state.lease = { holder: "bot", mustObserve: true };
     const stale = await computer.call(run, "computer_click", { x: 1, y: 1 });
     expect(refusal(stale).reason).toContain("computer_screenshot");
     expect(inputs).toEqual([]);
@@ -172,7 +192,7 @@ describe("computer tools", () => {
       output: expect.stringContaining("screenshot"),
     });
     expect(inputs[0]?.at(-1)).toEqual({ type: "click", button: 1, count: 1 });
-    state.lease = { ...freshLease, holder: "human", leaseId: "lease-1" };
+    state.lease = { holder: "human", mustObserve: true };
     expect(await execute?.(call)).toMatchObject({ ok: false });
   });
 
