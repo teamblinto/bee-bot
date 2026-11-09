@@ -25,9 +25,11 @@ async function seccompPath() {
   const local = join(imageDir, "seccomp-chromium.json");
   if (process.platform === "linux") return local;
   const machines = await podmanOk(["machine", "list", "--format", "{{.Name}} {{.Default}}"]);
-  const machine = machines
-    .split("\n")
-    .find((line) => line.endsWith(" true"))
+  const lines = machines.split("\n");
+  // A default rootful connection leaves the machine itself marked non-default.
+  const machine = (
+    lines.find((line) => line.endsWith(" true")) ?? (lines.length === 1 ? lines[0] : undefined)
+  )
     ?.split(" ")[0]
     ?.replace(/\*$/, "");
   if (!machine) throw new Error("no default Podman machine");
@@ -189,16 +191,52 @@ describe.skipIf(!podmanUp)("box image", () => {
     ]);
   }, 120_000);
 
-  it("browser keeps Chromium's sandbox under the shipped seccomp profile", async () => {
+  it("browser keeps headed Chromium's sandbox under the shipped seccomp profile", async () => {
     const id = await startBox("browser", ["profile"], ["-p", "127.0.0.1::9223"]);
 
-    // boxd reaches DevTools through `podman exec`, so nothing in the box listens beyond loopback.
+    // boxd reaches DevTools and the VNC socket through `podman exec`. Chromium starts last, so
+    // once DevTools listens the desktop is up, and it adds no TCP listener of its own.
     const listening = await until(async () => {
       const found = await listeners(id);
       return found.includes("0100007F:2406") ? found : undefined;
     }, "DevTools on loopback port 9222");
-    const loopback = /^([0-9A-F]{6}7F|0{24}01000000|0{16}FFFF0000[0-9A-F]{6}7F):/;
-    expect(listening.filter((address) => !loopback.test(address))).toEqual([]);
+    expect(listening).toEqual(["0100007F:2406"]);
+    expect(await podmanOk(["exec", "-e", "DISPLAY=:1", id, "xdotool", "getdisplaygeometry"])).toBe(
+      "1280 800",
+    );
+
+    // A pointer move to 640,400 sent as RFB bytes; only a server without -viewonly obeys it.
+    const pointAt = (socket: string) =>
+      podmanOk([
+        "exec",
+        "-e",
+        "DISPLAY=:1",
+        id,
+        "sh",
+        "-c",
+        `xdotool mousemove 100 100; { printf 'RFB 003.008\\n\\001\\001\\005\\000\\002\\200\\001\\220'; sleep 1; } | socat STDIO UNIX-CONNECT:${socket} >/dev/null; xdotool getmouselocation`,
+      ]);
+    expect(await pointAt("/tmp/bee-display/view.sock")).toMatch(/^x:100 y:100 /);
+    await podmanOk([
+      "exec",
+      "-d",
+      id,
+      "x11vnc",
+      "-display",
+      ":1",
+      "-unixsock",
+      "/tmp/control.sock",
+      "-rfbport",
+      "0",
+      "-rfbportv6",
+      "-1",
+      "-nopw",
+    ]);
+    await until(
+      async () => ((await exec(id, "test -S /tmp/control.sock")).code === 0 ? true : undefined),
+      "control socket",
+    );
+    expect(await pointAt("/tmp/control.sock")).toMatch(/^x:640 y:400 /);
 
     // Only for this test: a relay so the WebSocket below can reach DevTools from the host.
     await podmanOk(["exec", "-d", id, "socat", "TCP-LISTEN:9223,fork", "TCP:127.0.0.1:9222"]);
@@ -213,7 +251,21 @@ describe.skipIf(!podmanUp)("box image", () => {
     expect(text).toMatch(/Seccomp-BPF sandbox\s+Yes/);
 
     await expectConfined(id);
-  }, 120_000);
+
+    // boxd stops the browser with `podman stop -t 10`; the entrypoint stops its desktop in reverse.
+    const stopping = Date.now();
+    await podmanOk(["stop", "-t", "10", id]);
+    expect(Date.now() - stopping).toBeLessThan(10_000);
+    expect(await podmanOk(["inspect", id, "--format", "{{.State.ExitCode}}"])).toBe("0");
+    const { stderr } = await podman(["logs", id]);
+    expect(stderr.match(/(?<=bee-browser: stopping )\w+/g)).toEqual([
+      "chromium",
+      "x11vnc",
+      "openbox",
+      "dbus",
+      "Xvfb",
+    ]);
+  }, 180_000);
 });
 
 async function sandboxPage(url: string) {
