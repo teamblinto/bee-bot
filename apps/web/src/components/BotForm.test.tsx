@@ -198,6 +198,46 @@ it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
   }
 });
 
+it("saves the sites of a bot with a browser but no box", async () => {
+  const bot: Bot = {
+    id: "00000000-0000-4000-8000-000000000001",
+    name: "Ada",
+    personality: "",
+    summary: null,
+    status: "ready",
+    pauseReason: null,
+    roomId: "r",
+    engineAccountId: "claude",
+    model: "sonnet",
+    effort: null,
+    mode: "build",
+    access: "supervised",
+    profile: "operator",
+    boundary: "host",
+    manifest: ["browser"],
+    egressHosts: [],
+    unattendedLane: "api_key",
+    avatarSeed: 7,
+    projectPath: null,
+  };
+  postCommand.mockResolvedValue({ ok: true, body: bot });
+  show(bot);
+  const site = host.querySelector<HTMLInputElement>('input[aria-label="Site to allow"]');
+  const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setValue?.call(site, "www.wikipedia.org");
+    site?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  act(() =>
+    [...host.querySelectorAll("button")].find(({ textContent }) => textContent === "Add")?.click(),
+  );
+  await act(async () => host.querySelector("form")?.requestSubmit());
+  expect(postCommand.mock.calls.map(([command]) => command)).toEqual([
+    expect.objectContaining({ type: "update-bot" }),
+    { type: "set-bot-egress-hosts", botId: bot.id, hosts: ["www.wikipedia.org"] },
+  ]);
+});
+
 it("offers the subscription only after the automated-access notice was read", () => {
   chat.vault.apiKeys = ["claude"];
   chat.automatedAccessAcknowledgedAt = null;

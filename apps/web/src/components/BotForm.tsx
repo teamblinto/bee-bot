@@ -163,7 +163,7 @@ export function BotForm({
     const boxed = boundaryResult?.ok ? Bot.safeParse(boundaryResult.body).data : created;
     const egressResult =
       boxed &&
-      inBox &&
+      (browser || inBox) &&
       (boxed.egressHosts.length !== egressHosts.length ||
         boxed.egressHosts.some((host, index) => host !== egressHosts[index]))
         ? await postCommand({ type: "set-bot-egress-hosts", botId: boxed.id, hosts: egressHosts })
@@ -339,16 +339,19 @@ export function BotForm({
               </p>
             )}
             <AutomatedAccessNotice />
-            <div className={labelClass}>
-              Sites it can reach
-              <HostList hosts={egressHosts} onChange={setEgressHosts} />
-              <p className="text-small">
-                Besides its engine, a boxed bot reaches only these sites. Enter names like pypi.org.
-              </p>
-            </div>
           </>
         )}
       </div>
+      {(browser || inBox) && (
+        <div className={labelClass}>
+          Sites it can reach
+          <HostList hosts={egressHosts} onChange={setEgressHosts} />
+          <p className="text-small text-ink-secondary">
+            Its browser and box reach only these sites, besides its engine. Each name is exact:
+            www.wikipedia.org doesn't cover en.wikipedia.org.
+          </p>
+        </div>
+      )}
       <label className={labelClass}>
         Project folder (optional)
         <input
