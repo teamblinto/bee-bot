@@ -21,6 +21,8 @@ export type BrowserSession = {
   insertText: (text: string) => Promise<void>;
   screencast: (onFrame: (frame: ScreencastFrame) => void) => Promise<() => Promise<void>>;
   close: () => Promise<void>;
+  // Settles once the browser is gone, closed or not, for example with its box.
+  closed: Promise<void>;
 };
 
 // `onDownload` gets the suggested file name and answers whether the download may go on.
@@ -38,6 +40,7 @@ export type FakePage = Partial<Omit<PageSnapshot, "elements">> & {
 export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
   const received: string[] = [];
   const downloads = new Map<string, (name: string) => boolean>();
+  const losers = new Map<string, () => void>();
   let opened = 0;
 
   const runtime: BrowserRuntime = {
@@ -47,6 +50,7 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
       let url = "about:blank";
       let elements: (PageElement & { href?: string })[] = [];
       let focused: number | undefined;
+      const closed = new Promise<void>((resolve) => losers.set(botId, resolve));
 
       const load = (next: string) => {
         url = next;
@@ -119,6 +123,7 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
           return async () => {};
         },
         close: async () => {},
+        closed,
       };
     },
   };
@@ -128,5 +133,7 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
     received,
     opened: () => opened,
     download: (botId: string, name: string) => downloads.get(botId)?.(name),
+    // The bot's browser goes away, the way it does when its box stops.
+    lose: (botId: string) => losers.get(botId)?.(),
   };
 }

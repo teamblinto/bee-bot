@@ -76,12 +76,15 @@ async function connectCdp(url: string, stream: Duplex) {
       }
     }
   });
-  socket.addEventListener("close", () => {
-    for (const waiter of pending.values()) {
-      waiter.reject(new Error("cdp_closed"));
-    }
-    pending.clear();
-  });
+  const closed = new Promise<void>((resolve) =>
+    socket.addEventListener("close", () => {
+      for (const waiter of pending.values()) {
+        waiter.reject(new Error("cdp_closed"));
+      }
+      pending.clear();
+      resolve();
+    }),
+  );
 
   return {
     send: (method: string, params: object = {}, sessionId?: string) =>
@@ -101,6 +104,7 @@ async function connectCdp(url: string, stream: Duplex) {
       return () => set.delete(listener);
     },
     close: () => socket.close(),
+    closed,
   };
 }
 
@@ -364,6 +368,7 @@ async function openSession(
       };
     },
     close: async () => cdp.close(),
+    closed: cdp.closed,
   };
 }
 

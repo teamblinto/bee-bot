@@ -186,7 +186,7 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
           aria-label={`${bot.name}'s desktop`}
           className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${desktop ? "" : "hidden"}`}
         />
-        {desktop ? null : frame?.data ? (
+        {desktop || unavailable ? null : frame?.data ? (
           <img
             alt={`${bot.name}'s browser`}
             src={`data:image/jpeg;base64,${frame.data}`}
@@ -209,7 +209,7 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
             onContextMenu={(event) => event.preventDefault()}
           />
         ) : (
-          !unavailable && <p className="text-small text-ink-faint">Waiting for the page…</p>
+          <p className="text-small text-ink-faint">Waiting for the page…</p>
         )}
       </div>
       {mine && desktop && (

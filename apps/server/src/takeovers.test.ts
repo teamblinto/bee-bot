@@ -44,6 +44,22 @@ it("answers the bot that asked once the owner hands a taken takeover back", () =
   expect(takeovers.request(run, "next").id).not.toBe(asked.id);
 });
 
+it("wakes the bot when nobody took over, once the pause is lifted", () => {
+  const { store, bot, run } = setup();
+  const { takeovers } = storeBrowserDeps(store);
+  const asked = takeovers.request(run, "sign in");
+  const order: string[] = [];
+  store.onEvent((event) => order.push(event.type));
+  expect(takeovers.expire(asked.id, () => order.push("release"))).toMatchObject({
+    state: "expired",
+  });
+  expect(order[0]).toBe("release");
+  const resend = { id: `takeover:${asked.id}`, roomId: bot.roomId, body: "x", attended: true };
+  expect(store.sendMessage(resend)).toBe("conflict");
+  expect(takeovers.expire(asked.id, () => order.push("again"))).toBeUndefined();
+  expect(order).not.toContain("again");
+});
+
 it("a restart interrupts open takeovers and lifts only the pause they set", () => {
   const { store, bot, run } = setup();
   const other = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
@@ -59,5 +75,5 @@ it("a restart interrupts open takeovers and lifts only the pause they set", () =
   expect(store.getBot(other.id)).toMatchObject({ status: "paused", pauseReason: "owner" });
   expect(takeovers.take(bot.id)).toBeUndefined();
   expect(takeovers.complete(other.id)).toBeUndefined();
-  expect(takeovers.expire(waiting.id)).toBeUndefined();
+  expect(takeovers.expire(waiting.id, () => {})).toBeUndefined();
 });

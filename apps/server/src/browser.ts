@@ -129,9 +129,11 @@ export type BrowserDeps = {
   takeovers: {
     request: (run: BrowserRun, reason: string) => Takeover;
     take: (botId: string) => Takeover | undefined;
-    // Completing one resumes the bot that asked.
+    // Completing one resumes the bot that asked, and so does expiry, after `release` lifts the
+    // pause.
     complete: (botId: string) => Takeover | undefined;
-    expire: (id: string) => Takeover | undefined;
+    expire: (id: string, release: () => void) => Takeover | undefined;
+    cancel: (botId: string) => Takeover | undefined;
   };
   takeoverTtlMs?: number;
 };
@@ -193,8 +195,23 @@ export function createBrowserBroker(deps: BrowserDeps) {
         stopScreencast: null,
       }));
     tabs.set(botId, opening);
-    opening.catch(() => tabs.delete(botId));
+    opening.then(
+      (tab) => void tab.session.closed.then(() => lost(botId, opening, tab)),
+      () => tabs.delete(botId),
+    );
     return opening;
+  }
+
+  // The browser went away, with its box or after a failure: watchers stop seeing a stale page, and
+  // a person's control ends.
+  function lost(botId: string, opening: Promise<Tab>, tab: Tab) {
+    if (tabs.get(botId) === opening) {
+      tabs.delete(botId);
+    }
+    for (const peer of tab.peers) {
+      peer.send({ type: "unavailable" });
+    }
+    void handBack(botId, tab);
   }
 
   function leaseMessage(tab: Tab, peer: HandoffPeer): HandoffServerMessage {
@@ -244,16 +261,21 @@ export function createBrowserBroker(deps: BrowserDeps) {
     broadcastLease(tab);
   }
 
-  // Expiry lifts the pause, so a request nobody answers can't leave the bot stuck.
+  // A takeover that ended without the owner: its notice and the pause go.
+  function dropTakeover(botId: string, tab: Tab | undefined) {
+    deps.setPaused(botId, false);
+    if (tab?.requested?.reason === "takeover") {
+      tab.requested = null;
+      broadcastLease(tab);
+    }
+  }
+
+  // Expiry lifts the pause and wakes the bot, so a request nobody answers can't leave it stuck.
   function requestTakeover(run: BrowserRun, tab: Tab, reason: string) {
     const takeover = deps.takeovers.request(run, reason);
     requestHandoff(run, tab, "takeover", takeover.reason);
     setTimeout(() => {
-      if (deps.takeovers.expire(takeover.id) && tab.requested?.reason === "takeover") {
-        tab.requested = null;
-        deps.setPaused(run.botId, false);
-        broadcastLease(tab);
-      }
+      deps.takeovers.expire(takeover.id, () => dropTakeover(run.botId, tab));
     }, deps.takeoverTtlMs ?? takeoverTtlMs).unref();
     return answer({ status: "paused", reason: "takeover", note: endTurn });
   }
@@ -485,6 +507,12 @@ export function createBrowserBroker(deps: BrowserDeps) {
 
   return {
     call,
+    // A stopped bot's takeover is cancelled, and nothing is left waiting on the owner.
+    stop: async (botId: string) => {
+      if (deps.takeovers.cancel(botId)) {
+        dropTakeover(botId, await tabs.get(botId)?.catch(() => undefined));
+      }
+    },
     perform: (run: BrowserRun, tool: string, args: unknown) =>
       isBrowserTool(tool)
         ? perform(run, tool, args)
@@ -516,8 +544,26 @@ export function browserExecutors(broker: Pick<BrowserBroker, "perform">) {
 const handedBack =
   "The owner finished the takeover and handed control back. What you saw before is stale: take " +
   "a fresh snapshot or screenshot before you act.";
+const notTaken =
+  "The owner didn't take over in time, so nothing on your computer changed. Carry on without " +
+  "that step, or tell them what you still need.";
 
 export function storeBrowserDeps(store: EventStore) {
+  // Answers the bot's waiting reply in its room, like a continuation's outcome. The fixed ID makes
+  // a repeat a no-op.
+  const resume = (takeover: Takeover | undefined, body: string) => {
+    const target = takeover && store.takeovers.takeoverTarget(takeover.id);
+    if (takeover && target) {
+      store.sendMessage({
+        id: `takeover:${takeover.id}`,
+        roomId: target.roomId,
+        body,
+        attended: true,
+        ...(target.replyToId && { replyToId: target.replyToId }),
+      });
+    }
+    return takeover;
+  };
   return {
     check: (run: BrowserRun, tool: string, args: unknown) => store.policy.check(run, tool, args),
     appendAudit: store.appendAudit,
@@ -542,23 +588,19 @@ export function storeBrowserDeps(store: EventStore) {
       request: (run: BrowserRun, reason: string) =>
         store.takeovers.requestTakeover(run.botId, run.id, reason),
       take: (botId: string) => store.takeovers.moveTakeover(botId, "waiting", "taken"),
-      // Answers the bot's waiting reply in its room, like a continuation's outcome. The fixed ID
-      // makes a repeat a no-op.
-      complete: (botId: string) => {
-        const takeover = store.takeovers.moveTakeover(botId, "taken", "completed");
-        const target = takeover && store.takeovers.takeoverTarget(takeover.id);
-        if (takeover && target) {
-          store.sendMessage({
-            id: `takeover:${takeover.id}`,
-            roomId: target.roomId,
-            body: handedBack,
-            attended: true,
-            ...(target.replyToId && { replyToId: target.replyToId }),
-          });
+      complete: (botId: string) =>
+        resume(store.takeovers.moveTakeover(botId, "taken", "completed"), handedBack),
+      // A paused bot's wake is refused, so the pause lifts before the answer is posted.
+      expire: (id: string, release: () => void) => {
+        const takeover = store.takeovers.expireTakeover(id);
+        if (takeover) {
+          release();
         }
-        return takeover;
+        return resume(takeover, notTaken);
       },
-      expire: (id: string) => store.takeovers.expireTakeover(id),
+      cancel: (botId: string) =>
+        store.takeovers.moveTakeover(botId, "waiting", "cancelled") ??
+        store.takeovers.moveTakeover(botId, "taken", "cancelled"),
     },
   } satisfies Omit<BrowserDeps, "runtime" | "requestApproval" | "desktop">;
 }

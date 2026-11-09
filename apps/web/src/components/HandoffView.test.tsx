@@ -125,3 +125,17 @@ it("drives the desktop with a control ticket for the held lease, and watches aga
   expect(disconnected).toHaveBeenCalledWith(control);
   expect(rfb.mock.calls[2]?.[0]).toMatchObject({ viewOnly: true });
 });
+
+it("drops the last frame and the lease once the browser is gone", async () => {
+  postCommand.mockResolvedValue({ ok: false, message: "no" });
+  await show();
+  const lease = { type: "lease", holder: "bot", mine: false, leaseId: null };
+  act(() =>
+    sockets[0]?.onmessage?.({ data: JSON.stringify({ ...lease, requested: null, note: null }) }),
+  );
+  expect(host.querySelector("img")).not.toBeNull();
+  act(() => sockets[0]?.onmessage?.({ data: JSON.stringify({ type: "unavailable" }) }));
+  expect(host.querySelector("img")).toBeNull();
+  expect(host.textContent).toContain("Ada has no browser running.");
+  expect(host.textContent).not.toContain("Take control");
+});

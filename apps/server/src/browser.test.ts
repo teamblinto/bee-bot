@@ -74,7 +74,16 @@ function setup(decision: PolicyDecision = { kind: "allow" }, takeoverTtlMs?: num
       request: (run, reason) => takeovers.requestTakeover(run.botId, run.id, reason),
       take: (botId) => takeovers.moveTakeover(botId, "waiting", "taken"),
       complete: (botId) => takeovers.moveTakeover(botId, "taken", "completed"),
-      expire: takeovers.expireTakeover,
+      expire: (id, release) => {
+        const expired = takeovers.expireTakeover(id);
+        if (expired) {
+          release();
+        }
+        return expired;
+      },
+      cancel: (botId) =>
+        takeovers.moveTakeover(botId, "waiting", "cancelled") ??
+        takeovers.moveTakeover(botId, "taken", "cancelled"),
     },
     ...(takeoverTtlMs !== undefined && { takeoverTtlMs }),
   });
@@ -304,6 +313,29 @@ describe("takeover", () => {
     await vi.waitFor(() => expect(takeoverStates()).toMatchObject([{ state: "expired" }]));
     expect(paused.get(run.botId)).toBe(false);
     expect(view.lease()).toMatchObject({ requested: null });
+  });
+
+  it("a stopped bot's takeover leaves no pause and no notice behind", async () => {
+    const { call, owner, paused, takeoverStates, broker } = setup();
+    const view = await owner();
+    await call("request_takeover", { reason: "sign in" });
+    await broker.stop(run.botId);
+    expect(takeoverStates()).toMatchObject([{ state: "cancelled" }]);
+    expect(paused.get(run.botId)).toBe(false);
+    expect(view.lease()).toMatchObject({ requested: null });
+  });
+
+  it("tells watchers when the browser goes away, and ends the person's control", async () => {
+    const { owner, fake, desktop } = setup();
+    const view = await owner();
+    view.send({ type: "take" });
+    fake.lose(run.botId);
+    await settle();
+    expect(view.received).toContainEqual({ type: "unavailable" });
+    expect(desktop.map((line) => line.split(" ")[0])).toEqual(["take", "give"]);
+    expect(view.lease()).toMatchObject({ holder: "bot" });
+    await owner();
+    expect(fake.opened()).toBe(2);
   });
 
   it("refuses a request without a reason", async () => {

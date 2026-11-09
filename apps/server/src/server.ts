@@ -313,6 +313,7 @@ export async function startServer({
     turnTimeoutMs,
     clock,
     boxesReady,
+    onStopBot: (botId) => void browser.stop(botId),
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
     onToolStart: (runId, { id, name, detail }) =>
       broadcast({ type: "tool-start", runId, toolId: id, name, detail }),

@@ -36,6 +36,8 @@ type Options = {
   clock?: AwakeClock | undefined;
   // Whether a box runtime can run boxes now. Only a box bot may run unattended.
   boxesReady?: (() => boolean) | undefined;
+  // Whatever else a stopped bot leaves waiting, such as a takeover.
+  onStopBot?: ((botId: string) => void) | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -122,6 +124,7 @@ export function createSupervisor({
   outboxHandlers = new Map(),
   clock = createAwakeClock(),
   boxesReady = () => false,
+  onStopBot = () => {},
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
@@ -445,8 +448,7 @@ export function createSupervisor({
 
   function stopBot(botId: string) {
     store.continuations.stopContinuations(botId);
-    store.takeovers.moveTakeover(botId, "waiting", "cancelled");
-    store.takeovers.moveTakeover(botId, "taken", "cancelled");
+    onStopBot(botId);
     const running = store.stopBot(botId);
     if (running) {
       approvals.closeRun(running);
