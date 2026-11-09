@@ -366,6 +366,9 @@ importers:
 
   images/box:
     devDependencies:
+      '@beebot/boxd':
+        specifier: workspace:*
+        version: link:../../apps/boxd
       '@types/node':
         specifier: 'catalog:'
         version: 24.19.2

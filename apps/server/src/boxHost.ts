@@ -101,9 +101,13 @@ export function readyBoxRuntime(
       await ready(botId);
       return runtime.cdp(botId);
     },
-    display: async (botId, mode) => {
+    display: async (botId, lease) => {
       await ready(botId);
-      return runtime.display(botId, mode);
+      return runtime.display(botId, lease);
+    },
+    control: async (botId, lease) => {
+      await ready(botId);
+      return runtime.control(botId, lease);
     },
     ready,
   };
@@ -221,14 +225,15 @@ export function sidecarEndpoint(
   };
 }
 
-// The owner watching counts as use, so an open view keeps the box up.
+// The owner watching or driving counts as use, so an open display keeps the box up.
 export async function displayView(
   runtime: BoxRuntime,
   botId: string,
   touch: (botId: string) => void = () => {},
+  lease?: string,
 ) {
   touch(botId);
-  const attach = await runtime.display(botId, "view");
+  const attach = await runtime.display(botId, lease);
   return { ...attach, stream: touching(attach.stream, () => touch(botId)) };
 }
 
@@ -278,7 +283,8 @@ export async function startBoxHost({
     egress,
     applyEgress: egress.apply,
     sidecar: async (botId: string) => sidecarEndpoint(idle.runtime, botId, idle.touch),
-    display: (botId: string) => displayView(idle.runtime, botId, idle.touch),
+    display: (botId: string, lease?: string) => displayView(idle.runtime, botId, idle.touch, lease),
+    control: (botId: string, lease: string) => idle.runtime.control(botId, lease),
     stderr: boxd.stderr,
     closed: boxd.closed,
     close: async () => {

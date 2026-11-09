@@ -33,6 +33,7 @@ import { z } from "zod";
 import { chainAudit, openAudit } from "./audit.ts";
 import { openBoxes } from "./boxes.ts";
 import { openContinuations } from "./continuations.ts";
+import { openTakeovers } from "./takeovers.ts";
 import { openEffects } from "./effects.ts";
 import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
@@ -626,6 +627,20 @@ export const migrations: Array<{
     sql: `DELETE FROM events;
     ALTER TABLE bots ADD COLUMN unattended_lane TEXT NOT NULL DEFAULT 'api_key'
       CHECK (unattended_lane IN ('subscription', 'api_key'));`,
+  },
+  {
+    name: "m3_vc_takeovers",
+    sql: `CREATE TABLE takeovers (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN
+        ('waiting', 'taken', 'completed', 'cancelled', 'expired', 'interrupted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX takeovers_open ON takeovers (bot_id) WHERE state IN ('waiting', 'taken');`,
   },
 ];
 
@@ -1922,6 +1937,7 @@ export function openEventStore(dataDir: string) {
   const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
   const boxes = openBoxes(db, tx);
   const continuations = openContinuations(db, tx);
+  const takeovers = openTakeovers(db, tx);
   const { vaultStatus } = openVaultEntries(db);
   const automatedAccessAt = () =>
     z.object({ acknowledgedAt: z.string().nullable() }).parse(selectAutomatedAccess.get())
@@ -1976,6 +1992,14 @@ export function openEventStore(dataDir: string) {
     tasks,
     boxes,
     continuations,
+    takeovers,
+    // A restart releases every takeover, so none can leave its bot paused.
+    recoverTakeovers: () =>
+      takeovers.interruptTakeovers((botId) => {
+        if (getBot(botId)?.pauseReason === "browser_session") {
+          setPause(botId, null);
+        }
+      }),
     vaultStore: openVaultStore(db, tx),
     appendAudit,
     effects: openEffects(db, tx),

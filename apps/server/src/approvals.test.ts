@@ -260,6 +260,7 @@ describe("the MCP endpoint", () => {
       "browser_snapshot",
       "browser_click",
       "browser_type",
+      "request_takeover",
     ]);
     // A read-only hint would let the CLI run a memory call alongside a tool, ahead of the taint.
     expect(list.result.tools.every(({ annotations }) => annotations === undefined)).toBe(true);

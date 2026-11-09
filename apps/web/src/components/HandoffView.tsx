@@ -26,6 +26,7 @@ const requestLines: Record<HandoffReason, (note: string) => string> = {
   login: (note) => `${note} wants a sign-in.`,
   captcha: (note) => `${note} wants a person to solve a challenge.`,
   hand_off: (note) => `This step is yours to do: ${note}.`,
+  takeover: (note) => `Asked you to take over: ${note}.`,
 };
 
 function parse(data: unknown) {
@@ -72,30 +73,37 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
     return () => opened.close();
   }, [bot.id]);
 
-  // The whole desktop when the box has one, else the screencast stays the view.
-  useEffect(() => {
-    const opening = postCommand({ type: "display-ticket", botId: bot.id, mode: "view" }).then(
-      (result) => {
-        const ticket = result.ok ? DisplayTicket.safeParse(result.body).data : undefined;
-        if (!ticket || !screen.current) {
-          return undefined;
-        }
-        const rfb = new RFB(screen.current, displaySocketUrl(ticket.ticket).href);
-        rfb.viewOnly = true;
-        rfb.scaleViewport = true;
-        rfb.qualityLevel = 6;
-        rfb.compressionLevel = 2;
-        rfb.addEventListener("connect", () => setDesktop(true));
-        rfb.addEventListener("disconnect", () => setDesktop(false));
-        return rfb;
-      },
-    );
-    return () => void opening.then((rfb) => rfb?.disconnect());
-  }, [bot.id]);
-
   const mine = lease?.mine === true;
-  // Control still goes through the screencast's input path.
-  const showDesktop = desktop && !mine;
+  const controlLease = mine ? (lease?.leaseId ?? null) : null;
+
+  // The whole desktop when the box has one, else the screencast stays the view. Holding the lease
+  // swaps the view-only stream for the lease's input server, and giving it back swaps it again.
+  useEffect(() => {
+    const ended = new AbortController();
+    const opening = postCommand(
+      controlLease === null
+        ? { type: "display-ticket", botId: bot.id, mode: "view" }
+        : { type: "display-ticket", botId: bot.id, mode: "control", leaseId: controlLease },
+    ).then((result) => {
+      const ticket = result.ok ? DisplayTicket.safeParse(result.body).data : undefined;
+      if (!ticket || !screen.current || ended.signal.aborted) {
+        return undefined;
+      }
+      const rfb = new RFB(screen.current, displaySocketUrl(ticket.ticket).href);
+      rfb.viewOnly = controlLease === null;
+      rfb.scaleViewport = true;
+      rfb.qualityLevel = 6;
+      rfb.compressionLevel = 2;
+      rfb.addEventListener("connect", () => ended.signal.aborted || setDesktop(true));
+      rfb.addEventListener("disconnect", () => ended.signal.aborted || setDesktop(false));
+      return rfb;
+    });
+    return () => {
+      ended.abort();
+      setDesktop(false);
+      void opening.then((rfb) => rfb?.disconnect());
+    };
+  }, [bot.id, controlLease]);
 
   function send(message: HandoffClientMessage) {
     if (socket.current?.readyState === WebSocket.OPEN) {
@@ -176,9 +184,9 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
           ref={screen}
           role="img"
           aria-label={`${bot.name}'s desktop`}
-          className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${showDesktop ? "" : "hidden"}`}
+          className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${desktop ? "" : "hidden"}`}
         />
-        {showDesktop ? null : frame?.data ? (
+        {desktop ? null : frame?.data ? (
           <img
             alt={`${bot.name}'s browser`}
             src={`data:image/jpeg;base64,${frame.data}`}
@@ -204,6 +212,11 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
           !unavailable && <p className="text-small text-ink-faint">Waiting for the page…</p>
         )}
       </div>
+      {mine && desktop && (
+        <p className="text-small text-ink-secondary">
+          Type passwords in the private field below, not on the desktop.
+        </p>
+      )}
       {mine && (
         <form className="flex items-center gap-2" onSubmit={typePrivately}>
           <input
@@ -221,9 +234,10 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
         </form>
       )}
       <p className="text-label text-ink-faint">
-        What you type here never reaches {bot.name}, its logs or the audit log. The page itself may
-        still show your account to {bot.name} later.
-        {!showDesktop && " Native dialogs and the browser's own menus don't appear in this view."}
+        What you type in the private field never reaches {bot.name}, its logs or the audit log. What
+        you type on the desktop goes to the page as you type it, and {bot.name} may read it there
+        later. The page itself may still show your account to {bot.name} later.
+        {!desktop && " Native dialogs and the browser's own menus don't appear in this view."}
       </p>
     </dialog>
   );

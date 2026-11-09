@@ -5,7 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { createBoxd } from "./boxd.ts";
 import { type Egress, noEgress } from "./egress.ts";
-import { boxNames, displayArgv } from "./policy.ts";
+import { boxNames } from "./policy.ts";
 import {
   Kind,
   type Response,
@@ -210,21 +210,64 @@ describe("boxd", () => {
     expect(JSON.parse(String(of(2, Kind.exit)[0]?.payload))).not.toBe(0);
   });
 
-  it("streams the sidecar's view-only display, and refuses control", async () => {
+  it("routes a view to the view-only socket, and control only to a lease's own socket", async () => {
     const { call, fake } = harness();
+    const lease = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b";
     await call("create");
     await call("start");
+    const browserExecs = () =>
+      fake.calls.filter(
+        (entry) => entry.args[0] === "exec" && entry.args.includes(names.container.browser),
+      );
     expect(await call("display", { mode: "view" })).toMatchObject({ error: "bad channel" });
+    expect(await call("display", { channel: 3 })).toMatchObject({ error: "bad mode" });
     expect(await call("display", { channel: 3, mode: "control" })).toMatchObject({
       error: "bad mode",
     });
-    expect(await call("display", { channel: 3 })).toMatchObject({ error: "bad mode" });
-    expect(await call("display", { channel: 3, mode: "view" })).toMatchObject({ ok: true });
-    const spawned = fake.calls.find(
-      (entry) => entry.args[0] === "exec" && entry.args.includes(names.container.browser),
+    for (const bad of ["../../etc/x", `${lease} -viewonly`, lease.toUpperCase()]) {
+      expect(await call("display", { channel: 3, mode: "control", lease: bad })).toMatchObject({
+        error: "bad mode",
+      });
+      expect(await call("control", { channel: 3, lease: bad })).toMatchObject({
+        error: "bad lease",
+      });
+    }
+    expect(browserExecs()).toEqual([]);
+
+    expect(await call("display", { channel: 3, mode: "view", lease })).toMatchObject({ ok: true });
+    expect(browserExecs()[0]?.args.slice(0, 3)).toEqual(["exec", "-i", names.container.browser]);
+    expect(browserExecs()[0]?.args.slice(-3)).toEqual([
+      "socat",
+      "STDIO",
+      "UNIX-CONNECT:/tmp/bee-display/view.sock",
+    ]);
+    expect(await call("display", { channel: 4, mode: "control", lease })).toMatchObject({
+      ok: true,
+    });
+    expect(browserExecs()[1]?.args.at(-1)).toBe(
+      `UNIX-CONNECT:/tmp/bee-display/control-${lease}.sock,retry=50,interval=0.1`,
     );
-    expect(spawned?.args.slice(0, 3)).toEqual(["exec", "-i", names.container.browser]);
-    expect(spawned?.args.slice(-3)).toEqual(displayArgv);
+    expect(await call("control", { channel: 5, lease })).toMatchObject({ ok: true });
+    const server = browserExecs()[2]?.args ?? [];
+    expect(server.at(-1)).toBe(`/tmp/bee-display/control-${lease}.sock`);
+    expect(server.join(" ")).toContain("x11vnc -display :1");
+    expect(server.join(" ")).not.toMatch(/-viewonly|-shared/);
+  });
+
+  it("removes a lease's socket file once its control server is gone", async () => {
+    const { call, fake, output } = harness();
+    const lease = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b";
+    await call("create");
+    await call("start");
+    expect(await call("control", { channel: 5, lease })).toMatchObject({ ok: true });
+    await expect.poll(() => output.some((entry) => entry.kind === Kind.exit)).toBe(true);
+    expect(fake.calls.map(({ args }) => args)).toContainEqual([
+      "exec",
+      names.container.browser,
+      "rm",
+      "-f",
+      `/tmp/bee-display/control-${lease}.sock`,
+    ]);
   });
 
   it("kills every attached turn when the server goes away", async () => {

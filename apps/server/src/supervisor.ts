@@ -147,6 +147,7 @@ export function createSupervisor({
     }),
   );
   store.continuations.recoverContinuations();
+  store.recoverTakeovers();
 
   // An outcome is the owner's answer to the bot's waiting reply, so the next turn resumes the
   // saved session with it. The fixed message ID makes a repeat after a crash a no-op.
@@ -444,6 +445,8 @@ export function createSupervisor({
 
   function stopBot(botId: string) {
     store.continuations.stopContinuations(botId);
+    store.takeovers.moveTakeover(botId, "waiting", "cancelled");
+    store.takeovers.moveTakeover(botId, "taken", "cancelled");
     const running = store.stopBot(botId);
     if (running) {
       approvals.closeRun(running);

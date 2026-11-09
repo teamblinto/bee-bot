@@ -307,8 +307,9 @@ export function volumeArgs(name: string, labels: Record<string, string>) {
 // signals the whole group from inside the box.
 const execDir = "/tmp/.beebot-exec";
 const execWrap = `mkdir -p ${execDir} && echo $$ > ${execDir}/"$0"; "$@"; c=$?; rm -f ${execDir}/"$0"; exit $c`;
-const execKill = `i=0; while [ ! -f ${execDir}/"$0" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; [ -f ${execDir}/"$0" ] && kill -KILL -- -"$(cat ${execDir}/"$0")"; rm -f ${execDir}/"$0"`;
-const execReap = `for f in ${execDir}/*; do [ -f "$f" ] || continue; kill -KILL -- -"$(cat "$f")" 2>/dev/null; rm -f "$f"; done`;
+// The box's sh is dash, whose kill refuses `--`: the signal goes first, then the negative group.
+const execKill = `i=0; while [ ! -f ${execDir}/"$0" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; [ -f ${execDir}/"$0" ] && kill -KILL -"$(cat ${execDir}/"$0")"; rm -f ${execDir}/"$0"`;
+const execReap = `for f in ${execDir}/*; do [ -f "$f" ] || continue; kill -KILL -"$(cat "$f")" 2>/dev/null; rm -f "$f"; done`;
 
 export function execArgs(
   container: string,
@@ -341,8 +342,45 @@ export function execReapArgs(container: string) {
 // through boxd, so no network path to it exists from any box or from the egress proxy.
 export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222"];
 
-// The sidecar desktop's view-only VNC server, which listens on a Unix socket and no TCP port.
-export const displayArgv = ["socat", "STDIO", "UNIX-CONNECT:/tmp/bee-display/view.sock"];
+// The sidecar desktop's VNC servers listen on Unix sockets and no TCP port. The view-only one runs
+// all the time; a lease's input-capable one exists only while beebotd holds its `control` attach.
+const displayDir = "/tmp/bee-display";
+const controlSocket = (lease: string) => `${displayDir}/control-${lease}.sock`;
+
+// A lease's server can still be starting when its viewer connects, so that connect retries.
+export const displayArgv = (lease?: string) => [
+  "socat",
+  "STDIO",
+  lease === undefined
+    ? `UNIX-CONNECT:${displayDir}/view.sock`
+    : `UNIX-CONNECT:${controlSocket(lease)},retry=50,interval=0.1`,
+];
+
+// One driver: no -shared, and no -viewonly. A killed x11vnc leaves its socket file behind, so it is
+// removed before the start and again once the process is gone.
+export const controlArgv = (lease: string) => [
+  "sh",
+  "-c",
+  'rm -f "$0" && exec x11vnc -display :1 -unixsock "$0" -rfbport 0 -rfbportv6 -1 -forever -nosel -nopw -cursor arrow -q',
+  controlSocket(lease),
+];
+
+export const controlCleanupArgs = (container: string, lease: string) => [
+  "exec",
+  container,
+  "rm",
+  "-f",
+  controlSocket(lease),
+];
+
+// After a boxd crash no control attach survives, so no lease socket should either.
+export const controlReapArgs = (container: string) => [
+  "exec",
+  container,
+  "sh",
+  "-c",
+  `rm -f ${displayDir}/control-*.sock`,
+];
 
 // A finished download, named by Chromium's GUID, goes from the sidecar into the engine's
 // workspace under the name the owner saw. Both names are checked here, since they reach a shell.

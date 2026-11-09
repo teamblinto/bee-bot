@@ -277,7 +277,15 @@ export async function connectBoxd(
       await request("put", botId, { put: { name, content } });
     },
     cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
-    display: (botId, mode) => attach((channel) => request("display", botId, { channel, mode })),
+    display: (botId, lease) =>
+      attach((channel) =>
+        request(
+          "display",
+          botId,
+          lease === undefined ? { channel, mode: "view" } : { channel, mode: "control", lease },
+        ),
+      ),
+    control: (botId, lease) => attach((channel) => request("control", botId, { channel, lease })),
     collect: async (botId, file, name) => {
       await request("collect", botId, { collect: { file, name } });
     },
