@@ -42,7 +42,11 @@ async function recorder(
 const socketPath = (name: string) =>
   process.platform === "win32"
     ? `\\\\.\\pipe\\beebot-${name}-${NodeCrypto.randomUUID()}`
-    : NodePath.join(NodeOS.tmpdir(), `beebot-${name}-${NodeCrypto.randomUUID()}.sock`);
+    : // macOS caps a socket path at 104 bytes and its tmpdir alone is ~50, so no full UUID here.
+      NodePath.join(
+        NodeOS.tmpdir(),
+        `beebot-${name}-${NodeCrypto.randomBytes(4).toString("hex")}.sock`,
+      );
 
 async function startProxy(vendorPort: number, bee?: string) {
   const control = socketPath("egress-test");
