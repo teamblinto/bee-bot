@@ -57,3 +57,26 @@ it("counts DevTools traffic as use, and passes every byte through both ways", as
   expect(received).toBe("early echo");
   expect(touched.length).toBeGreaterThanOrEqual(3);
 });
+
+it("keeps a box up while its display view is open, even with no bytes", async () => {
+  vi.useFakeTimers();
+  const fake = createFakeBoxRuntime();
+  await fake.create("bot-1");
+  await fake.start("bot-1");
+  let close = () => {};
+  const runtime = {
+    ...fake,
+    display: async () => ({
+      stream: new NodeStream.PassThrough(),
+      exited: new Promise<null>((resolve) => (close = () => resolve(null))),
+    }),
+  };
+  const idle = stopIdleBoxes(runtime, { quietMs, everyMs: 60_000, now: () => Date.now() });
+  await idle.runtime.display("bot-1", "view");
+  await vi.advanceTimersByTimeAsync(2 * quietMs);
+  expect(await fake.snapshot("bot-1")).toBe("running");
+  close();
+  await vi.advanceTimersByTimeAsync(quietMs);
+  expect(await fake.snapshot("bot-1")).toBe("stopped");
+  idle.close();
+});

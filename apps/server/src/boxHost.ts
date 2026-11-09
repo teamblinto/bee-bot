@@ -8,7 +8,7 @@ import type { BoxState } from "@beebot/contracts";
 
 import type { SidecarEndpoint } from "./browserCdp.ts";
 import { recordingBoxRuntime } from "./boxes.ts";
-import type { BoxRuntime } from "./boxRuntime.ts";
+import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
 import { type BoxdBootstrap, type BoxdFiles, type BoxdHost, launchBoxd } from "./boxdRuntime.ts";
 import { createEgressControl, type EgressInput } from "./egress.ts";
 import type { Vault } from "./vault.ts";
@@ -115,8 +115,8 @@ export const boxQuietMs = 15 * 60_000;
 
 export type BoxUse = { attached: number; lastUsedAt: number };
 
-// Idle: nothing attached to the engine, and no byte through the sidecar's DevTools or an open
-// display view, for `quietMs`.
+// Idle: nothing attached to the engine or an open display view, and no byte through the sidecar's
+// DevTools, for `quietMs`.
 export function idleBoxes(uses: ReadonlyMap<string, BoxUse>, now: number, quietMs: number) {
   return [...uses]
     .filter(([, use]) => use.attached === 0 && now - use.lastUsedAt >= quietMs)
@@ -143,23 +143,26 @@ export function stopIdleBoxes(
     }
   }, everyMs);
   timer.unref();
+  async function attached(botId: string, open: () => Promise<BoxAttach>) {
+    use(botId).attached += 1;
+    const release = () => {
+      use(botId).attached -= 1;
+    };
+    try {
+      const attach = await open();
+      void attach.exited.finally(release);
+      return attach;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
   return {
     runtime: {
       ...runtime,
-      execAttach: async (botId, exec) => {
-        use(botId).attached += 1;
-        const release = () => {
-          use(botId).attached -= 1;
-        };
-        try {
-          const attach = await runtime.execAttach(botId, exec);
-          void attach.exited.finally(release);
-          return attach;
-        } catch (error) {
-          release();
-          throw error;
-        }
-      },
+      execAttach: (botId, exec) => attached(botId, () => runtime.execAttach(botId, exec)),
+      // A still desktop sends no VNC bytes, so an open view counts as attached, not as traffic.
+      display: (botId, mode) => attached(botId, () => runtime.display(botId, mode)),
     } satisfies BoxRuntime,
     touch: (botId: string) => {
       use(botId);
