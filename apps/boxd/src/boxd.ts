@@ -487,6 +487,8 @@ export function createBoxd(options: BoxdOptions) {
           }
           await collect(box, request.collect.file, request.collect.name);
           return { id, ok: true };
+        case "display":
+          return { id, ok: false, error: "no display in this box" };
       }
     } catch (error) {
       return { id, ok: false, error: error instanceof Error ? error.message : String(error) };
