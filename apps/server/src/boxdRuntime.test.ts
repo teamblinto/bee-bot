@@ -87,9 +87,10 @@ describe("boxd adapter", () => {
     await expect(typing).rejects.toThrow("aborted");
   });
 
-  it("gives typing the time xdotool takes, a character every 12 ms or more", () => {
+  it("gives typing time to finish, even the longest text on a slow machine", () => {
     const longest = inputTimeoutMs([{ type: "type", text: "x".repeat(maxTypedText) }]);
-    expect(longest).toBeGreaterThan(10_000 + maxTypedText * 12 * 1.5);
+    // Twice the 15 s that 2000 characters took in the Podman machine.
+    expect(longest).toBeGreaterThan(2 * 15_000);
     expect(inputTimeoutMs([{ type: "wait", ms: 500 }])).toBe(10_500);
   });
 

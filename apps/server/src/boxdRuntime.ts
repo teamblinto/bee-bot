@@ -47,7 +47,8 @@ const chunkSize = 1024 * 1024;
 const maxCaptureBytes = 1024 * 1024;
 const maxScreenshotBytes = 8 * 1024 * 1024;
 const captureTimeoutMs = 10_000;
-// xdotool types about one character every 12 ms; this leaves room for a busy machine.
+// xdotool typed 2000 characters in about 15 s in the Podman machine; 25 ms each leaves room for a
+// busy one.
 const typeMsPerChar = 25;
 
 export const inputTimeoutMs = (actions: InputAction[]) =>
