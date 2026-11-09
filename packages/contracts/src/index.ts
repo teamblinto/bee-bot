@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 26;
+export const protocolVersion = 27;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -405,6 +405,10 @@ export const HandoffClientMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("input"), input: HandoffInput }),
   // The private sign-in field: typed into the page's focused field in one go.
   z.object({ type: z.literal("text"), text: z.string().min(1).max(1000) }),
+  // The address bar and its buttons. Like `input`, refused unless this socket holds the lease.
+  z.object({ type: z.literal("navigate"), url: z.string().min(1).max(2048) }),
+  z.object({ type: z.literal("history"), direction: z.enum(["back", "forward"]) }),
+  z.object({ type: z.literal("reload") }),
 ]);
 export type HandoffClientMessage = z.infer<typeof HandoffClientMessage>;
 
@@ -422,6 +426,14 @@ export const HandoffServerMessage = z.discriminatedUnion("type", [
   // A JPEG, base64, of a viewport `width` by `height` CSS pixels.
   z.object({ type: z.literal("frame"), data: z.string(), width: z.number(), height: z.number() }),
   z.object({ type: z.literal("unavailable") }),
+  // The page the bot's browser shows, sent on joining and whenever it changes.
+  z.object({
+    type: z.literal("page"),
+    url: z.string(),
+    title: z.string(),
+    canGoBack: z.boolean(),
+    canGoForward: z.boolean(),
+  }),
 ]);
 export type HandoffServerMessage = z.infer<typeof HandoffServerMessage>;
 
