@@ -370,6 +370,14 @@ export function socketUrl(path: string) {
   return url;
 }
 
+// The ticket stands in for the token, which never rides in this URL.
+export function displaySocketUrl(ticket: string) {
+  const url = endpoint("/display");
+  url.protocol = "ws:";
+  url.searchParams.set("ticket", ticket);
+  return url;
+}
+
 let failedAttempts = 0;
 
 function reconnect() {

@@ -1,5 +1,7 @@
+import RFB from "@novnc/novnc";
 import {
   type Bot,
+  DisplayTicket,
   type HandoffClientMessage,
   type HandoffReason,
   HandoffServerMessage,
@@ -14,7 +16,7 @@ import {
   type WheelEvent,
 } from "react";
 
-import { socketUrl } from "../serverConnection";
+import { displaySocketUrl, postCommand, socketUrl } from "../serverConnection";
 import { keyInput, mouseInput } from "./HandoffMapping";
 
 type Lease = Extract<HandoffServerMessage, { type: "lease" }>;
@@ -37,10 +39,12 @@ function parse(data: unknown) {
 export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const socket = useRef<WebSocket>(null);
+  const screen = useRef<HTMLDivElement>(null);
   const pressed = useRef(false);
   const [lease, setLease] = useState<Lease>();
   const [frame, setFrame] = useState<Frame>();
   const [unavailable, setUnavailable] = useState(false);
+  const [desktop, setDesktop] = useState(false);
   const [privateText, setPrivateText] = useState("");
 
   useEffect(() => {
@@ -68,7 +72,30 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
     return () => opened.close();
   }, [bot.id]);
 
+  // The whole desktop when the box has one, else the screencast stays the view.
+  useEffect(() => {
+    const opening = postCommand({ type: "display-ticket", botId: bot.id, mode: "view" }).then(
+      (result) => {
+        const ticket = result.ok ? DisplayTicket.safeParse(result.body).data : undefined;
+        if (!ticket || !screen.current) {
+          return undefined;
+        }
+        const rfb = new RFB(screen.current, displaySocketUrl(ticket.ticket).href);
+        rfb.viewOnly = true;
+        rfb.scaleViewport = true;
+        rfb.qualityLevel = 6;
+        rfb.compressionLevel = 2;
+        rfb.addEventListener("connect", () => setDesktop(true));
+        rfb.addEventListener("disconnect", () => setDesktop(false));
+        return rfb;
+      },
+    );
+    return () => void opening.then((rfb) => rfb?.disconnect());
+  }, [bot.id]);
+
   const mine = lease?.mine === true;
+  // Control still goes through the screencast's input path.
+  const showDesktop = desktop && !mine;
 
   function send(message: HandoffClientMessage) {
     if (socket.current?.readyState === WebSocket.OPEN) {
@@ -145,7 +172,13 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
       )}
       <p className="text-small text-ink-secondary">{status}</p>
       <div className="scroller min-h-0 overflow-auto">
-        {frame?.data ? (
+        <div
+          ref={screen}
+          role="img"
+          aria-label={`${bot.name}'s desktop`}
+          className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${showDesktop ? "" : "hidden"}`}
+        />
+        {showDesktop ? null : frame?.data ? (
           <img
             alt={`${bot.name}'s browser`}
             src={`data:image/jpeg;base64,${frame.data}`}
