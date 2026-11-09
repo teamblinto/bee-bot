@@ -119,7 +119,13 @@ export function createFakePodman({ failCreate }: { failCreate?: (name: string) =
     }
     const body =
       kind === "container"
-        ? { Config: { Labels: item.labels }, State: { Running: item.running, OOMKilled: false } }
+        ? {
+            Config: {
+              Labels: item.labels,
+              Image: item.args.find((arg) => arg.startsWith("localhost/")),
+            },
+            State: { Running: item.running, OOMKilled: false },
+          }
         : kind === "network"
           ? { labels: item.labels }
           : { Labels: item.labels };

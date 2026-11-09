@@ -139,6 +139,21 @@ describe("boxd", () => {
     });
   });
 
+  it("retires a box made from an older image and keeps its volumes", async () => {
+    const { call, fake } = harness();
+    await call("create");
+    await call("start");
+    expect(await call("snapshot")).toMatchObject({ state: "running" });
+    const browser = fake.resources.container.get(names.container.browser)!;
+    browser.args = browser.args.map((arg) =>
+      arg.startsWith("localhost/") ? "localhost/old:1" : arg,
+    );
+    expect(await call("snapshot")).toMatchObject({ ok: true, state: "absent" });
+    expect(fake.resources.container.size).toBe(0);
+    expect(fake.resources.volume.size).toBe(3);
+    expect(await call("create")).toMatchObject({ ok: true });
+  });
+
   it("rolls back a half-made box", async () => {
     const { call, fake } = harness(
       createFakePodman({ failCreate: (name) => name.endsWith("-browser") }),

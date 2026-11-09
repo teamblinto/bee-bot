@@ -209,8 +209,9 @@ export function createBoxService({
         await startMachine(name);
         found = await probe(name);
       }
-      if (setUp && found.running && !found.imageBuilt) {
+      if ((setUp || recover) && found.running && !found.imageBuilt) {
         set({
+          settingUp: true,
           machineFound: true,
           problem: "Building the box image. The first time takes several minutes.",
         });

@@ -284,6 +284,11 @@ export function createBoxd(options: BoxdOptions) {
     return raw && typeof raw === "object" ? (raw as Record<string, string>) : null;
   }
 
+  function imageOf(item: object) {
+    const config: unknown = Reflect.get(item, "Config");
+    return config && typeof config === "object" ? Reflect.get(config, "Image") : undefined;
+  }
+
   async function facts(box: Box, name: string): Promise<ContainerFacts | null> {
     const item = await inspect("container", name);
     if (item === null) {
@@ -306,6 +311,30 @@ export function createBoxd(options: BoxdOptions) {
       facts(box, names.container.browser),
     ]);
     return boxState(engine, browser);
+  }
+
+  // A box made from an older image never picks up the new one, so its containers go and the server
+  // makes them again. They hold nothing: the bot's files and browser profile live in its volumes.
+  async function retireStale(box: Box) {
+    const names = boxNames(box);
+    const stale = (
+      await Promise.all(
+        roles.map(async (role) => {
+          const item = await inspect("container", names.container[role]);
+          return item !== null &&
+            ownedBy(secret, box, names.container[role], labelsOf(item)) &&
+            imageOf(item) !== runSpec[role].image
+            ? [names.container[role]]
+            : [];
+        }),
+      )
+    ).flat();
+    if (stale.length === 0) {
+      return (await state(box)).state;
+    }
+    await stop(box).catch(() => {});
+    await podmanOk(["rm", "-f", "-t", "10", names.container.engine, names.container.browser]);
+    return (await state(box)).state;
   }
 
   async function requireOwned(box: Box) {
@@ -540,7 +569,7 @@ export function createBoxd(options: BoxdOptions) {
           await serially(botId, () => stop(box));
           return { id, ok: true };
         case "snapshot":
-          return { id, ok: true, state: (await state(box)).state };
+          return { id, ok: true, state: await serially(botId, () => retireStale(box)) };
         case "exec":
           if (request.exec === undefined) {
             return { id, ok: false, error: "bad exec request" };

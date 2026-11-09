@@ -104,6 +104,15 @@ it("starts the machine on boot when boxes came up in it before", async () => {
   expect(service.ready()).toBe(true);
 });
 
+it("builds a new box image on boot after an update, in a machine boxes came up in before", async () => {
+  const { service, calls } = setup({ "beebot-dev": { ...ready, imageBuilt: false } }, [
+    "beebot-dev",
+  ]);
+  await service.refresh();
+  expect(calls).toEqual(["build beebot-dev", "start beebot-dev"]);
+  expect(service.ready()).toBe(true);
+});
+
 it("never starts a machine on boot that boxes never came up in", async () => {
   const { service, calls } = setup({ "beebot-dev": { ...ready, running: false } }, ["other"]);
   await service.refresh();
