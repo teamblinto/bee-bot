@@ -15,6 +15,7 @@ RUN apt-get update \
 COPY --chmod=0755 engine.sh /usr/local/bin/bee-engine
 COPY --chmod=0755 browser.sh /usr/local/bin/bee-browser
 COPY tmux.conf /etc/bee/tmux.conf
+COPY openbox.xml /etc/bee/openbox.xml
 COPY chromium-policy.json /etc/chromium/policies/managed/bee.json
 
 # /home/bee is the persistent volume the vendor installers write into (~/.local/bin).

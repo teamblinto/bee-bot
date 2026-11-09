@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- No root menu and no key bindings, so the desktop launches nothing. A click still focuses and
+     raises a window, and its title bar still drags it. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <keyboard/>
+  <mouse>
+    <context name="Client">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+    </context>
+  </mouse>
+</openbox_config>

@@ -53,13 +53,13 @@ ready Xvfb xdotool getdisplaygeometry
 eval "$(dbus-launch --sh-syntax)" || stop 1
 started dbus "$DBUS_SESSION_BUS_PID"
 
-openbox --startup "touch $display/openbox.ready" &
+openbox --config-file /etc/bee/openbox.xml --startup "touch $display/openbox.ready" &
 started openbox $!
 ready openbox test -f "$display/openbox.ready"
 
 # -rfbportv6 -1: with only -rfbport 0, libvncserver still listens on [::]:5900.
 x11vnc -display :1 -unixsock "$display/view.sock" -rfbport 0 -rfbportv6 -1 -viewonly -shared \
-  -forever -nosel -nopw -cursor arrow &
+  -forever -nosel -nopw -cursor arrow -nocursorshape &
 started x11vnc $!
 ready x11vnc test -S "$display/view.sock"
 
