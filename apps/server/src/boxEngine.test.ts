@@ -259,6 +259,12 @@ describe("Claude in a box", () => {
         "browser_click",
         "browser_type",
         "request_takeover",
+        "computer_screenshot",
+        "computer_click",
+        "computer_type",
+        "computer_key",
+        "computer_scroll",
+        "computer_drag",
       ].map((name) => `mcp__bee__${name}`),
     ]);
     expect(args).not.toContain("--permission-prompt-tool");

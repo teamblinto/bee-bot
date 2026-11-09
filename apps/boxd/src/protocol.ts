@@ -58,7 +58,8 @@ export type Bootstrap = {
   testUpstreams?: Record<string, string>;
 };
 
-// `cdp` attaches to the sidecar's DevTools, `capture` streams one small JPEG of its desktop,
+// `cdp` attaches to the sidecar's DevTools, `capture` streams one small JPEG of its desktop (or,
+// with `full`, a full-size PNG), `input` runs one chain of mouse and keyboard actions on it,
 // `display` to its view-only VNC socket (or, with a lease,
 // to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
 // the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
@@ -75,7 +76,8 @@ export type Verb =
   | "egress"
   | "put"
   | "collect"
-  | "control";
+  | "control"
+  | "input";
 
 export type ExecRequest = {
   argv: string[];
@@ -96,7 +98,35 @@ export type Request = {
   lease?: string;
   put?: { name: string; content: string };
   collect?: { file: string; name: string };
+  input?: InputAction[];
+  full?: boolean;
 };
+
+export const screenSize = { width: 1280, height: 800 } as const;
+export const maxTypedText = 2000;
+
+// boxd builds the xdotool argv from these itself; `key` and `type` may only end a chain.
+export type InputAction =
+  | { type: "move"; x: number; y: number }
+  | { type: "click"; button: 1 | 2 | 3; count?: number }
+  | { type: "down" | "up"; button: 1 | 2 | 3 }
+  | { type: "scroll"; direction: "up" | "down" | "left" | "right"; amount: number }
+  | { type: "wait"; ms: number }
+  | { type: "key"; keys: string }
+  | { type: "type"; text: string };
+
+const modifiers = new Set(["ctrl", "control", "alt", "shift", "super", "meta"]);
+
+// One X keysym, optionally after modifiers: "Return", "ctrl+s", "ctrl+shift+Tab".
+export function validKeys(keys: string) {
+  if (!/^[A-Za-z0-9_+]{1,64}$/.test(keys)) {
+    return false;
+  }
+  const parts = keys.split("+");
+  return parts.every(
+    (part, index) => part !== "" && (index === parts.length - 1 || modifiers.has(part)),
+  );
+}
 
 export type Response =
   | { id: number; ok: true; state?: BoxState }

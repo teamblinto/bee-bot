@@ -12,7 +12,10 @@ import {
   displayArgv,
   execArgs,
   execKillArgs,
+  fullCaptureArgv,
+  inputArgv,
 } from "@beebot/boxd/policy";
+import type { InputAction } from "@beebot/boxd/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { runArgs, type BoxEntry } from "./index.ts";
@@ -230,6 +233,32 @@ describe.skipIf(!podmanUp)("box image", () => {
     expect(Number(size)).toBeGreaterThan(1000);
     expect(Number(size)).toBeLessThan(100_000);
 
+    // The bot's screenshot: a full-size PNG, its IHDR saying 1280x800.
+    const full = fullCaptureArgv.join(" ");
+    const [head, bytes] = (
+      await podmanOk([
+        "exec",
+        id,
+        "sh",
+        "-c",
+        `${full} | od -An -tx1 -N24 | tr -d ' \\n'; echo; ${full} | wc -c`,
+      ])
+    ).split("\n");
+    expect(head).toBe("89504e470d0a1a0a0000000d494844520000050000000320");
+    expect(Number(bytes)).toBeLessThan(8 * 1024 * 1024);
+
+    // The bot's mouse, through boxd's own xdotool argv.
+    const input = (actions: InputAction[]) =>
+      podmanOk(["exec", "-e", "DISPLAY=:1", id, ...(inputArgv(actions) ?? [])]);
+    await input([
+      { type: "move", x: 300, y: 200 },
+      { type: "wait", ms: 20 },
+      { type: "move", x: 321, y: 123 },
+    ]);
+    expect(await podmanOk(["exec", "-e", "DISPLAY=:1", id, "xdotool", "getmouselocation"])).toMatch(
+      /^x:321 y:123 /,
+    );
+
     // A pointer move to 640,400 sent as RFB bytes through boxd's own display argv; only a server
     // without -viewonly obeys it.
     const pointAt = (argv: string[]) =>
@@ -276,6 +305,7 @@ describe.skipIf(!podmanUp)("box image", () => {
     const text = await sandboxPage(version.webSocketDebuggerUrl);
     expect(text).toContain("You are adequately sandboxed.");
     expect(text).toMatch(/Seccomp-BPF sandbox\s+Yes/);
+    expect(await typedIntoPage(version.webSocketDebuggerUrl, input)).toBe("hello box");
 
     await expectConfined(id);
 
@@ -295,7 +325,8 @@ describe.skipIf(!podmanUp)("box image", () => {
   }, 180_000);
 });
 
-async function sandboxPage(url: string) {
+// A new tab at `pageUrl`, driven over DevTools.
+async function openPage(url: string, pageUrl: string) {
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => {
     ws.onopen = resolve;
@@ -314,20 +345,52 @@ async function sandboxPage(url: string) {
       pending.set(id, resolve);
       ws.send(JSON.stringify({ id, method, params, sessionId }));
     });
-
-  try {
-    const { targetId } = await send("Target.createTarget", { url: "chrome://sandbox" });
-    const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
-    return await until(async () => {
+  const { targetId } = await send("Target.createTarget", { url: pageUrl });
+  const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+  return {
+    evaluate: async (expression: string) => {
       const { result } = await send(
         "Runtime.evaluate",
-        { expression: "document.body.innerText", returnByValue: true },
+        { expression, returnByValue: true },
         String(sessionId),
       );
-      const text = String((result as { value?: unknown } | undefined)?.value ?? "");
+      return String((result as { value?: unknown } | undefined)?.value ?? "");
+    },
+    close: () => ws.close(),
+  };
+}
+
+async function sandboxPage(url: string) {
+  const page = await openPage(url, "chrome://sandbox");
+  try {
+    return await until(async () => {
+      const text = await page.evaluate("document.body.innerText");
       return text.includes("sandboxed") ? text : undefined;
     }, "chrome://sandbox");
   } finally {
-    ws.close();
+    page.close();
+  }
+}
+
+// The bot's click and typing, through boxd's own xdotool argv, land in a page field.
+async function typedIntoPage(url: string, input: (actions: InputAction[]) => Promise<unknown>) {
+  const field = "position:fixed;inset:0;width:100%;height:100%";
+  const page = await openPage(url, `data:text/html,<input id=f style="${field}">`);
+  try {
+    await until(
+      async () => ((await page.evaluate("document.readyState")) === "complete" ? true : undefined),
+      "the field's page",
+    );
+    await input([
+      { type: "move", x: 640, y: 500 },
+      { type: "click", button: 1 },
+    ]);
+    await input([{ type: "type", text: "hello box" }]);
+    return await until(async () => {
+      const value = await page.evaluate("document.getElementById('f').value");
+      return value === "hello box" ? value : undefined;
+    }, "typed text");
+  } finally {
+    page.close();
   }
 }

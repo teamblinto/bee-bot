@@ -16,6 +16,7 @@ import { z } from "zod";
 
 import { type Decide, decide as policyDecide, type PolicyDecision } from "./broker.ts";
 import { browserToolNames } from "./browser.ts";
+import { computerToolNames } from "./computer.ts";
 import { waitingMessage } from "./continuations.ts";
 import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
@@ -346,13 +347,13 @@ export function createApprovals({
     return sealed(JSON.stringify(stable({ tool, input, target })), shown);
   }
 
-  // A browser action is shown as exactly what the bot sent.
+  // A browser or computer action is shown as exactly what the bot sent.
   function resolveAny(botId: string, tool: string, input: Record<string, unknown>) {
     const native = ApprovalTool.safeParse(tool);
     if (native.success) {
       return resolveCall(botId, native.data, input);
     }
-    if (!browserToolNames.has(tool)) {
+    if (!browserToolNames.has(tool) && !computerToolNames.has(tool)) {
       return undefined;
     }
     const exact = JSON.stringify(stable(input));

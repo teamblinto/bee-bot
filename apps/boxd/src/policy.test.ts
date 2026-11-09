@@ -8,6 +8,7 @@ import {
   boxState,
   containerSpec,
   createArgs,
+  inputArgv,
   networkArgs,
   ownedBy,
   ownershipLabels,
@@ -157,5 +158,72 @@ describe("box state", () => {
     expect(boxState(up, null).state).toBe("failed");
     expect(boxState({ ...up, owned: false }, up).state).toBe("failed");
     expect(boxState({ ...down, oomKilled: true }, down).reason).toBe("engine ran out of memory");
+  });
+});
+
+describe("inputArgv", () => {
+  it("chains structured actions into one fixed-shape xdotool argv", () => {
+    expect(
+      inputArgv([
+        { type: "move", x: 0, y: 799 },
+        { type: "wait", ms: 20 },
+        { type: "down", button: 1 },
+        { type: "move", x: 1279, y: 0 },
+        { type: "up", button: 1 },
+        { type: "click", button: 3, count: 2 },
+        { type: "scroll", direction: "left", amount: 20 },
+        { type: "key", keys: "ctrl+shift+Tab" },
+      ]),
+    ).toEqual(
+      "xdotool mousemove -- 0 799 sleep 0.020 mousedown 1 mousemove -- 1279 0 mouseup 1 click --repeat 2 3 click --repeat 20 6 key --clearmodifiers ctrl+shift+Tab".split(
+        " ",
+      ),
+    );
+    expect(inputArgv([{ type: "type", text: "-rf $(id); --help\n" }])).toEqual([
+      "xdotool",
+      "type",
+      "--clearmodifiers",
+      "--",
+      "-rf $(id); --help\n",
+    ]);
+  });
+
+  it.each([
+    ["no actions", []],
+    ["not a list", { type: "move", x: 1, y: 1 }],
+    ["x off screen", [{ type: "move", x: 1280, y: 0 }]],
+    ["negative y", [{ type: "move", x: 0, y: -1 }]],
+    ["fractional", [{ type: "move", x: 1.5, y: 0 }]],
+    ["a numeric string", [{ type: "move", x: "10", y: 0 }]],
+    ["button 4 by click", [{ type: "click", button: 4 }]],
+    ["count 4", [{ type: "click", button: 1, count: 4 }]],
+    ["scroll 21", [{ type: "scroll", direction: "down", amount: 21 }]],
+    ["scroll sideways by name", [{ type: "scroll", direction: "toString", amount: 1 }]],
+    ["long wait", [{ type: "wait", ms: 501 }]],
+    [
+      "key then more",
+      [
+        { type: "key", keys: "Return" },
+        { type: "click", button: 1 },
+      ],
+    ],
+    [
+      "type then more",
+      [
+        { type: "type", text: "a" },
+        { type: "wait", ms: 1 },
+      ],
+    ],
+    ["an option as a key", [{ type: "key", keys: "--window" }]],
+    ["a key with a space", [{ type: "key", keys: "a b" }]],
+    ["a key that is not a modifier first", [{ type: "key", keys: "a+b" }]],
+    ["an empty key part", [{ type: "key", keys: "ctrl++" }]],
+    ["NUL in text", [{ type: "type", text: "a\0b" }]],
+    ["empty text", [{ type: "type", text: "" }]],
+    ["too much text", [{ type: "type", text: "a".repeat(2001) }]],
+    ["an unknown action", [{ type: "exec", argv: ["sh"] }]],
+    ["too many actions", Array.from({ length: 81 }, () => ({ type: "wait", ms: 1 }))],
+  ])("refuses %s", (_name, actions) => {
+    expect(inputArgv(actions)).toBeUndefined();
   });
 });

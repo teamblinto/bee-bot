@@ -84,11 +84,24 @@ const browserRules: Record<string, ToolRule> = {
   },
 };
 
+// The desktop is the browser's sidecar, so it takes the same grant. Every screen is untrusted, and
+// any click, key or typed text can send something out.
+const consequential = legs("readsUntrusted", "sideEffect");
+const computerRules: Record<string, ToolRule> = {
+  computer_screenshot: { labels: legs("readsUntrusted"), grant: browserGrant },
+  computer_click: { labels: consequential, grant: browserGrant },
+  computer_type: { labels: consequential, grant: browserGrant, typed: true },
+  computer_key: { labels: consequential, grant: browserGrant },
+  computer_scroll: { labels: consequential, grant: browserGrant },
+  computer_drag: { labels: consequential, grant: browserGrant },
+};
+
 export const toolRules: Record<string, ToolRule> = {
   ...beeRules,
   ...memoryRules,
   ...engineRules,
   ...browserRules,
+  ...computerRules,
 };
 
 export const ruleFor = (tool: string) =>

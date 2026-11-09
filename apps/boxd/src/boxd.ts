@@ -27,6 +27,8 @@ import {
   execArgs,
   execKillArgs,
   execReapArgs,
+  fullCaptureArgv,
+  inputArgv,
   networkArgs,
   ownedBy,
   ownershipLabels,
@@ -35,6 +37,7 @@ import {
 } from "./policy.ts";
 import {
   type ExecRequest,
+  type InputAction,
   Kind,
   type Request,
   type Response,
@@ -76,6 +79,7 @@ const verbs = new Set<string>([
   "capture",
   "display",
   "control",
+  "input",
   "egress",
   "put",
   "collect",
@@ -131,10 +135,29 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
         : { id, error: "bad account" };
     }
     case "cdp":
-    case "capture":
     case "egress": {
       const channel = get("channel");
       return isChannel(channel) ? { ...base, channel } : { id, error: "bad channel" };
+    }
+    case "capture": {
+      const channel = get("channel");
+      const full = get("full");
+      if (!isChannel(channel)) {
+        return { id, error: "bad channel" };
+      }
+      return full === undefined || full === true
+        ? { ...base, channel, ...(full && { full }) }
+        : { id, error: "bad capture" };
+    }
+    case "input": {
+      const channel = get("channel");
+      const input = get("input");
+      if (!isChannel(channel)) {
+        return { id, error: "bad channel" };
+      }
+      return inputArgv(input)
+        ? { ...base, channel, input: input as InputAction[] }
+        : { id, error: "bad input" };
     }
     case "display": {
       const channel = get("channel");
@@ -528,8 +551,24 @@ export function createBoxd(options: BoxdOptions) {
           await exec(box, "browser", { argv: cdpArgv, env: {}, channel: request.channel ?? 0 });
           return { id, ok: true };
         case "capture":
-          await exec(box, "browser", { argv: captureArgv, env: {}, channel: request.channel ?? 0 });
+          await exec(box, "browser", {
+            argv: request.full ? fullCaptureArgv : captureArgv,
+            env: {},
+            channel: request.channel ?? 0,
+          });
           return { id, ok: true };
+        case "input": {
+          const argv = inputArgv(request.input);
+          if (argv === undefined) {
+            return { id, ok: false, error: "bad input" };
+          }
+          await exec(box, "browser", {
+            argv,
+            env: { DISPLAY: ":1" },
+            channel: request.channel ?? 0,
+          });
+          return { id, ok: true };
+        }
         case "display":
           await exec(box, "browser", {
             argv: displayArgv(request.lease),

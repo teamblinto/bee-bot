@@ -58,6 +58,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+## Rakazo
+
+Source: the xdotool argv shapes in `apps/boxd/src/policy.ts` (`inputArgv`: fixed command forms,
+integer-only coordinates, wheel buttons 4-7 with a repeat of 1 to 20, `key --clearmodifiers` and
+`type --clearmodifiers --`), adapted from Rakazo's `infra/sandboxes/computer/control.py`.
+
+```text
+Rakazo
+Copyright 2026 Rakazo contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
 ## noVNC 1.7.0
 
 Included unmodified, from the `@novnc/novnc` npm package, in the web app's bundle: the desktop

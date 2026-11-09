@@ -278,6 +278,48 @@ describe("boxd", () => {
       "jpeg:-",
     ]);
     expect(execs[0]?.env).toEqual({});
+    expect(await call("capture", { channel: 4, full: "yes" })).toMatchObject({
+      error: "bad capture",
+    });
+    expect(await call("capture", { channel: 4, full: true })).toMatchObject({ ok: true });
+    expect(fake.calls.at(-1)?.args.slice(-6)).toEqual([
+      "import",
+      "-display",
+      ":1",
+      "-window",
+      "root",
+      "png:-",
+    ]);
+  });
+
+  it("runs input as the xdotool argv it builds itself, never one it is sent", async () => {
+    const { call, fake } = harness();
+    await call("create");
+    await call("start");
+    const before = fake.calls.length;
+    expect(
+      await call("input", { channel: 3, input: [{ type: "move", x: 1, y: 2 }, "sh -c id"] }),
+    ).toMatchObject({ error: "bad input" });
+    expect(await call("input", { input: [{ type: "move", x: 1, y: 2 }] })).toMatchObject({
+      error: "bad channel",
+    });
+    expect(fake.calls).toHaveLength(before);
+    expect(
+      await call("input", {
+        channel: 3,
+        input: [
+          { type: "move", x: 10, y: 20 },
+          { type: "click", button: 1 },
+        ],
+        exec: { argv: ["sh"], env: {}, channel: 3 },
+      }),
+    ).toMatchObject({ ok: true });
+    const exec = fake.calls.at(-1);
+    expect(exec?.args.slice(0, 3)).toEqual(["exec", "-i", names.container.browser]);
+    expect(exec?.args.slice(-9)).toEqual(
+      "xdotool mousemove -- 10 20 click --repeat 1 1".split(" "),
+    );
+    expect(exec?.env).toEqual({ DISPLAY: ":1" });
   });
 
   it("removes a lease's socket file once its control server is gone", async () => {
