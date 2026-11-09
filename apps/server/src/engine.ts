@@ -216,7 +216,8 @@ const fakeSessions = new Map<string, string[]>();
 const lastLine = (text: string) => (text.split("\n").at(-1) ?? "").trim();
 
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
-// /approve <Tool> <detail...>, /remember <text...>, /takeover <reason...>, /work [thought] (a
+// /approve <Tool> <detail...>, /remember <text...>, /takeover <reason...>, /bee <tool> [json args]
+// (any of the run's bee tools), /work [thought] (a
 // scripted multi-tool turn), /recall (the last line of each earlier turn in the session). Anything
 // else streams a reply word by word.
 export const fakeRunTurn: RunTurn = async ({
@@ -285,6 +286,14 @@ export const fakeRunTurn: RunTurn = async ({
       const reason = line.replace(/^\S+\s*/, "");
       const text = await beeTool(permissions, "request_takeover", { reason }, signal);
       onToolEnd("fake-takeover", false);
+      onDelta(text);
+      return { kind: "completed", text };
+    }
+    case "/bee": {
+      const [, tool = "", json = "{}"] = /^\S+\s+(\S+)\s*(.*)$/.exec(line) ?? [];
+      onToolStart({ id: "fake-bee", name: `mcp__bee__${tool}`, detail: null });
+      const text = await beeTool(permissions, tool, JSON.parse(json || "{}"), signal);
+      onToolEnd("fake-bee", false);
       onDelta(text);
       return { kind: "completed", text };
     }

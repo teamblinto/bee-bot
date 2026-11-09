@@ -14,7 +14,7 @@ import { boxLayout, proxyKeyPlaceholder } from "./boxEngine.ts";
 import { boxdFiles, boxdSecret, readyBoxRuntime, startBoxHost, windowsPodman } from "./boxHost.ts";
 import { type BoxExec, type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
 import { createCdpBrowserRuntime, fetchJson } from "./browserCdp.ts";
-import { podmanEnv } from "./boxdRuntime.ts";
+import { machineSsh, podmanEnv } from "./boxdRuntime.ts";
 import { createClaudeRunTurn } from "./claude.ts";
 import { apiKeyName, createMemoryVault } from "./vault.ts";
 import { storeApiKey } from "./vaultStore.ts";
@@ -56,14 +56,25 @@ describe("box host", () => {
   });
 });
 
-// The whole path on the real beebot-dev machine: boxd, the egress proxy and both containers.
-// Everything is named and labelled for this run and removed by ID afterwards.
-const machine = "beebot-dev";
+// The whole path on a real Podman machine (beebot-dev, or BEEBOT_PODMAN_MACHINE): boxd, the egress
+// proxy and both containers. Everything is named and labelled for this run and removed by ID
+// afterwards.
+const machine = process.env.BEEBOT_PODMAN_MACHINE ?? "beebot-dev";
+// Found as the server finds it: a per-user install puts podman.exe on PATH.
+const podman = NodeFs.existsSync(windowsPodman) ? windowsPodman : "podman";
+const ssh = machineSsh(
+  NodeChildProcess.spawnSync(podman, ["machine", "inspect", machine], {
+    encoding: "utf8",
+    env: podmanEnv(),
+    windowsHide: true,
+  }).stdout ?? "",
+  machine,
+);
 const repo = NodePath.resolve(import.meta.dirname, "../../..");
 
 function sh(script: string) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-    const child = NodeChildProcess.spawn(windowsPodman, ["machine", "ssh", machine, "bash -s"], {
+    const child = NodeChildProcess.spawn(podman, [...ssh, "bash -s"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: podmanEnv(),
       windowsHide: true,
@@ -80,7 +91,6 @@ function sh(script: string) {
 
 const available =
   process.platform === "win32" &&
-  NodeFs.existsSync(windowsPodman) &&
   (await sh("podman info --format '{{.Host.Arch}}' >/dev/null && echo yes")).stdout === "yes";
 
 // Every socket listening on Windows for this process or anything it started, boxd's podman and
@@ -119,8 +129,18 @@ const nulFiles = () =>
 function prepareRun(prefix: string, temp: string) {
   const image = `localhost/${prefix}-box:latest`;
   const build = NodeChildProcess.spawnSync(
-    windowsPodman,
-    ["build", "-q", "--label", "beebot-dev=1", "-t", image, NodePath.join(repo, "images/box")],
+    podman,
+    [
+      "--connection",
+      machine,
+      "build",
+      "-q",
+      "--label",
+      "beebot-dev=1",
+      "-t",
+      image,
+      NodePath.join(repo, "images/box"),
+    ],
     { encoding: "utf8", env: podmanEnv(), windowsHide: true },
   );
   expect(build.status, build.stderr).toBe(0);
@@ -280,7 +300,7 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     const vault = createMemoryVault();
     await vault.put(apiKeyName("claude"), canary);
     boxes = await startBoxHost({
-      host: { kind: "podman-machine", podman: windowsPodman, machine },
+      host: { kind: "podman-machine", podman, machine },
       installDir,
       owner: prefix,
       vault,
@@ -497,7 +517,7 @@ describe.skipIf(!available || !keyFile)(
       key = (await vault.get(apiKeyName("claude"))) ?? "";
       expect(key.length > 20).toBe(true);
       boxes = await startBoxHost({
-        host: { kind: "podman-machine", podman: windowsPodman, machine },
+        host: { kind: "podman-machine", podman, machine },
         installDir: `${prefix}/boxd`,
         owner: prefix,
         vault,
