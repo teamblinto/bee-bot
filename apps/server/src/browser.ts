@@ -4,6 +4,7 @@ import {
   HandoffClientMessage,
   type HandoffReason,
   type HandoffServerMessage,
+  type ServerMessage,
 } from "@beebot/contracts";
 import type { WebSocket } from "ws";
 import { z } from "zod";
@@ -27,10 +28,16 @@ import {
   flushTyping,
   noTyping,
   redact,
+  shownTyping,
   trackTyping,
   type Typing,
 } from "./browserRedact.ts";
-import type { BrowserRuntime, BrowserSession, PageSnapshot } from "./browserRuntime.ts";
+import type {
+  BrowserRuntime,
+  BrowserSession,
+  PageSnapshot,
+  ScreenTarget,
+} from "./browserRuntime.ts";
 import type { DesktopControl } from "./display.ts";
 import type { EventStore } from "./store.ts";
 import { type Takeover, takeoverTtlMs } from "./takeovers.ts";
@@ -115,6 +122,8 @@ export type BrowserRun = { id: string; botId: string; attended: boolean };
 
 export type HandoffPeer = { send: (message: HandoffServerMessage) => void };
 
+export type Activity = Omit<Extract<ServerMessage, { type: "activity" }>, "type" | "botId">;
+
 export type BrowserDeps = {
   runtime: BrowserRuntime;
   // The broker's check, which keeps the session's legs and audits the call.
@@ -134,6 +143,8 @@ export type BrowserDeps = {
     expire: (id: string) => Takeover | undefined;
   };
   takeoverTtlMs?: number;
+  // What the bot just did on its screen, for the owner's overlay.
+  activity?: (botId: string, activity: Activity) => void;
 };
 
 type Tab = {
@@ -159,6 +170,8 @@ const takeoverAudit = (takeover: Takeover | undefined) =>
 
 export function createBrowserBroker(deps: BrowserDeps) {
   const tabs = new Map<string, Promise<Tab>>();
+  // Opened tabs, for the wall's synchronous checks.
+  const opened = new Map<string, Tab>();
 
   function open(botId: string) {
     const existing = tabs.get(botId);
@@ -193,7 +206,10 @@ export function createBrowserBroker(deps: BrowserDeps) {
         stopScreencast: null,
       }));
     tabs.set(botId, opening);
-    opening.catch(() => tabs.delete(botId));
+    opening.then(
+      (tab) => opened.set(botId, tab),
+      () => tabs.delete(botId),
+    );
     return opening;
   }
 
@@ -290,16 +306,25 @@ export function createBrowserBroker(deps: BrowserDeps) {
         page: present(tab, page),
       });
     }
-    let found = true;
+    let target: ScreenTarget | null | undefined;
     if (tool === "browser_navigate") {
       await tab.session.navigate(data.url ?? "");
     } else if (tool === "browser_click") {
-      found = await tab.session.click(index ?? -1);
+      target = await tab.session.click(index ?? -1);
     } else if (tool === "browser_type") {
-      found = await tab.session.type(index ?? -1, data.text ?? "");
+      target = await tab.session.type(index ?? -1, data.text ?? "");
     }
-    if (!found) {
+    if (target === null) {
       return refused("That element is gone. Take a new snapshot.");
+    }
+    if (target) {
+      const typed = tool === "browser_type" ? (data.text ?? "") : undefined;
+      deps.activity?.(run.botId, {
+        kind: typed === undefined ? "click" : "type",
+        x: Math.min(1, Math.max(0, target.x)),
+        y: Math.min(1, Math.max(0, target.y)),
+        text: typed === undefined ? null : shownTyping(typed, tab.typing, target.secret),
+      });
     }
     return observe(run, tab);
   }
@@ -358,6 +383,7 @@ export function createBrowserBroker(deps: BrowserDeps) {
           // The next call opens the sidecar's page afresh, in case the browser restarted.
           console.error(`beebotd: browser ${name} failed: ${(error as Error)?.name}`);
           tabs.delete(run.botId);
+          opened.delete(run.botId);
           void tab.session.close().catch(() => {});
           return refused("browser_unavailable");
         }
@@ -490,9 +516,19 @@ export function createBrowserBroker(deps: BrowserDeps) {
         ? perform(run, tool, args)
         : Promise.resolve(refused(`unknown tool ${tool}`)),
     attach,
+    held: (botId: string) => opened.get(botId)?.lease.holder === "human",
+    // A thumbnail from a tab that is already open, while the bot has control.
+    screenshot: async (botId: string) => {
+      const tab = opened.get(botId);
+      if (!tab || tab.lease.holder === "human") {
+        throw new Error("no open tab");
+      }
+      return Buffer.from(await tab.session.screenshot(), "base64");
+    },
     close: async () => {
       const open = [...tabs.values()];
       tabs.clear();
+      opened.clear();
       await Promise.allSettled(open.map(async (tab) => (await tab).session.close()));
     },
   };

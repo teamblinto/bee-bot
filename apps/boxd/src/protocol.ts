@@ -58,7 +58,8 @@ export type Bootstrap = {
   testUpstreams?: Record<string, string>;
 };
 
-// `cdp` attaches to the sidecar's DevTools, `display` to its view-only VNC socket (or, with a lease,
+// `cdp` attaches to the sidecar's DevTools, `capture` streams one small JPEG of its desktop,
+// `display` to its view-only VNC socket (or, with a lease,
 // to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
 // the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
 // read-only directory, and `collect` copies a download into the workspace.
@@ -69,6 +70,7 @@ export type Verb =
   | "snapshot"
   | "exec"
   | "cdp"
+  | "capture"
   | "display"
   | "egress"
   | "put"

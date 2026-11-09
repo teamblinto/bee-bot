@@ -144,6 +144,9 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
   engineChecking: false,
   lastSeen: {},
   commandError: undefined,
+  thumbnails: {},
+  held: [],
+  activity: {},
 });
 
 let applyServerMessage: typeof import("./serverConnection").applyServerMessage;

@@ -342,6 +342,20 @@ export function execReapArgs(container: string) {
 // through boxd, so no network path to it exists from any box or from the egress proxy.
 export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222"];
 
+// A monitor-wall thumbnail of the sidecar's whole desktop: about 10 KB, 50 ms in the box.
+export const captureArgv = [
+  "import",
+  "-display",
+  ":1",
+  "-window",
+  "root",
+  "-resize",
+  "400x",
+  "-quality",
+  "70",
+  "jpeg:-",
+];
+
 // The sidecar desktop's VNC servers listen on Unix sockets and no TCP port. The view-only one runs
 // all the time; a lease's input-capable one exists only while beebotd holds its `control` attach.
 const displayDir = "/tmp/bee-display";

@@ -43,6 +43,8 @@ export type BoxdConnection = {
 export type BoxdHooks = { relay?: () => Duplex };
 
 const chunkSize = 1024 * 1024;
+const maxCaptureBytes = 1024 * 1024;
+const captureTimeoutMs = 10_000;
 
 // Speaks boxd's framed protocol over any byte stream: boxd's stdio through `podman machine ssh`,
 // or a pipe in tests. The server holds this stream and never the Podman socket.
@@ -254,6 +256,34 @@ export async function connectBoxd(
     return { stream: entry.stream, exited };
   }
 
+  // A thumbnail is about 10 KB; a stuck or oversized capture is cut off, which kills it in the box.
+  async function capture(botId: string) {
+    const { stream, exited } = await attach((channel) => request("capture", botId, { channel }));
+    const timer = setTimeout(
+      () => stream.destroy(new Error("capture timed out")),
+      captureTimeoutMs,
+    );
+    try {
+      stream.end();
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of stream as AsyncIterable<Buffer>) {
+        size += chunk.length;
+        if (size > maxCaptureBytes) {
+          throw new Error("capture too large");
+        }
+        chunks.push(chunk);
+      }
+      if ((await exited) !== 0 || size === 0) {
+        throw new Error("capture failed");
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      clearTimeout(timer);
+      stream.destroy();
+    }
+  }
+
   transport.write(
     jsonFrame({
       secret: Buffer.from(secret).toString("base64"),
@@ -277,6 +307,7 @@ export async function connectBoxd(
       await request("put", botId, { put: { name, content } });
     },
     cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
+    capture,
     display: (botId, lease) =>
       attach((channel) =>
         request(

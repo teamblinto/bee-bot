@@ -13,6 +13,7 @@ import {
   type RunSpec,
   boxNames,
   boxState,
+  captureArgv,
   cdpArgv,
   containerSpec,
   controlArgv,
@@ -72,6 +73,7 @@ const verbs = new Set<string>([
   "snapshot",
   "exec",
   "cdp",
+  "capture",
   "display",
   "control",
   "egress",
@@ -129,6 +131,7 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
         : { id, error: "bad account" };
     }
     case "cdp":
+    case "capture":
     case "egress": {
       const channel = get("channel");
       return isChannel(channel) ? { ...base, channel } : { id, error: "bad channel" };
@@ -523,6 +526,9 @@ export function createBoxd(options: BoxdOptions) {
           return { id, ok: true };
         case "cdp":
           await exec(box, "browser", { argv: cdpArgv, env: {}, channel: request.channel ?? 0 });
+          return { id, ok: true };
+        case "capture":
+          await exec(box, "browser", { argv: captureArgv, env: {}, channel: request.channel ?? 0 });
           return { id, ok: true };
         case "display":
           await exec(box, "browser", {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 23;
+export const protocolVersion = 24;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -690,10 +690,11 @@ export const ServerEvent = z.intersection(
 );
 export type ServerEvent = z.infer<typeof ServerEvent>;
 
-export const ClientMessage = z.object({
-  type: z.literal("subscribe"),
-  afterSeq: z.number().int().nonnegative(),
-});
+export const ClientMessage = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("subscribe"), afterSeq: z.number().int().nonnegative() }),
+  // The monitor wall is open in this client. Thumbnails are taken only while one is.
+  z.object({ type: z.literal("wall"), watching: z.boolean() }),
+]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -735,6 +736,26 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("model-catalog"), models: ModelCatalog }),
   // Sent on subscribe and on every change, by a server that can run boxes.
   z.object({ type: z.literal("box-availability"), availability: BoxAvailability }),
+  // A small JPEG of a bot's screen, base64, sent only to clients watching the wall. Never persisted.
+  z.object({
+    type: z.literal("thumbnail"),
+    botId: z.string(),
+    mime: z.literal("image/jpeg"),
+    data: z.string(),
+    at: z.number(),
+  }),
+  // The bots a person controls right now, sent to wall watchers on joining and on every change.
+  z.object({ type: z.literal("wall"), held: z.array(z.string()) }),
+  // An action the bot just took on its screen. `x` and `y` are fractions of the screen's width and
+  // height. Typed text is masked as `•••` when it may be secret.
+  z.object({
+    type: z.literal("activity"),
+    botId: z.string(),
+    kind: z.enum(["click", "type"]),
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    text: z.string().nullable(),
+  }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 

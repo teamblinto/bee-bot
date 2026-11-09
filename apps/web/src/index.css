@@ -166,6 +166,15 @@
     animation: avatar-pop 180ms var(--ease-bee);
   }
 
+  /* With reduced motion these stay put until the next action replaces them. */
+  .activity-ripple {
+    animation: activity-ripple 700ms var(--ease-bee) forwards;
+  }
+
+  .activity-chip {
+    animation: activity-fade 2.5s ease-in forwards;
+  }
+
   .button {
     display: inline-flex;
     align-items: center;
@@ -587,6 +596,26 @@
   from {
     opacity: 0.4;
     transform: scale(0.86) rotate(-6deg);
+  }
+}
+
+@keyframes activity-ripple {
+  from {
+    scale: 0.2;
+    opacity: 1;
+  }
+  to {
+    scale: 1.6;
+    opacity: 0;
+  }
+}
+
+@keyframes activity-fade {
+  70% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
   }
 }
 

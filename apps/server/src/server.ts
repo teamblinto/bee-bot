@@ -56,6 +56,7 @@ import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
 import { scheduleProblem } from "./routines.ts";
+import { createThumbnails, type Thumbnail } from "./thumbnails.ts";
 import type { EventStore } from "./store.ts";
 import { fallbackSummary, type Summarize } from "./summary.ts";
 import type { Vault } from "./vault.ts";
@@ -71,6 +72,7 @@ import {
 import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
 const maxBodyBytes = 256 * 1024;
+const maxBufferedWallBytes = 1_000_000;
 // A `Write` call carries the whole file.
 const maxMcpBodyBytes = 16 * 1024 * 1024;
 
@@ -271,7 +273,62 @@ export async function startServer({
     desktop,
     check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
     requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
+    activity: (botId, activity) => broadcast({ type: "activity", botId, ...activity }),
   });
+
+  // Only the wall's watchers get its messages. A slow one misses thumbnails rather than queueing them.
+  const wallViewers = new Set<WebSocket>();
+  function toWall(message: ServerMessage) {
+    for (const viewer of wallViewers) {
+      if (message.type !== "thumbnail" || viewer.bufferedAmount < maxBufferedWallBytes) {
+        send(viewer, message);
+      }
+    }
+  }
+  const thumbnailMessage = ({ botId, data, at }: Thumbnail): ServerMessage => ({
+    type: "thumbnail",
+    botId,
+    mime: "image/jpeg",
+    data: data.toString("base64"),
+    at,
+  });
+  // A box without a desktop falls back to its open tab, but only during a turn: those DevTools bytes
+  // count as use, and an idle box must still stop.
+  const thumbnails = createThumbnails({
+    running: () =>
+      boxes?.ready()
+        ? store.boxes
+            .listBoxes()
+            .filter(({ state }) => state === "running")
+            .map(({ botId }) => botId)
+        : [],
+    working: (botId) => store.botBusy(botId),
+    held: (botId) => browser.held(botId),
+    capture: async (botId) => {
+      try {
+        return await (boxes?.runtime.capture(botId) ?? Promise.reject(new Error("no boxes")));
+      } catch (error) {
+        if (!store.botBusy(botId)) {
+          throw error;
+        }
+        return browser.screenshot(botId);
+      }
+    },
+    onFrame: (frame) => toWall(thumbnailMessage(frame)),
+    onHeld: (held) => toWall({ type: "wall", held }),
+  });
+  function watchWall(client: WebSocket, watching: boolean) {
+    if (watching && !wallViewers.has(client)) {
+      wallViewers.add(client);
+      thumbnails.watch(true);
+      send(client, { type: "wall", held: thumbnails.held() });
+      for (const frame of thumbnails.frames()) {
+        send(client, thumbnailMessage(frame));
+      }
+    } else if (!watching && wallViewers.delete(client) && wallViewers.size === 0) {
+      thumbnails.watch(false);
+    }
+  }
 
   // A sleeping laptop or a dropped network leaves a socket that never closes on its own.
   const answered = new WeakSet<WebSocket>();
@@ -955,11 +1012,18 @@ export async function startServer({
       answered.add(client);
       client.on("pong", () => answered.add(client));
       client.on("error", () => client.terminate());
-      client.on("close", () => subscribers.delete(client));
+      client.on("close", () => {
+        subscribers.delete(client);
+        watchWall(client, false);
+      });
       client.on("message", (data) => {
         const message = parseClientMessage(data.toString());
         if (!message) {
           client.close(1008, "invalid message");
+          return;
+        }
+        if (message.type === "wall") {
+          watchWall(client, message.watching);
           return;
         }
         // Store reads and broadcasts are synchronous, so no event can slip between this replay
@@ -1017,6 +1081,7 @@ export async function startServer({
       await summaries;
       heartbeat.cancel();
       terminals?.close();
+      thumbnails.close();
       approvals.close();
       await supervisor.close();
       for (const client of [

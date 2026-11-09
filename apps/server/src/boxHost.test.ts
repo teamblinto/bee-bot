@@ -412,6 +412,15 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       const snapshot = await session.snapshot();
       expect(snapshot.title).toBe("Bee page");
       expect(snapshot.elements.map(({ name }) => name)).toContain("Go");
+      // On the 1280x800 desktop the button sits below Chromium's toolbars.
+      const target = await session.click(snapshot.elements.findIndex(({ name }) => name === "Go"));
+      expect(target?.secret).toBe(false);
+      expect(target?.x).toBeGreaterThan(0);
+      expect(target?.x).toBeLessThan(0.2);
+      expect(target?.y).toBeGreaterThan(0.05);
+      expect(target?.y).toBeLessThan(0.3);
+      const shot = Buffer.from(await session.screenshot(), "base64");
+      expect(shot.subarray(0, 2).toString("hex")).toBe("ffd8");
       expect(hostListeners()).toEqual(listenersBefore);
       expect((await boxdListeners()).stdout).toBe("");
     } finally {
@@ -428,6 +437,15 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     expect(probe.output).not.toContain("webSocketDebuggerUrl");
     expect(probe.output).not.toMatch(/direct 0$/m);
     expect(probe.output).toMatch(/403 proxied$/);
+  }, 180_000);
+
+  it("captures a small JPEG of the desktop, and never starts a stopped box for one", async () => {
+    const jpeg = await started().runtime.capture(botId);
+    expect(jpeg.subarray(0, 2).toString("hex")).toBe("ffd8");
+    expect(jpeg.length).toBeLessThan(100_000);
+    await started().runtime.stop(botId);
+    await expect(started().runtime.capture(botId)).rejects.toThrow("stopped");
+    expect(await started().runtime.snapshot(botId)).toBe("stopped");
   }, 180_000);
 });
 

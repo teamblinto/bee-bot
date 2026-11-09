@@ -143,12 +143,12 @@ describe.skipIf(!available)("sidecar Chromium over CDP", { timeout: 120_000 }, (
       "a notes",
       "a tool",
     ]);
-    expect(await session.type(1, "s3cret-value")).toBe(true);
+    expect(await session.type(1, "s3cret-value")).toMatchObject({ secret: true });
     expect((await session.snapshot()).elements[1]?.value).toBeNull();
   });
 
   it("takes the owner's keys and private text into the focused field", async () => {
-    expect(await session.click(0)).toBe(true);
+    expect(await session.click(0)).toMatchObject({ secret: false });
     for (const key of ["a", "b"]) {
       await session.input({ type: "key", action: "down", key, code: `Key${key.toUpperCase()}` });
       await session.input({ type: "key", action: "up", key, code: `Key${key.toUpperCase()}` });
@@ -161,7 +161,7 @@ describe.skipIf(!available)("sidecar Chromium over CDP", { timeout: 120_000 }, (
 
   it("refuses an old ref once the page has moved on", async () => {
     await session.navigate(page);
-    expect(await session.click(0)).toBe(false);
+    expect(await session.click(0)).toBeNull();
   });
 
   it("streams frames for the handoff view", async () => {

@@ -4,7 +4,7 @@ import type { HandoffInput, HandoffServerMessage } from "@beebot/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { openAudit } from "./audit.ts";
-import { createBrowserBroker, downloadAllowed, resolveUrl } from "./browser.ts";
+import { type Activity, createBrowserBroker, downloadAllowed, resolveUrl } from "./browser.ts";
 import type { PolicyDecision } from "./broker.ts";
 import { createFakeBrowserRuntime, type FakePage } from "./browserRuntime.ts";
 import { migrate } from "./store.ts";
@@ -27,6 +27,10 @@ const pages: Record<string, FakePage> = {
       { role: "button", name: "Next", value: null, href: "https://example.com/home" },
     ],
   },
+  "https://example.com/settings": {
+    title: "Settings",
+    elements: [{ role: "input:password", name: "API key", value: null }],
+  },
   "https://example.com/home": {
     title: "Home",
     text: "Signed in as ada@example.org",
@@ -47,7 +51,9 @@ function setup(decision: PolicyDecision = { kind: "allow" }, takeoverTtlMs?: num
   const outbound: unknown[] = [];
   const paused = new Map<string, boolean>();
   const checked: unknown[] = [];
+  const activities: Activity[] = [];
   const broker = createBrowserBroker({
+    activity: (_botId, activity) => activities.push(activity),
     runtime: fake.runtime,
     check: (_run, tool, args) => {
       checked.push([tool, args]);
@@ -106,6 +112,7 @@ function setup(decision: PolicyDecision = { kind: "allow" }, takeoverTtlMs?: num
     owner,
     desktop,
     takeoverStates,
+    activities,
   };
 }
 
@@ -310,6 +317,35 @@ describe("takeover", () => {
     const { call, takeoverStates } = setup();
     expect(await call("request_takeover", { reason: " " })).toMatchObject({ status: "refused" });
     expect(takeoverStates()).toEqual([]);
+  });
+});
+
+describe("activity overlay", () => {
+  it("shows where the bot acted and what it typed, and masks what may be secret", async () => {
+    const { call, owner, activities } = setup();
+    const home = (await call("browser_navigate", { url: "https://example.com/home" })).page
+      .elements;
+    const clicked = (await call("browser_click", { ref: home[1].ref })).page.elements;
+    await call("browser_type", { ref: clicked[0].ref, text: "hello there" });
+    // A password field whose page doesn't read as a sign-in wall.
+    const settings = (await call("browser_navigate", { url: "https://example.com/settings" })).page
+      .elements;
+    await call("browser_type", { ref: settings[0].ref, text: "hunter2-secret" });
+
+    const view = await owner();
+    view.send({ type: "take" });
+    view.send({ type: "text", text: "correct-horse-battery" });
+    view.send({ type: "give" });
+    await settle();
+    const again = (await call("browser_navigate", { url: "https://example.com/home" })).page;
+    await call("browser_type", { ref: again.elements[0].ref, text: "my correct-horse-battery" });
+
+    expect(activities).toEqual([
+      { kind: "click", x: 0.5, y: 0.5, text: null },
+      { kind: "type", x: 0.5, y: 0.5, text: "hello there" },
+      { kind: "type", x: 0.5, y: 0.5, text: "•••" },
+      { kind: "type", x: 0.5, y: 0.5, text: "•••" },
+    ]);
   });
 });
 

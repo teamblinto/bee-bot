@@ -16,7 +16,8 @@ import {
   type WheelEvent,
 } from "react";
 
-import { displaySocketUrl, postCommand, socketUrl } from "../serverConnection";
+import { type BotActivity, displaySocketUrl, postCommand, socketUrl } from "../serverConnection";
+import { ActivityOverlay } from "./ActivityOverlay";
 import { keyInput, mouseInput } from "./HandoffMapping";
 
 type Lease = Extract<HandoffServerMessage, { type: "lease" }>;
@@ -37,7 +38,15 @@ function parse(data: unknown) {
   }
 }
 
-export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void }) {
+export function HandoffView({
+  bot,
+  activity,
+  onClose,
+}: {
+  bot: Bot;
+  activity?: BotActivity | undefined;
+  onClose: () => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const socket = useRef<WebSocket>(null);
   const screen = useRef<HTMLDivElement>(null);
@@ -179,7 +188,8 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
         </p>
       )}
       <p className="text-small text-ink-secondary">{status}</p>
-      <div className="scroller min-h-0 overflow-auto">
+      <div className="scroller relative min-h-0 overflow-auto">
+        <ActivityOverlay activity={activity} />
         <div
           ref={screen}
           role="img"

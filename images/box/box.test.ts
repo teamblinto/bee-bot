@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
+  captureArgv,
   controlArgv,
   controlCleanupArgs,
   displayArgv,
@@ -211,6 +212,15 @@ describe.skipIf(!podmanUp)("box image", () => {
     expect(await podmanOk(["exec", "-e", "DISPLAY=:1", id, "xdotool", "getdisplaygeometry"])).toBe(
       "1280 800",
     );
+
+    // The wall's thumbnail: a small JPEG of the whole desktop, from boxd's fixed argv.
+    const shot = captureArgv.join(" ");
+    const [magic, size] = (
+      await podmanOk(["exec", id, "sh", "-c", `${shot} | od -An -tx1 -N2; ${shot} | wc -c`])
+    ).split("\n");
+    expect(magic?.trim()).toBe("ff d8");
+    expect(Number(size)).toBeGreaterThan(1000);
+    expect(Number(size)).toBeLessThan(100_000);
 
     // A pointer move to 640,400 sent as RFB bytes through boxd's own display argv; only a server
     // without -viewonly obeys it.

@@ -55,7 +55,15 @@ export type ConnectionState = {
   // Last bot message read, by bot ID. Mirrors localStorage.
   lastSeen: Record<string, string>;
   commandError: string | undefined;
+  // The wall's latest JPEG of each bot's screen, base64, while this client watches it.
+  thumbnails: Record<string, string>;
+  // Bots a person controls now, as of the last time this client watched the wall.
+  held: string[];
+  // Each bot's latest action on its screen. `seq` tells a repeat from the one before.
+  activity: Record<string, BotActivity>;
 };
+
+export type BotActivity = Extract<ServerMessage, { type: "activity" }> & { seq: number };
 
 export const isActive = (run: Run | undefined) =>
   run?.status === "Queued" || run?.status === "Running";
@@ -230,6 +238,14 @@ export function applyServerMessage(state: ConnectionState, message: ServerMessag
       return { ...state, models: message.models };
     case "box-availability":
       return { ...state, boxAvailability: message.availability };
+    case "thumbnail":
+      return { ...state, thumbnails: { ...state.thumbnails, [message.botId]: message.data } };
+    case "wall":
+      return { ...state, held: message.held };
+    case "activity": {
+      const seq = (state.activity[message.botId]?.seq ?? 0) + 1;
+      return { ...state, activity: { ...state.activity, [message.botId]: { ...message, seq } } };
+    }
     case "replay":
     case "event": {
       const incoming = message.type === "replay" ? message.events : [message.event];
@@ -316,6 +332,9 @@ let state: ConnectionState = {
   engineChecking: false,
   lastSeen: readLastSeen(),
   commandError: undefined,
+  thumbnails: {},
+  held: [],
+  activity: {},
 };
 const listeners = new Set<() => void>();
 
@@ -379,6 +398,29 @@ export function displaySocketUrl(ticket: string) {
 }
 
 let failedAttempts = 0;
+let live: WebSocket | undefined;
+let wallWatchers = 0;
+
+function sendWall() {
+  if (live?.readyState === WebSocket.OPEN) {
+    const message: ClientMessage = { type: "wall", watching: wallWatchers > 0 };
+    live.send(JSON.stringify(message));
+  }
+}
+
+// The server takes thumbnails only while some client watches the wall. Returns the unwatch.
+export function watchWall() {
+  wallWatchers += 1;
+  if (wallWatchers === 1) {
+    sendWall();
+  }
+  return () => {
+    wallWatchers -= 1;
+    if (wallWatchers === 0) {
+      sendWall();
+    }
+  };
+}
 
 function reconnect() {
   const delay = Math.min(firstReconnectDelayMs * 2 ** failedAttempts, maxReconnectDelayMs);
@@ -477,9 +519,13 @@ export async function connect() {
   }
 
   const socket = new WebSocket(socketUrl("/ws"));
+  live = socket;
   socket.onopen = () => {
     const subscribe: ClientMessage = { type: "subscribe", afterSeq: state.seq };
     socket.send(JSON.stringify(subscribe));
+    if (wallWatchers > 0) {
+      sendWall();
+    }
     failedAttempts = 0;
     setState({ ...state, status: "connected" });
     void checkEngine();

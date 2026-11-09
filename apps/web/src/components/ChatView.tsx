@@ -298,7 +298,13 @@ export function ChatView({
           onClose={() => setRoutinesOpen(false)}
         />
       )}
-      {browserOpen && <HandoffView bot={bot} onClose={() => setBrowserOpen(false)} />}
+      {browserOpen && (
+        <HandoffView
+          bot={bot}
+          activity={connection.activity[bot.id]}
+          onClose={() => setBrowserOpen(false)}
+        />
+      )}
     </section>
   );
 }
