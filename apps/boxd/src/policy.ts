@@ -307,8 +307,9 @@ export function volumeArgs(name: string, labels: Record<string, string>) {
 // signals the whole group from inside the box.
 const execDir = "/tmp/.beebot-exec";
 const execWrap = `mkdir -p ${execDir} && echo $$ > ${execDir}/"$0"; "$@"; c=$?; rm -f ${execDir}/"$0"; exit $c`;
-const execKill = `i=0; while [ ! -f ${execDir}/"$0" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; [ -f ${execDir}/"$0" ] && kill -KILL -- -"$(cat ${execDir}/"$0")"; rm -f ${execDir}/"$0"`;
-const execReap = `for f in ${execDir}/*; do [ -f "$f" ] || continue; kill -KILL -- -"$(cat "$f")" 2>/dev/null; rm -f "$f"; done`;
+// The box's sh is dash, whose kill refuses `--`: the signal goes first, then the negative group.
+const execKill = `i=0; while [ ! -f ${execDir}/"$0" ] && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; [ -f ${execDir}/"$0" ] && kill -KILL -"$(cat ${execDir}/"$0")"; rm -f ${execDir}/"$0"`;
+const execReap = `for f in ${execDir}/*; do [ -f "$f" ] || continue; kill -KILL -"$(cat "$f")" 2>/dev/null; rm -f "$f"; done`;
 
 export function execArgs(
   container: string,
