@@ -343,6 +343,20 @@ export function execReapArgs(container: string) {
 // just started may not be listening yet, so the connect retries.
 export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222,retry=100,interval=0.1"];
 
+// A monitor-wall thumbnail of the sidecar's whole desktop: about 10 KB, 50 ms in the box.
+export const captureArgv = [
+  "import",
+  "-display",
+  ":1",
+  "-window",
+  "root",
+  "-resize",
+  "400x",
+  "-quality",
+  "70",
+  "jpeg:-",
+];
+
 // The sidecar desktop's VNC servers listen on Unix sockets and no TCP port. The view-only one runs
 // all the time; a lease's input-capable one exists only while beebotd holds its `control` attach.
 const displayDir = "/tmp/bee-display";

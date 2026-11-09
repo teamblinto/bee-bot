@@ -38,6 +38,35 @@ it("stops an idle box, keeps it, and starts it again on the next use", async () 
   idle.close();
 });
 
+it("stops a box the wall keeps capturing, and never starts one for a thumbnail", async () => {
+  vi.useFakeTimers();
+  const fake = createFakeBoxRuntime();
+  const captured: string[] = [];
+  const runtime = {
+    ...fake,
+    capture: async (botId: string) => {
+      captured.push(await fake.snapshot(botId));
+      return Buffer.from("jpeg");
+    },
+  };
+  const ready = readyBoxRuntime(runtime, { account: () => "claude", applyEgress: async () => {} });
+  const idle = stopIdleBoxes(ready, { quietMs, everyMs: 60_000, now: () => Date.now() });
+  const { exited } = await idle.runtime.execAttach("bot-1", {
+    argv: [process.execPath, "-e", ""],
+    env: {},
+  });
+  await exited;
+  for (let elapsed = 0; elapsed < quietMs; elapsed += 30_000) {
+    await idle.runtime.capture("bot-1");
+    await vi.advanceTimersByTimeAsync(30_000);
+  }
+  expect(await fake.snapshot("bot-1")).toBe("stopped");
+  await idle.runtime.capture("bot-1");
+  expect(captured.at(-1)).toBe("stopped");
+  expect(await fake.snapshot("bot-1")).toBe("stopped");
+  idle.close();
+});
+
 it("counts DevTools traffic as use, and passes every byte through both ways", async () => {
   const touched: string[] = [];
   const sidecar = new NodeStream.PassThrough();

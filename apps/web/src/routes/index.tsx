@@ -12,6 +12,7 @@ import { RoomView } from "../components/RoomView";
 import { Sidebar } from "../components/Sidebar";
 import { iconProps } from "../components/ui";
 import { UsagePage } from "../components/UsagePage";
+import { WallPage } from "../components/WallPage";
 import { connectionLines } from "../labels";
 import { getConnectionState, subscribeToConnection } from "../serverConnection";
 
@@ -23,7 +24,7 @@ function Home() {
   const [dialog, setDialog] = useState<"new" | "room" | Bot>();
   const [roomId, setRoomId] = useState<string>();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [page, setPage] = useState<"usage" | "audit">();
+  const [page, setPage] = useState<"usage" | "audit" | "wall">();
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
   const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
@@ -73,6 +74,7 @@ function Home() {
         selectedRoomId={page ? undefined : room?.id}
         usageOpen={page === "usage"}
         auditOpen={page === "audit"}
+        wallOpen={page === "wall"}
         open={drawerOpen}
         onSelect={(botId) => {
           setSelectedId(botId);
@@ -97,6 +99,10 @@ function Home() {
           setPage("audit");
           setDrawerOpen(false);
         }}
+        onWall={() => {
+          setPage("wall");
+          setDrawerOpen(false);
+        }}
         onNewBot={() => {
           setDialog("new");
           setDrawerOpen(false);
@@ -108,6 +114,8 @@ function Home() {
           <UsagePage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
         ) : page === "audit" ? (
           <AuditPage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
+        ) : page === "wall" ? (
+          <WallPage connection={connection} onOpenDrawer={() => setDrawerOpen(true)} />
         ) : room ? (
           <RoomView
             key={room.id}

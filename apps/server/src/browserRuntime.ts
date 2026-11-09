@@ -10,16 +10,21 @@ export type PageSnapshot = PageSignals & { elements: PageElement[] };
 
 export type ScreencastFrame = { data: string; width: number; height: number };
 
-// One page in the bot's sidecar browser. `click` and `type` answer false when the element is gone.
+// Where an action landed, as fractions of the screen, and whether the element may hold a secret.
+export type ScreenTarget = { x: number; y: number; secret: boolean };
+
+// One page in the bot's sidecar browser. `click` and `type` answer null when the element is gone.
 export type BrowserSession = {
   navigate: (url: string) => Promise<void>;
   snapshot: () => Promise<PageSnapshot>;
-  click: (index: number) => Promise<boolean>;
-  type: (index: number, text: string) => Promise<boolean>;
+  click: (index: number) => Promise<ScreenTarget | null>;
+  type: (index: number, text: string) => Promise<ScreenTarget | null>;
   // The owner's own input during a handoff.
   input: (input: HandoffInput) => Promise<void>;
   insertText: (text: string) => Promise<void>;
   screencast: (onFrame: (frame: ScreencastFrame) => void) => Promise<() => Promise<void>>;
+  // A small JPEG of the page, base64.
+  screenshot: () => Promise<string>;
   close: () => Promise<void>;
   // Settles once the browser is gone, closed or not, for example with its box.
   closed: Promise<void>;
@@ -85,21 +90,22 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
           received.push(`click ${index}`);
           const element = elements[index];
           if (!element) {
-            return false;
+            return null;
           }
           focused = index;
           if (element.href) {
             load(element.href);
           }
-          return true;
+          return { x: 0.5, y: 0.5, secret: element.value === null };
         },
         type: async (index, text) => {
           received.push(`type ${index} ${text}`);
-          if (!elements[index]) {
-            return false;
+          const element = elements[index];
+          if (!element) {
+            return null;
           }
           typeInto(index, text);
-          return true;
+          return { x: 0.5, y: 0.5, secret: element.value === null };
         },
         input: async (input) => {
           received.push(`input ${JSON.stringify(input)}`);
@@ -122,6 +128,7 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
           onFrame({ data: "", width: 1280, height: 800 });
           return async () => {};
         },
+        screenshot: async () => "AAAA",
         close: async () => {},
         closed,
       };

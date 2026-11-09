@@ -120,7 +120,23 @@ const Evaluated = z.object({
   result: z.object({ value: z.unknown().optional() }),
   exceptionDetails: z.unknown().optional(),
 });
-const Point = z.object({ x: z.number(), y: z.number() }).nullable();
+const Point = z
+  .object({
+    x: z.number(),
+    y: z.number(),
+    screen: z.object({ x: z.number(), y: z.number() }),
+    secret: z.boolean(),
+  })
+  .nullable();
+const Viewport = z.object({
+  cssVisualViewport: z.object({
+    pageX: z.number(),
+    pageY: z.number(),
+    clientWidth: z.number(),
+    clientHeight: z.number(),
+  }),
+});
+const Screenshot = z.object({ data: z.string() });
 const Download = z.object({ guid: z.string(), suggestedFilename: z.string() });
 const Progress = z.object({ guid: z.string(), state: z.string() });
 const Frame = z.object({
@@ -171,7 +187,16 @@ const locate = (index: number) => `(() => {
   el.scrollIntoView({ block: "center", inline: "center" });
   el.focus?.();
   const box = el.getBoundingClientRect();
-  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  // Headed, the page sits below the browser's toolbars on the desktop; headless, it is the screen.
+  const top = outerHeight - innerHeight;
+  const screenPoint = top > 0
+    ? { x: (screenX + (outerWidth - innerWidth) / 2 + x) / screen.width, y: (screenY + top + y) / screen.height }
+    : { x: x / innerWidth, y: y / innerHeight };
+  const secret = el.type === "password" || /password|one-time-code|cc-/.test(el.autocomplete ?? "") ||
+    /pass|secret|token|otp|cvc|cvv|\\bpin\\b/i.test((el.name ?? "") + " " + (el.id ?? ""));
+  return { x, y, screen: screenPoint, secret };
 })()`;
 
 const keyCodes: Record<string, number> = {
@@ -326,18 +351,32 @@ async function openSession(
     },
     click: async (index) => {
       const point = await locateElement(index);
-      if (point) {
-        await click(point);
+      if (!point) {
+        return null;
       }
-      return point !== null;
+      await click(point);
+      return { ...point.screen, secret: point.secret };
     },
     type: async (index, text) => {
       const point = await locateElement(index);
-      if (point) {
-        await click(point);
-        await page("Input.insertText", { text });
+      if (!point) {
+        return null;
       }
-      return point !== null;
+      await click(point);
+      await page("Input.insertText", { text });
+      return { ...point.screen, secret: point.secret };
+    },
+    screenshot: async () => {
+      const { cssVisualViewport: view } = Viewport.parse(await page("Page.getLayoutMetrics"));
+      const clip = {
+        x: view.pageX,
+        y: view.pageY,
+        width: view.clientWidth,
+        height: view.clientHeight,
+        scale: Math.min(1, 400 / view.clientWidth),
+      };
+      const shot = await page("Page.captureScreenshot", { format: "jpeg", quality: 70, clip });
+      return Screenshot.parse(shot).data;
     },
     input: async (input) => {
       const { method, params } = inputCommand(input);

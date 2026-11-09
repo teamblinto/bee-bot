@@ -38,6 +38,15 @@ export function trackTyping(typing: Typing, input: HandoffInput): Typing {
   return [...input.key].length === 1 ? { ...typing, current: typing.current + input.key } : typing;
 }
 
+// What the activity overlay shows of text the bot typed: nothing of a field that may hold a secret,
+// or of text that holds something the owner typed.
+export function shownTyping(text: string, typing: Typing, secret: boolean) {
+  if (secret || redact(text, typing) !== text) {
+    return "•••";
+  }
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+}
+
 // Longest first, so a value that contains another is masked whole. The encoded form covers a value
 // that a form put into the URL.
 export function redact(text: string, typing: Typing) {

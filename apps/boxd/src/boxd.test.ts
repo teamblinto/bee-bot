@@ -254,6 +254,32 @@ describe("boxd", () => {
     expect(server.join(" ")).not.toMatch(/-viewonly|-shared/);
   });
 
+  it("captures the desktop only with its own fixed argv, in the browser container", async () => {
+    const { call, fake } = harness();
+    await call("create");
+    await call("start");
+    expect(await call("capture", {})).toMatchObject({ error: "bad channel" });
+    expect(
+      await call("capture", { channel: 3, exec: { argv: ["sh"], env: {}, channel: 3 } }),
+    ).toMatchObject({ ok: true });
+    const execs = fake.calls.filter((entry) => entry.args[0] === "exec");
+    expect(execs).toHaveLength(1);
+    expect(execs[0]?.args.slice(0, 3)).toEqual(["exec", "-i", names.container.browser]);
+    expect(execs[0]?.args.slice(-10)).toEqual([
+      "import",
+      "-display",
+      ":1",
+      "-window",
+      "root",
+      "-resize",
+      "400x",
+      "-quality",
+      "70",
+      "jpeg:-",
+    ]);
+    expect(execs[0]?.env).toEqual({});
+  });
+
   it("removes a lease's socket file once its control server is gone", async () => {
     const { call, fake, output } = harness();
     const lease = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b";
