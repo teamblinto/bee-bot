@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
 import { botToolNames, botTools } from "./botTools.ts";
-import { browserToolNames, browserTools } from "./browser.ts";
+import { browserToolNames, browserTools, takeoverTool } from "./browser.ts";
 import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
@@ -26,6 +26,7 @@ const tools = [
   ...memoryTools,
   ...botTools,
   ...browserTools,
+  takeoverTool,
 ];
 const memoryNames = new Set(memoryTools.map(({ name }) => name));
 

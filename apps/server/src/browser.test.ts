@@ -8,6 +8,7 @@ import { createBrowserBroker, downloadAllowed, resolveUrl } from "./browser.ts";
 import type { PolicyDecision } from "./broker.ts";
 import { createFakeBrowserRuntime, type FakePage } from "./browserRuntime.ts";
 import { migrate } from "./store.ts";
+import { openTakeovers } from "./takeovers.ts";
 
 const run = { id: "run-1", botId: "bot-1", attended: true };
 
@@ -36,10 +37,12 @@ const pages: Record<string, FakePage> = {
   },
 };
 
-function setup(decision: PolicyDecision = { kind: "allow" }) {
+function setup(decision: PolicyDecision = { kind: "allow" }, takeoverTtlMs?: number) {
   const db = new DatabaseSync(":memory:");
   migrate(db);
   const { appendAudit } = openAudit(db);
+  const takeovers = openTakeovers(db, { transaction: (work) => work(), emit: () => 0 });
+  const desktop: string[] = [];
   const fake = createFakeBrowserRuntime(pages);
   const outbound: unknown[] = [];
   const paused = new Map<string, boolean>();
@@ -63,7 +66,20 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
       outbound.push({ tool, args });
       return JSON.stringify({ status: "waiting" });
     },
+    desktop: {
+      take: (_botId, leaseId) => desktop.push(`take ${leaseId}`) > 0,
+      give: (leaseId) => desktop.push(`give ${leaseId}`) > 0,
+    },
+    takeovers: {
+      request: (run, reason) => takeovers.requestTakeover(run.botId, run.id, reason),
+      take: (botId) => takeovers.moveTakeover(botId, "waiting", "taken"),
+      complete: (botId) => takeovers.moveTakeover(botId, "taken", "completed"),
+      expire: takeovers.expireTakeover,
+    },
+    ...(takeoverTtlMs !== undefined && { takeoverTtlMs }),
   });
+  const takeoverStates = () =>
+    db.prepare("SELECT state, reason FROM takeovers ORDER BY rowid").all();
   const audit = () =>
     db.prepare("SELECT status, reason, tool, initiator, digest FROM audit_log ORDER BY id").all();
   const call = async (name: string, args: unknown = {}) => {
@@ -78,7 +94,19 @@ function setup(decision: PolicyDecision = { kind: "allow" }) {
     const lease = () => received.findLast(({ type }) => type === "lease");
     return { received, link, send, lease };
   }
-  return { db, fake, broker, outbound, checked, paused, audit, call, owner };
+  return {
+    db,
+    fake,
+    broker,
+    outbound,
+    checked,
+    paused,
+    audit,
+    call,
+    owner,
+    desktop,
+    takeoverStates,
+  };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -218,6 +246,70 @@ describe("browser tools", () => {
     expect(downloadAllowed("installer.AppImage")).toBe(false);
     expect(resolveUrl("https://example.com/a?b=1")?.host).toBe("example.com");
     expect(resolveUrl("not a url")).toBeUndefined();
+  });
+});
+
+describe("takeover", () => {
+  it("waits for the owner, starts the desktop's input server only for the lease, and resumes", async () => {
+    const { call, owner, paused, outbound, desktop, takeoverStates, audit } = setup();
+    const view = await owner();
+    const other = await owner();
+    const asked = await call("request_takeover", { reason: "sign in through the native dialog" });
+    expect(asked).toMatchObject({ status: "paused", reason: "takeover" });
+    expect(asked.note).toContain("End your turn");
+    expect(paused.get(run.botId)).toBe(true);
+    expect(outbound).toContainEqual(expect.stringContaining("sign in through the native dialog"));
+    expect(view.lease()).toMatchObject({ requested: "takeover", leaseId: null });
+    expect(takeoverStates()).toEqual([
+      { state: "waiting", reason: "sign in through the native dialog" },
+    ]);
+    expect(desktop).toEqual([]);
+
+    view.send({ type: "take" });
+    const held = view.lease();
+    const leaseId = held?.type === "lease" ? held.leaseId : undefined;
+    expect(leaseId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(other.lease()).toMatchObject({ holder: "human", mine: false, leaseId: null });
+    expect(desktop).toEqual([`take ${leaseId}`]);
+    expect(takeoverStates()).toMatchObject([{ state: "taken" }]);
+    expect(await call("browser_snapshot")).toMatchObject({ status: "refused" });
+
+    view.send({ type: "give" });
+    await settle();
+    expect(desktop).toEqual([`take ${leaseId}`, `give ${leaseId}`]);
+    expect(takeoverStates()).toMatchObject([{ state: "completed" }]);
+    expect(paused.get(run.botId)).toBe(false);
+    expect(view.lease()).toMatchObject({ holder: "bot", requested: null });
+    const handoffs = audit().filter(({ status }) => String(status).startsWith("handoff_"));
+    expect(handoffs).toMatchObject([
+      { status: "handoff_taken", tool: "desktop", reason: expect.stringMatching(/^takeover:/) },
+      { status: "handoff_returned", tool: "desktop", reason: expect.stringMatching(/^takeover:/) },
+    ]);
+  });
+
+  it("stops the input server when the holder's socket goes", async () => {
+    const { owner, desktop } = setup();
+    const view = await owner();
+    view.send({ type: "take" });
+    view.link.detach();
+    await settle();
+    expect(desktop.map((line) => line.split(" ")[0])).toEqual(["take", "give"]);
+  });
+
+  it("expires a takeover nobody took, and lifts the pause", async () => {
+    const { call, owner, paused, takeoverStates } = setup({ kind: "allow" }, 20);
+    const view = await owner();
+    await call("request_takeover", { reason: "solve the puzzle" });
+    expect(paused.get(run.botId)).toBe(true);
+    await vi.waitFor(() => expect(takeoverStates()).toMatchObject([{ state: "expired" }]));
+    expect(paused.get(run.botId)).toBe(false);
+    expect(view.lease()).toMatchObject({ requested: null });
+  });
+
+  it("refuses a request without a reason", async () => {
+    const { call, takeoverStates } = setup();
+    expect(await call("request_takeover", { reason: " " })).toMatchObject({ status: "refused" });
+    expect(takeoverStates()).toEqual([]);
   });
 });
 

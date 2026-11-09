@@ -68,6 +68,7 @@ const beeTools = [
   "browser_snapshot",
   "browser_click",
   "browser_type",
+  "request_takeover",
 ].map((name) => `mcp__bee__${name}`);
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call

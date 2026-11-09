@@ -4,7 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
-const { postCommand, rfb } = vi.hoisted(() => ({ postCommand: vi.fn(), rfb: vi.fn() }));
+const { postCommand, rfb, disconnected } = vi.hoisted(() => ({
+  postCommand: vi.fn(),
+  rfb: vi.fn(),
+  disconnected: vi.fn(),
+}));
 vi.mock("../serverConnection", () => ({
   postCommand,
   socketUrl: (path: string) => new URL(`ws://127.0.0.1${path}`),
@@ -14,9 +18,11 @@ vi.mock("@novnc/novnc", () => ({
   default: class extends EventTarget {
     constructor(...args: unknown[]) {
       super();
-      rfb(...args);
+      rfb(this, ...args);
     }
-    disconnect() {}
+    disconnect() {
+      disconnected(this);
+    }
   },
 }));
 
@@ -43,6 +49,7 @@ let host: HTMLElement;
 beforeEach(() => {
   postCommand.mockReset();
   rfb.mockReset();
+  disconnected.mockReset();
   sockets.length = 0;
   vi.stubGlobal("WebSocket", FakeSocket);
   HTMLDialogElement.prototype.showModal = vi.fn();
@@ -79,5 +86,42 @@ it("keeps the screencast when there is no display ticket", async () => {
 it("opens the desktop view with the ticket, not the token", async () => {
   postCommand.mockResolvedValue({ ok: true, body: { ticket: "abc", expiresAt: 1 } });
   await show();
-  expect(rfb).toHaveBeenCalledWith(expect.any(HTMLDivElement), "ws://127.0.0.1/display?ticket=abc");
+  expect(rfb).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.any(HTMLDivElement),
+    "ws://127.0.0.1/display?ticket=abc",
+  );
+  expect(rfb.mock.calls[0]?.[0]).toMatchObject({ viewOnly: true });
+});
+
+it("drives the desktop with a control ticket for the held lease, and watches again on give", async () => {
+  postCommand.mockImplementation(async (command: { mode: string }) => ({
+    ok: true,
+    body: { ticket: command.mode, expiresAt: 1 },
+  }));
+  await show();
+  const lease = (fields: object) =>
+    act(() =>
+      sockets[0]?.onmessage?.({
+        data: JSON.stringify({ type: "lease", requested: null, note: null, ...fields }),
+      }),
+    );
+  const leaseId = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b";
+  await lease({ holder: "human", mine: true, leaseId });
+  await act(async () => {});
+  expect(postCommand).toHaveBeenLastCalledWith({
+    type: "display-ticket",
+    botId: bot.id,
+    mode: "control",
+    leaseId,
+  });
+  const [view, control] = rfb.mock.calls.map(([instance]) => instance);
+  expect(disconnected).toHaveBeenCalledWith(view);
+  expect(control).toMatchObject({ viewOnly: false });
+  expect(rfb.mock.calls[1]?.[2]).toBe("ws://127.0.0.1/display?ticket=control");
+
+  await lease({ holder: "bot", mine: false, leaseId: null });
+  await act(async () => {});
+  expect(disconnected).toHaveBeenCalledWith(control);
+  expect(rfb.mock.calls[2]?.[0]).toMatchObject({ viewOnly: true });
 });

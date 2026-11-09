@@ -4,13 +4,14 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
-import { Bot, DisplayTicket, protocolVersion } from "@beebot/contracts";
+import { Bot, DisplayTicket, HandoffServerMessage, protocolVersion } from "@beebot/contracts";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
 import { displayView } from "./boxHost.ts";
-import { type BoxAttach, createFakeBoxRuntime } from "./boxRuntime.ts";
-import { createBoxService } from "./boxSetup.ts";
+import { createFakeBoxRuntime } from "./boxRuntime.ts";
+import { type BoxHost, createBoxService } from "./boxSetup.ts";
+import { createFakeBrowserRuntime } from "./browserRuntime.ts";
 import { createDisplayTickets } from "./display.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -67,7 +68,10 @@ it("counts an open display view as use, and passes bytes both ways", async () =>
   stream.destroy();
 });
 
-async function start(display?: () => Promise<BoxAttach>) {
+async function start(
+  display?: BoxHost["display"],
+  control: BoxHost["control"] = async () => Promise.reject(new Error("no display")),
+) {
   const dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-display-"));
   const fromBox = new NodeStream.PassThrough();
   const toBox = new NodeStream.PassThrough();
@@ -82,6 +86,7 @@ async function start(display?: () => Promise<BoxAttach>) {
       applyEgress: async () => {},
       sidecar: async () => Promise.reject(new Error("no sidecar")),
       display: display ?? (async () => ({ stream: box, exited: new Promise<null>(() => {}) })),
+      control,
       closed: new Promise(() => {}),
       close: async () => {},
     }),
@@ -102,6 +107,7 @@ async function start(display?: () => Promise<BoxAttach>) {
       pauseReason: null,
     }),
     boxes,
+    browserRuntime: createFakeBrowserRuntime().runtime,
   });
   cleanups.push(async () => {
     await server.close();
@@ -127,7 +133,12 @@ async function start(display?: () => Promise<BoxAttach>) {
       protocolVersion: String(protocolVersion),
       ...query,
     })}`;
-  return { store, bot, command, ticket, url, fromBox, toBox, box };
+  const handoffUrl = `ws://127.0.0.1:${server.port}/browser?${new URLSearchParams({
+    protocolVersion: String(protocolVersion),
+    token,
+    botId: bot.id,
+  })}`;
+  return { store, bot, command, ticket, url, handoffUrl, fromBox, toBox, box };
 }
 
 function upgradeStatus(url: string, origin = appOrigin) {
@@ -200,4 +211,81 @@ it("closes with 4404 when the box has no display", async () => {
   const [code, reason] = await once(socket, "close");
   expect(code).toBe(4404);
   expect(String(reason)).toBe("display unavailable");
+});
+
+const never = new Promise<null>(() => {});
+const idle = () =>
+  NodeStream.Duplex.from({
+    readable: new NodeStream.PassThrough(),
+    writable: new NodeStream.PassThrough(),
+  });
+
+async function takeControl(handoffUrl: string) {
+  const handoff = new WebSocket(handoffUrl, { origin: appOrigin });
+  const leases: HandoffServerMessage[] = [];
+  handoff.on("message", (data) =>
+    leases.push(HandoffServerMessage.parse(JSON.parse(String(data)))),
+  );
+  await once(handoff, "open");
+  handoff.send(JSON.stringify({ type: "take" }));
+  const held = await vi.waitFor(() => {
+    const lease = leases.findLast(({ type }) => type === "lease");
+    expect(lease).toMatchObject({ mine: true });
+    return lease?.type === "lease" ? lease.leaseId : null;
+  });
+  return { handoff, leaseId: held ?? "" };
+}
+
+it("issues control only for the held lease, and ends the input server and its viewer with it", async () => {
+  const servers: { leaseId: string; stream: NodeStream.Duplex }[] = [];
+  const opened: Array<string | undefined> = [];
+  const { store, bot, command, url, handoffUrl } = await start(
+    async (_botId, lease) => {
+      opened.push(lease);
+      return { stream: idle(), exited: never };
+    },
+    async (_botId, leaseId) => {
+      const stream = idle();
+      servers.push({ leaseId, stream });
+      return { stream, exited: never };
+    },
+  );
+  store.policy.setBotBoundary(bot.id, "box");
+  const ask = (leaseId?: string) =>
+    command({ type: "display-ticket", botId: bot.id, mode: "control", leaseId });
+  expect((await ask()).status).toBe(403);
+  expect((await ask(crypto.randomUUID())).status).toBe(403);
+  expect(servers).toEqual([]);
+
+  const { handoff, leaseId } = await takeControl(handoffUrl);
+  expect(servers.map((server) => server.leaseId)).toEqual([leaseId]);
+  expect((await ask(crypto.randomUUID())).status).toBe(403);
+  const issued = await ask(leaseId);
+  expect(issued.status).toBe(200);
+  const viewer = new WebSocket(url({ ticket: DisplayTicket.parse(await issued.json()).ticket }), {
+    origin: appOrigin,
+  });
+  await once(viewer, "open");
+  await vi.waitFor(() => expect(opened).toEqual([leaseId]));
+
+  const closed = once(viewer, "close");
+  handoff.send(JSON.stringify({ type: "give" }));
+  expect((await closed)[0]).toBe(4409);
+  await vi.waitFor(() => expect(servers[0]?.stream.destroyed).toBe(true));
+  expect((await ask(leaseId)).status).toBe(403);
+  handoff.terminate();
+});
+
+it("stops the input server when the holder's socket goes", async () => {
+  const servers: NodeStream.Duplex[] = [];
+  const { store, bot, handoffUrl } = await start(undefined, async () => {
+    const stream = idle();
+    servers.push(stream);
+    return { stream, exited: never };
+  });
+  store.policy.setBotBoundary(bot.id, "box");
+  const { handoff } = await takeControl(handoffUrl);
+  expect(servers).toHaveLength(1);
+  handoff.close();
+  await vi.waitFor(() => expect(servers[0]?.destroyed).toBe(true));
 });

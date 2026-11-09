@@ -377,6 +377,7 @@ describe("a turn", () => {
           "mcp__bee__browser_snapshot",
           "mcp__bee__browser_click",
           "mcp__bee__browser_type",
+          "mcp__bee__request_takeover",
         ],
       },
     });

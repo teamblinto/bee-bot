@@ -68,6 +68,15 @@ describe("rule table", () => {
     }
   });
 
+  it("lets any bot ask for a takeover, watched or not, since asking grants nothing", () => {
+    for (const profile of BotProfile.options) {
+      for (const session of [noLegs, labels(true, true, true)]) {
+        const asked = context({ profile, session, attended: false });
+        expect(decideTool({ ...ids, tool: "request_takeover" }, asked).kind).toBe("allow");
+      }
+    }
+  });
+
   it("labels every untrusted read with a grant, so no profile gets one by default", () => {
     for (const [tool, rule] of Object.entries(toolRules)) {
       if (rule.labels.readsUntrusted) {

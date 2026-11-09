@@ -42,7 +42,12 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
-import { createDisplayTickets, maxDisplayClientBytes, serveDisplay } from "./display.ts";
+import {
+  createDesktopControl,
+  createDisplayTickets,
+  maxDisplayClientBytes,
+  serveDisplay,
+} from "./display.ts";
 import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
@@ -257,9 +262,13 @@ export async function startServer({
     maxPayload: maxDisplayClientBytes,
   });
   const displayTickets = createDisplayTickets();
+  const desktop = createDesktopControl((botId, leaseId) =>
+    boxes && store.getBot(botId)?.boundary === "box" ? boxes.control(botId, leaseId) : undefined,
+  );
   const browser = createBrowserBroker({
     runtime: browserRuntime,
     ...storeBrowserDeps(store),
+    desktop,
     check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
     requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
   });
@@ -649,7 +658,14 @@ export async function startServer({
         if (!boxes || bot.boundary !== "box") {
           return { status: 409, body: { code: "no_display" } };
         }
-        return { status: 200, body: displayTickets.issue(bot.id, command.mode) };
+        const { mode, leaseId } = command;
+        if (mode === "control" && (leaseId === undefined || !desktop.holds(bot.id, leaseId))) {
+          return { status: 403, body: { code: "not_lease_holder" } };
+        }
+        return {
+          status: 200,
+          body: displayTickets.issue(bot.id, mode, mode === "control" ? leaseId : undefined),
+        };
       }
       case "set-up-boxes":
         if (!boxes) {
@@ -907,9 +923,14 @@ export async function startServer({
         refuseUpgrade(socket, 404, { code: "not_found" });
         return;
       }
-      displaySockets.handleUpgrade(request, socket, head, (client) =>
-        serveDisplay(client, () => boxes.display(grant.botId)),
-      );
+      const { botId, leaseId } = grant;
+      displaySockets.handleUpgrade(request, socket, head, (client) => {
+        if (leaseId !== undefined && !desktop.watch(leaseId, client)) {
+          client.close(4409, "control returned");
+          return;
+        }
+        void serveDisplay(client, () => boxes.display(botId, leaseId));
+      });
       return;
     }
     if (terminal) {
@@ -1005,6 +1026,7 @@ export async function startServer({
       ]) {
         client.terminate();
       }
+      desktop.close();
       await browser.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

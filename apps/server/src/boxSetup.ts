@@ -112,7 +112,8 @@ export type BoxHost = {
   prepare: (botId: string) => Promise<void>;
   applyEgress: (botId: string) => Promise<void>;
   sidecar: (botId: string) => Promise<SidecarEndpoint>;
-  display: (botId: string) => Promise<BoxAttach>;
+  display: (botId: string, lease?: string) => Promise<BoxAttach>;
+  control: (botId: string, lease: string) => Promise<BoxAttach>;
   closed: Promise<void>;
   close: () => Promise<void>;
 };
@@ -213,7 +214,8 @@ export function createBoxService({
     writeBotFile: async (botId, name, content) =>
       current().runtime.writeBotFile(botId, name, content),
     cdp: async (botId) => current().runtime.cdp(botId),
-    display: async (botId, mode) => current().runtime.display(botId, mode),
+    display: async (botId, lease) => current().runtime.display(botId, lease),
+    control: async (botId, lease) => current().runtime.control(botId, lease),
     collect: async (botId, file, name) => current().runtime.collect(botId, file, name),
     start: async (botId) => current().runtime.start(botId),
     stop: async (botId) => current().runtime.stop(botId),
@@ -224,7 +226,8 @@ export function createBoxService({
   return {
     runtime,
     sidecar: async (botId: string) => current().sidecar(botId),
-    display: async (botId: string) => current().display(botId),
+    display: async (botId: string, lease?: string) => current().display(botId, lease),
+    control: async (botId: string, lease: string) => current().control(botId, lease),
     prepare: async (botId: string) => current().prepare(botId),
     // With no host up there is no proxy to tell: a box's policy is pushed when it comes up.
     applyEgress: async (botId: string) => host?.host.applyEgress(botId),

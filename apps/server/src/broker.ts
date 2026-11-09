@@ -38,12 +38,14 @@ const legs = (...names: Array<(typeof legNames)[number]>): ToolLabels => ({
   sideEffect: names.includes("sideEffect"),
 });
 
-// Talking to the owner is how any profile reports back, so `notify` and `ask_user` touch no leg.
-// Anything another bot or the outside world acts on is a side effect.
+// Talking to the owner is how any profile reports back, so `notify`, `ask_user` and
+// `request_takeover` touch no leg. Anything another bot or the outside world acts on is a side
+// effect.
 const beeRules: Record<string, ToolRule> = {
   send_message: { labels: legs("sideEffect") },
   notify: { labels: noLegs },
   ask_user: { labels: noLegs },
+  request_takeover: { labels: noLegs },
   delegate: { labels: legs("sideEffect") },
   handoff: { labels: legs("sideEffect") },
   create_routine: { labels: legs("sideEffect") },

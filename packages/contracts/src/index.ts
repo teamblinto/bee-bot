@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 22;
+export const protocolVersion = 23;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -373,7 +373,8 @@ export type ApiKeyAccountId = z.infer<typeof ApiKeyAccountId>;
 
 // The handoff socket: the owner watches the bot's browser and may take control of it. Nothing sent
 // up this socket is logged, stored or shown to the bot.
-export const HandoffReason = z.enum(["login", "captcha", "hand_off"]);
+// `takeover`: the bot asked the owner to drive its desktop (`request_takeover`).
+export const HandoffReason = z.enum(["login", "captcha", "hand_off", "takeover"]);
 export type HandoffReason = z.infer<typeof HandoffReason>;
 
 // Coordinates are page CSS pixels.
@@ -406,11 +407,13 @@ export const HandoffClientMessage = z.discriminatedUnion("type", [
 export type HandoffClientMessage = z.infer<typeof HandoffClientMessage>;
 
 export const HandoffServerMessage = z.discriminatedUnion("type", [
-  // `mine` is this socket holding the lease. `requested` is why the bot asked for a person.
+  // `mine` is this socket holding the lease, and only then is `leaseId` set: it is what a desktop
+  // control ticket is bound to. `requested` is why the bot asked for a person.
   z.object({
     type: z.literal("lease"),
     holder: z.enum(["bot", "human"]),
     mine: z.boolean(),
+    leaseId: z.uuid().nullable(),
     requested: HandoffReason.nullable(),
     note: z.string().nullable(),
   }),
@@ -854,7 +857,13 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
   z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
   z.object({ type: z.literal("set-up-boxes") }),
-  z.object({ type: z.literal("display-ticket"), botId: z.uuid(), mode: z.literal("view") }),
+  // Control (input) is issued only for the lease the asker holds.
+  z.object({
+    type: z.literal("display-ticket"),
+    botId: z.uuid(),
+    mode: z.enum(["view", "control"]),
+    leaseId: z.uuid().optional(),
+  }),
   z.object({ type: z.literal("set-bot-egress-hosts"), botId: z.uuid(), hosts: EgressHosts }),
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
 ]);
