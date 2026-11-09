@@ -222,8 +222,8 @@ export function HandoffView({ bot, onClose }: { bot: Bot; onClose: () => void })
       )}
       <p className="text-label text-ink-faint">
         What you type here never reaches {bot.name}, its logs or the audit log. The page itself may
-        still show your account to {bot.name} later. Native dialogs and the browser's own menus
-        don't appear in this view.
+        still show your account to {bot.name} later.
+        {!showDesktop && " Native dialogs and the browser's own menus don't appear in this view."}
       </p>
     </dialog>
   );
