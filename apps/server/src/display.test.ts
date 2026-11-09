@@ -5,7 +5,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
-import { Bot, DisplayTicket, HandoffServerMessage, protocolVersion } from "@beebot/contracts";
+import {
+  Bot,
+  browserGrant,
+  DisplayTicket,
+  HandoffServerMessage,
+  protocolVersion,
+} from "@beebot/contracts";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -157,11 +163,16 @@ function upgradeStatus(url: string, origin = appOrigin) {
   });
 }
 
-it("issues a ticket only for a box bot", async () => {
+it("issues a ticket only for a bot with a computer: one in a box, or with the browser", async () => {
   const { store, bot, command } = await start();
   const ask = { type: "display-ticket", botId: bot.id, mode: "view" };
-  expect((await command(ask)).status).toBe(409);
+  const refusal = await command(ask);
+  expect(refusal.status).toBe(409);
+  expect(await refusal.json()).toEqual({ code: "no_display" });
   expect((await command({ ...ask, botId: crypto.randomUUID() })).status).toBe(404);
+  store.policy.setBotManifest(bot.id, [browserGrant]);
+  expect((await command(ask)).status).toBe(200);
+  store.policy.setBotManifest(bot.id, []);
   store.policy.setBotBoundary(bot.id, "box");
   expect((await command(ask)).status).toBe(200);
 });

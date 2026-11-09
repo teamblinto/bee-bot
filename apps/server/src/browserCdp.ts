@@ -137,6 +137,12 @@ const Viewport = z.object({
   }),
 });
 const Screenshot = z.object({ data: z.string() });
+const History = z.object({
+  currentIndex: z.number(),
+  entries: z.array(z.object({ id: z.number(), url: z.string(), title: z.string() })),
+});
+const Navigated = z.object({ frame: z.object({ parentId: z.string().optional() }) });
+const TargetChanged = z.object({ targetInfo: z.object({ targetId: z.string() }) });
 const Download = z.object({ guid: z.string(), suggestedFilename: z.string() });
 const Progress = z.object({ guid: z.string(), state: z.string() });
 const Frame = z.object({
@@ -304,6 +310,8 @@ async function openSession(
     return result.value;
   }
 
+  const readHistory = async () => History.parse(await page("Page.getNavigationHistory"));
+
   // Null when the snapshot's world went with a navigation, or the element left the page.
   async function locateElement(index: number) {
     if (world === undefined) {
@@ -405,6 +413,62 @@ async function openSession(
         off();
         await page("Page.stopScreencast").catch(() => {});
       };
+    },
+    // A title change shows only as the target's info changing.
+    watchPage: async (onPage) => {
+      let last = "";
+      let reading = Promise.resolve();
+      const read = () => {
+        reading = reading
+          .then(async () => {
+            const { currentIndex, entries } = await readHistory();
+            const state = {
+              url: entries[currentIndex]?.url ?? "",
+              title: entries[currentIndex]?.title ?? "",
+              canGoBack: currentIndex > 0,
+              canGoForward: currentIndex < entries.length - 1,
+            };
+            const key = JSON.stringify(state);
+            if (key !== last) {
+              last = key;
+              onPage(state);
+            }
+          })
+          .catch(() => {});
+      };
+      const offs = [
+        cdp.on("Page.frameNavigated", (params, from) => {
+          if (
+            from === sessionId &&
+            Navigated.safeParse(params).data?.frame.parentId === undefined
+          ) {
+            read();
+          }
+        }),
+        cdp.on("Page.navigatedWithinDocument", (_params, from) => from === sessionId && read()),
+        cdp.on("Target.targetInfoChanged", (params) => {
+          if (TargetChanged.safeParse(params).data?.targetInfo.targetId === targetId) {
+            read();
+          }
+        }),
+      ];
+      await cdp.send("Target.setDiscoverTargets", { discover: true });
+      read();
+      return () => {
+        for (const off of offs) {
+          off();
+        }
+      };
+    },
+    history: async (direction) => {
+      const { currentIndex, entries } = await readHistory();
+      const entry = entries[currentIndex + (direction === "back" ? -1 : 1)];
+      if (entry) {
+        await page("Page.navigateToHistoryEntry", { entryId: entry.id });
+      }
+    },
+    reload: async () => {
+      await page("Page.reload");
     },
     close: async () => cdp.close(),
     closed: cdp.closed,

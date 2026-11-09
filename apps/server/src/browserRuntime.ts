@@ -1,4 +1,4 @@
-import type { HandoffInput } from "@beebot/contracts";
+import type { HandoffClientMessage, HandoffInput, HandoffServerMessage } from "@beebot/contracts";
 
 import type { PageSignals } from "./browserChallenge.ts";
 
@@ -9,6 +9,10 @@ export type PageElement = { role: string; name: string; value: string | null };
 export type PageSnapshot = PageSignals & { elements: PageElement[] };
 
 export type ScreencastFrame = { data: string; width: number; height: number };
+
+export type PageState = Omit<Extract<HandoffServerMessage, { type: "page" }>, "type">;
+
+export type HistoryDirection = Extract<HandoffClientMessage, { type: "history" }>["direction"];
 
 // Where an action landed, as fractions of the screen, and whether the element may hold a secret.
 export type ScreenTarget = { x: number; y: number; secret: boolean };
@@ -23,6 +27,10 @@ export type BrowserSession = {
   input: (input: HandoffInput) => Promise<void>;
   insertText: (text: string) => Promise<void>;
   screencast: (onFrame: (frame: ScreencastFrame) => void) => Promise<() => Promise<void>>;
+  // Calls `onPage` with the page now, then whenever its address, title or history changes.
+  watchPage: (onPage: (page: PageState) => void) => Promise<() => void>;
+  history: (direction: HistoryDirection) => Promise<void>;
+  reload: () => Promise<void>;
   // A small JPEG of the page, base64.
   screenshot: () => Promise<string>;
   close: () => Promise<void>;
@@ -52,15 +60,32 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
     open: async (botId, onDownload) => {
       opened += 1;
       downloads.set(botId, onDownload);
+      const visited = ["about:blank"];
+      let at = 0;
       let url = "about:blank";
+      const watchers = new Set<(page: PageState) => void>();
+      const pageState = () => ({
+        url,
+        title: pages[url]?.title ?? url,
+        canGoBack: at > 0,
+        canGoForward: at < visited.length - 1,
+      });
       let elements: (PageElement & { href?: string })[] = [];
       let focused: number | undefined;
       const closed = new Promise<void>((resolve) => losers.set(botId, resolve));
 
-      const load = (next: string) => {
+      const show = (next: string) => {
         url = next;
         elements = (pages[next]?.elements ?? []).map((element) => ({ ...element }));
         focused = undefined;
+        for (const watcher of watchers) {
+          watcher(pageState());
+        }
+      };
+      const load = (next: string) => {
+        visited.splice(at + 1, Infinity, next);
+        at = visited.length - 1;
+        show(next);
       };
       const typeInto = (index: number | undefined, text: string) => {
         const element = index === undefined ? undefined : elements[index];
@@ -127,6 +152,23 @@ export function createFakeBrowserRuntime(pages: Record<string, FakePage> = {}) {
         screencast: async (onFrame) => {
           onFrame({ data: "", width: 1280, height: 800 });
           return async () => {};
+        },
+        watchPage: async (onPage) => {
+          watchers.add(onPage);
+          onPage(pageState());
+          return () => watchers.delete(onPage);
+        },
+        history: async (direction) => {
+          received.push(`history ${direction}`);
+          const next = at + (direction === "back" ? -1 : 1);
+          if (next >= 0 && next < visited.length) {
+            at = next;
+            show(visited[at] ?? url);
+          }
+        },
+        reload: async () => {
+          received.push("reload");
+          show(url);
         },
         screenshot: async () => "AAAA",
         close: async () => {},

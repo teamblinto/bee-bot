@@ -165,7 +165,7 @@ describe("computer tools", () => {
     }
   });
 
-  it("refuses bad arguments and bots without a box", async () => {
+  it("refuses bad arguments and bots without a computer", async () => {
     const { computer, inputs } = setup();
     for (const [tool, args] of [
       ["computer_click", { x: 1280, y: 0 }],
@@ -178,7 +178,7 @@ describe("computer tools", () => {
       });
     }
     const hostBot = await computer.call({ ...run, botId: "bot-2" }, "computer_screenshot", {});
-    expect(refusal(hostBot).reason).toContain("box");
+    expect(refusal(hostBot).reason).toContain("computer is off");
     expect(inputs).toEqual([]);
   });
 

@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import { type InputAction, maxTypedText, screenSize, validKeys } from "@beebot/boxd/protocol";
+import { type Bot, browserGrant } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { Execute } from "./approvals.ts";
@@ -97,6 +98,10 @@ export const computerTools = [
 ];
 
 export const computerToolNames = new Set(computerTools.map(({ name }) => name));
+
+// A bot with the browser gets a box sidecar for it, and with it the box's desktop.
+export const hasComputer = (bot: Pick<Bot, "boundary" | "manifest"> | undefined) =>
+  bot?.boundary === "box" || bot?.manifest.includes(browserGrant) === true;
 
 const X = z
   .number()
@@ -265,7 +270,10 @@ export function createComputer(deps: ComputerDeps) {
     }
     const screen = deps.screen(run.botId);
     if (!screen) {
-      return { ok: false, content: text(refused("Only a bot in a box has a computer.")) };
+      return {
+        ok: false,
+        content: text(refused("Your computer is off. Ask the owner to turn it on.")),
+      };
     }
     const lease = deps.lease(run.botId);
     const ownerHasControl = () => {

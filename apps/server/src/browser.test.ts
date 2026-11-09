@@ -4,7 +4,13 @@ import type { HandoffInput, HandoffServerMessage } from "@beebot/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { openAudit } from "./audit.ts";
-import { type Activity, createBrowserBroker, downloadAllowed, resolveUrl } from "./browser.ts";
+import {
+  type Activity,
+  createBrowserBroker,
+  downloadAllowed,
+  ownerUrl,
+  resolveUrl,
+} from "./browser.ts";
 import type { PolicyDecision } from "./broker.ts";
 import { createFakeBrowserRuntime, type FakePage } from "./browserRuntime.ts";
 import { migrate } from "./store.ts";
@@ -262,6 +268,89 @@ describe("browser tools", () => {
     expect(downloadAllowed("installer.AppImage")).toBe(false);
     expect(resolveUrl("https://example.com/a?b=1")?.host).toBe("example.com");
     expect(resolveUrl("not a url")).toBeUndefined();
+    expect(ownerUrl(" example.com/a ")?.href).toBe("https://example.com/a");
+    expect(ownerUrl("localhost:3000")?.href).toBe("https://localhost:3000/");
+    expect(ownerUrl("http://example.com")?.href).toBe("http://example.com/");
+    for (const url of ["javascript:alert(1)", "about:blank", "mailto:a@example.com"]) {
+      expect(ownerUrl(url), url).toBeUndefined();
+    }
+  });
+});
+
+describe("address bar", () => {
+  const pageMessages = (received: HandoffServerMessage[]) =>
+    received.filter(({ type }) => type === "page");
+
+  it("tells a viewer the page on joining, and again whenever it changes", async () => {
+    const { call, owner } = setup();
+    const a = await owner();
+    expect(pageMessages(a.received)).toEqual([
+      {
+        type: "page",
+        url: "about:blank",
+        title: "about:blank",
+        canGoBack: false,
+        canGoForward: false,
+      },
+    ]);
+    await call("browser_navigate", { url: "https://example.com/" });
+    await call("browser_click", { ref: "1:0" });
+    const signIn = {
+      type: "page",
+      url: "https://example.com/login",
+      title: "Sign in",
+      canGoBack: true,
+      canGoForward: false,
+    };
+    expect(pageMessages(a.received).at(-1)).toEqual(signIn);
+    const b = await owner();
+    expect(pageMessages(b.received)).toEqual([signIn]);
+  });
+
+  it("steers only for the socket holding control, never as the bot, and the bot looks again", async () => {
+    const { call, owner, fake, audit } = setup();
+    const first = await call("browser_navigate", { url: "https://example.com/" });
+    const view = await owner();
+    const steer = () => {
+      view.send({ type: "navigate", url: "example.com/settings" });
+      view.send({ type: "history", direction: "back" });
+      view.send({ type: "reload" });
+    };
+    steer();
+    await settle();
+    expect(fake.received).toEqual(["navigate https://example.com/"]);
+
+    view.send({ type: "take" });
+    steer();
+    for (const url of [
+      "javascript:alert(1)",
+      "https://user:pw@example.com/",
+      "file:///etc/passwd",
+    ]) {
+      view.send({ type: "navigate", url });
+    }
+    await settle();
+    expect(fake.received).toEqual([
+      "navigate https://example.com/",
+      "navigate https://example.com/settings",
+      "history back",
+      "reload",
+    ]);
+    expect(pageMessages(view.received).at(-1)).toMatchObject({
+      url: "https://example.com/",
+      canGoForward: true,
+    });
+    view.send({ type: "history", direction: "forward" });
+    await settle();
+    expect(pageMessages(view.received).at(-1)).toMatchObject({
+      url: "https://example.com/settings",
+    });
+    expect(audit().map(({ status }) => status)).toEqual(["handoff_taken"]);
+
+    view.send({ type: "give" });
+    await settle();
+    const after = await call("browser_click", { ref: first.page.elements[0].ref });
+    expect(after.status).toBe("stale_ref");
   });
 });
 

@@ -42,7 +42,7 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
-import { computerExecutors, createComputer } from "./computer.ts";
+import { computerExecutors, createComputer, hasComputer } from "./computer.ts";
 import {
   createDesktopControl,
   createDisplayTickets,
@@ -267,9 +267,7 @@ export async function startServer({
   const displayTickets = createDisplayTickets();
   const desktop = createDesktopControl((botId, leaseId) => {
     computer.interrupt(botId);
-    return boxes && store.getBot(botId)?.boundary === "box"
-      ? boxes.control(botId, leaseId)
-      : undefined;
+    return boxes && hasComputer(store.getBot(botId)) ? boxes.control(botId, leaseId) : undefined;
   });
   const browser = createBrowserBroker({
     runtime: browserRuntime,
@@ -281,7 +279,7 @@ export async function startServer({
   });
   const computer = createComputer({
     screen: (botId) =>
-      boxes?.ready() && store.getBot(botId)?.boundary === "box" ? boxes.runtime : undefined,
+      boxes?.ready() && hasComputer(store.getBot(botId)) ? boxes.runtime : undefined,
     check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
     appendAudit: store.appendAudit,
     requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
@@ -728,7 +726,7 @@ export async function startServer({
         if (!bot) {
           return notFound;
         }
-        if (!boxes || bot.boundary !== "box") {
+        if (!boxes || !hasComputer(bot)) {
           return { status: 409, body: { code: "no_display" } };
         }
         const { mode, leaseId } = command;

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { createCdpBrowserRuntime, inputCommand } from "./browserCdp.ts";
 import { detectChallenge } from "./browserChallenge.ts";
-import type { BrowserSession, ScreencastFrame } from "./browserRuntime.ts";
+import type { BrowserSession, PageState, ScreencastFrame } from "./browserRuntime.ts";
 
 describe("CDP input", () => {
   it("submits a form on Enter, and leaves a named key without text", () => {
@@ -186,5 +186,31 @@ describe.skipIf(!available)("sidecar Chromium over CDP", { timeout: 120_000 }, (
     for (const file of files) {
       expect(file).toMatch(/^[0-9a-f-]{36}$/);
     }
+  });
+
+  it("tells the address bar the page's address, title and history as they change", async () => {
+    const seen: PageState[] = [];
+    const until = async (check: (state: PageState | undefined) => boolean) => {
+      for (let attempt = 0; attempt < 20 && !check(seen.at(-1)); attempt++) {
+        await sleep(250);
+      }
+      return seen.at(-1);
+    };
+    const stop = await session.watchPage((state) => seen.push(state));
+    await session.navigate(
+      `data:text/html,${encodeURIComponent(`<title>One</title>
+        <script>setTimeout(() => { location.hash = "two"; document.title = "Two"; }, 100)</script>`)}`,
+    );
+    expect(await until((state) => state?.title === "Two")).toMatchObject({
+      canGoBack: true,
+      canGoForward: false,
+    });
+    expect(seen.at(-1)?.url.endsWith("#two")).toBe(true);
+    await session.history("back");
+    expect(await until((state) => state?.canGoForward === true)).toMatchObject({
+      canGoForward: true,
+    });
+    expect(seen.at(-1)?.url.endsWith("#two")).toBe(false);
+    stop();
   });
 });

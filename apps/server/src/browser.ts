@@ -37,6 +37,7 @@ import type {
   BrowserRuntime,
   BrowserSession,
   PageSnapshot,
+  PageState,
   ScreenTarget,
 } from "./browserRuntime.ts";
 import type { DesktopControl } from "./display.ts";
@@ -104,6 +105,14 @@ export function resolveUrl(raw: string) {
   return url;
 }
 
+// What the owner typed in the address bar. A bare host such as `example.com` means https.
+export function ownerUrl(raw: string) {
+  const typed = raw.trim();
+  const relative = /^[a-z][a-z\d+.-]*:\/\//i.test(typed) ? typed : `//${typed}`;
+  // Only the base's scheme is used: a scheme-relative address replaces its host.
+  return resolveUrl(URL.parse(relative, "https://127.0.0.1")?.href ?? "");
+}
+
 const executable =
   /\.(exe|msi|msix|bat|cmd|com|scr|ps1|vbs|js|jse|wsf|hta|cpl|lnk|jar|sh|bash|run|bin|appimage|deb|rpm|apk|dmg|pkg|app|command)$/i;
 
@@ -159,6 +168,8 @@ type Tab = {
   peers: Set<HandoffPeer>;
   holder: HandoffPeer | null;
   stopScreencast: Promise<() => Promise<void>> | null;
+  page: PageState | null;
+  stopWatch: Promise<() => void> | null;
 };
 
 const notices: Record<HandoffReason, (detail: string) => string> = {
@@ -210,6 +221,8 @@ export function createBrowserBroker(deps: BrowserDeps) {
         peers: new Set(),
         holder: null,
         stopScreencast: null,
+        page: null,
+        stopWatch: null,
       }));
     tabs.set(botId, opening);
     opening.then(
@@ -502,9 +515,18 @@ export function createBrowserBroker(deps: BrowserDeps) {
     } else if (message.type === "input") {
       tab.typing = trackTyping(tab.typing, message.input);
       tab.session.input(message.input).catch(() => {});
-    } else {
+    } else if (message.type === "text") {
       tab.typing = addSecret(flushTyping(tab.typing), message.text);
       tab.session.insertText(message.text).catch(() => {});
+    } else if (message.type === "navigate") {
+      const url = ownerUrl(message.url);
+      if (url) {
+        tab.session.navigate(url.href).catch(() => {});
+      }
+    } else if (message.type === "history") {
+      tab.session.history(message.direction).catch(() => {});
+    } else {
+      tab.session.reload().catch(() => {});
     }
   }
 
@@ -529,6 +551,18 @@ export function createBrowserBroker(deps: BrowserDeps) {
     tab.stopScreencast.catch(() => {
       tab.stopScreencast = null;
     });
+    if (tab.page) {
+      peer.send({ type: "page", ...tab.page });
+    }
+    tab.stopWatch ??= tab.session.watchPage((page) => {
+      tab.page = page;
+      for (const watcher of tab.peers) {
+        watcher.send({ type: "page", ...page });
+      }
+    });
+    tab.stopWatch.catch(() => {
+      tab.stopWatch = null;
+    });
     return {
       receive: (raw: string) => receive(botId, tab, peer, raw),
       detach: () => {
@@ -539,6 +573,11 @@ export function createBrowserBroker(deps: BrowserDeps) {
         if (tab.peers.size === 0 && tab.stopScreencast) {
           void tab.stopScreencast.then((stop) => stop()).catch(() => {});
           tab.stopScreencast = null;
+        }
+        if (tab.peers.size === 0 && tab.stopWatch) {
+          void tab.stopWatch.then((stop) => stop()).catch(() => {});
+          tab.stopWatch = null;
+          tab.page = null;
         }
       },
     };
