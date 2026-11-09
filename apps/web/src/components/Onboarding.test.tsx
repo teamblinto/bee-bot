@@ -56,6 +56,7 @@ function show(automatedAccessAcknowledgedAt: string | null) {
       imageBuilt: true,
       available: true,
       settingUp: false,
+      progress: null,
       problem: null,
     },
     chat: {

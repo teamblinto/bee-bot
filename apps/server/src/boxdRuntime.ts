@@ -43,6 +43,9 @@ export type BoxdConnection = {
 // `relay` opens a connection to beebotd for each request a box makes to `/bee/*`.
 export type BoxdHooks = { relay?: () => Duplex };
 
+// boxd can't run until its Podman machine starts again (its cgroup fix applies at boot).
+export class MachineRestartNeeded extends Error {}
+
 const chunkSize = 1024 * 1024;
 const maxCaptureBytes = 1024 * 1024;
 const maxScreenshotBytes = 8 * 1024 * 1024;
@@ -331,7 +334,8 @@ export async function connectBoxd(
   const ready = await hello;
   if ("fatal" in ready) {
     transport.destroy();
-    throw new Error(`boxd: ${ready.fatal}`);
+    const message = `boxd: ${ready.fatal}`;
+    throw ready.restartMachine ? new MachineRestartNeeded(message) : new Error(message);
   }
 
   const runtime: BoxRuntime = {
@@ -527,6 +531,9 @@ export async function launchBoxd({
     };
   } catch (error) {
     child.kill();
+    if (error instanceof MachineRestartNeeded) {
+      throw error;
+    }
     throw new Error(`${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim(), {
       cause: error,
     });

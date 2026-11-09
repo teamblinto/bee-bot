@@ -132,7 +132,8 @@ export type Response =
   | { id: number; ok: true; state?: BoxState }
   | { id: number; ok: false; error: string };
 
-export type Hello = { ready: true } | { fatal: string };
+// `restartMachine`: boxd can't run until its Podman machine starts again.
+export type Hello = { ready: true } | { fatal: string; restartMachine?: true };
 
 export const botIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const accountPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;

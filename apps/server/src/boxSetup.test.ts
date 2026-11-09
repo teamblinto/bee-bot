@@ -1,12 +1,20 @@
-import { expect, it } from "vite-plus/test";
+import { afterEach, expect, it, vi } from "vite-plus/test";
 
 import { type BoxHost, createBoxService, type MachineProbe } from "./boxSetup.ts";
+import { MachineRestartNeeded } from "./boxdRuntime.ts";
 import { createFakeBoxRuntime } from "./boxRuntime.ts";
 
 const absent = { found: false, running: false, boxdInstalled: false, imageBuilt: false };
 
-function setup(machines: Record<string, MachineProbe>, setUpBefore: string[] = []) {
+function setup(
+  machines: Record<string, MachineProbe>,
+  setUpBefore: string[] = [],
+  { restartsNeeded = 0, machineStartFailures = 0 } = {},
+) {
+  let startFailures = machineStartFailures;
   const calls: string[] = [];
+  const closers: (() => void)[] = [];
+  let restarts = restartsNeeded;
   const marked = new Set(setUpBefore);
   let machine = Object.keys(machines)[0] ?? "";
   const service = createBoxService({
@@ -16,18 +24,32 @@ function setup(machines: Record<string, MachineProbe>, setUpBefore: string[] = [
       calls.push(`init ${name}`);
       machines[name] = { ...absent, found: true };
     },
+    stopMachine: async (name) => {
+      calls.push(`stop machine ${name}`);
+      const running = machines[name] ?? absent;
+      machines[name] = { ...running, running: false };
+      restarts -= 1;
+    },
     startMachine: async (name) => {
       calls.push(`start machine ${name}`);
+      if (startFailures > 0) {
+        startFailures -= 1;
+        throw new Error("The Podman machine didn't start: it is still stopping");
+      }
       const stopped = machines[name] ?? absent;
       machines[name] = { ...stopped, running: true };
     },
-    buildImage: async (name) => {
+    buildImage: async (name, onProgress) => {
       calls.push(`build ${name}`);
+      onProgress({ label: "Downloading the computer's software", fraction: 0.5, detail: null });
       const built = machines[name] ?? absent;
       machines[name] = { ...built, imageBuilt: true };
     },
     startHost: async (name): Promise<BoxHost> => {
       calls.push(`start ${name}`);
+      if (restarts > 0) {
+        throw new MachineRestartNeeded("boxd: container limits are not enforced");
+      }
       const installed = machines[name] ?? absent;
       machines[name] = { ...installed, boxdInstalled: true };
       return {
@@ -37,7 +59,8 @@ function setup(machines: Record<string, MachineProbe>, setUpBefore: string[] = [
         sidecar: async () => Promise.reject(new Error("no sidecar")),
         display: async () => Promise.reject(new Error("no display")),
         control: async () => Promise.reject(new Error("no display")),
-        closed: new Promise(() => {}),
+        stderr: () => "",
+        closed: new Promise((resolve) => closers.push(() => resolve())),
         close: async () => {
           calls.push(`close ${name}`);
         },
@@ -47,8 +70,9 @@ function setup(machines: Record<string, MachineProbe>, setUpBefore: string[] = [
     markSetUp: (name) => {
       marked.add(name);
     },
+    reconnectWaitsMs: [0, 0, 0],
   });
-  return { service, calls, marked, use: (name: string) => (machine = name) };
+  return { service, calls, marked, closers, use: (name: string) => (machine = name) };
 }
 
 const bare = { found: true, running: true, boxdInstalled: false, imageBuilt: false };
@@ -59,7 +83,7 @@ it("leaves a missing machine alone until the owner sets up, then creates and sta
   use("beebot");
   await service.refresh();
   expect(calls).toEqual([]);
-  expect(service.availability().problem).toContain("Set up boxes to create it");
+  expect(service.availability().problem).toContain("Setting up creates it");
   await expect(service.runtime.snapshot("bot-1")).rejects.toThrow("Set them up");
   await service.setUp();
   expect(calls).toEqual(["init beebot", "start machine beebot", "build beebot", "start beebot"]);
@@ -117,7 +141,7 @@ it("never starts a machine on boot that boxes never came up in", async () => {
   const { service, calls } = setup({ "beebot-dev": { ...ready, running: false } }, ["other"]);
   await service.refresh();
   expect(calls).toEqual([]);
-  expect(service.availability().problem).toContain("Set up boxes to start it");
+  expect(service.availability().problem).toContain("Setting up starts it");
 });
 
 it("installs nothing when Podman is missing", async () => {
@@ -126,7 +150,7 @@ it("installs nothing when Podman is missing", async () => {
   });
   await service.setUp();
   expect(calls).toEqual([]);
-  expect(service.availability().problem).toContain("Podman installer");
+  expect(service.availability().problem).toContain("podman.io");
 });
 
 it("starts on its own once set up, and moves to a newly chosen machine", async () => {
@@ -140,4 +164,83 @@ it("starts on its own once set up, and moves to a newly chosen machine", async (
   await service.refresh();
   expect(calls).toEqual(["start beebot-dev", "close beebot-dev"]);
   expect(service.ready()).toBe(false);
+});
+
+it("restarts the machine once when boxd needs it for container limits, then comes up", async () => {
+  const { service, calls } = setup({ "beebot-dev": ready }, [], { restartsNeeded: 1 });
+  await service.setUp();
+  expect(calls).toEqual([
+    "start beebot-dev",
+    "stop machine beebot-dev",
+    "start machine beebot-dev",
+    "start beebot-dev",
+  ]);
+  expect(service.availability()).toMatchObject({ available: true, problem: null, progress: null });
+});
+
+it("restarts only once, and says why when limits still fail", async () => {
+  const { service, calls } = setup({ "beebot-dev": ready }, [], { restartsNeeded: 5 });
+  await service.setUp();
+  expect(calls.filter((call) => call.startsWith("stop machine"))).toHaveLength(1);
+  expect(service.availability()).toMatchObject({ available: false, settingUp: false });
+  expect(service.availability().problem).toContain("container limits are not enforced");
+});
+
+it("reports each step while setting up and clears it when done", async () => {
+  const { service } = setup({ "beebot-dev": bare });
+  const seen: (string | null)[] = [];
+  service.onChange(({ progress }) => {
+    if (progress && seen.at(-1) !== progress.label) {
+      seen.push(progress.label);
+    }
+  });
+  await service.setUp();
+  expect(seen).toEqual([
+    "Preparing the computer's software",
+    "Downloading the computer's software",
+    "Starting the computer service",
+  ]);
+  expect(service.availability().progress).toBeNull();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+it("brings the computers back once when boxd goes away after running a while", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const { service, calls, closers } = setup({ "beebot-dev": ready }, ["beebot-dev"]);
+  await service.refresh();
+  expect(service.ready()).toBe(true);
+  vi.setSystemTime(Date.now() + 120_000);
+  closers[0]?.();
+  await vi.waitFor(() =>
+    expect(calls.filter((call) => call === "start beebot-dev")).toHaveLength(2),
+  );
+  await vi.waitFor(() => expect(service.ready()).toBe(true));
+});
+
+it("keeps trying to bring the computers back while the machine is still stopping", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const machines = { "beebot-dev": ready };
+  const { service, calls, closers } = setup(machines, ["beebot-dev"], { machineStartFailures: 1 });
+  await service.refresh();
+  vi.setSystemTime(Date.now() + 120_000);
+  machines["beebot-dev"] = { ...ready, running: false };
+  closers[0]?.();
+  await vi.waitFor(() =>
+    expect(calls.filter((call) => call === "start beebot-dev")).toHaveLength(2),
+  );
+  expect(calls.filter((call) => call === "start machine beebot-dev")).toHaveLength(2);
+  expect(service.ready()).toBe(true);
+  expect(service.availability().problem).toBeNull();
+});
+
+it("leaves computers down when boxd dies right after starting", async () => {
+  const { service, calls, closers } = setup({ "beebot-dev": ready }, ["beebot-dev"]);
+  await service.refresh();
+  closers[0]?.();
+  await vi.waitFor(() => expect(service.availability().available).toBe(false));
+  expect(calls.filter((call) => call === "start beebot-dev")).toHaveLength(1);
+  expect(service.availability().problem).toContain("Set them up again");
 });

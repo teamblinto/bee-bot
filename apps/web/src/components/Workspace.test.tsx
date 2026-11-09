@@ -93,6 +93,7 @@ const ready: BoxAvailability = {
   imageBuilt: true,
   available: true,
   settingUp: false,
+  progress: null,
   problem: null,
 };
 
@@ -246,8 +247,18 @@ it("sets up computers from the panel when the bot wants one and boxes aren't rea
   expect(sockets).toHaveLength(0);
   await act(async () => query<HTMLButtonElement>("aside button.button-primary")?.click());
   expect(postCommand).toHaveBeenCalledWith({ type: "set-up-boxes" });
-  await show("computer", vi.fn(), bot, { ...stopped, settingUp: true });
-  expect(query<HTMLButtonElement>("aside button.button-primary")?.disabled).toBe(true);
+  const downloading = { label: "Downloading", fraction: 0.42, detail: "42 MB of 100 MB" };
+  await show("computer", vi.fn(), bot, { ...stopped, settingUp: true, progress: downloading });
+  expect(query("aside button.button-primary")).toBeNull();
+  const bar = query("[role=progressbar]");
+  expect(bar?.getAttribute("aria-valuenow")).toBe("42");
+  expect(bar?.getAttribute("aria-valuetext")).toBe("42 MB of 100 MB");
+  await show("computer", vi.fn(), bot, {
+    ...stopped,
+    settingUp: true,
+    progress: { ...downloading, fraction: null, detail: null },
+  });
+  expect(query("[role=progressbar]")?.hasAttribute("aria-valuenow")).toBe(false);
 });
 
 type Hook = ReturnType<typeof useWorkspace>;
@@ -284,6 +295,14 @@ it("opens on the tab of a screen tool, but not again in a run where the owner cl
 
   render(runOf("r2"), [tool("t4", "mcp__bee__computer_click")]);
   expect(workspace).toMatchObject({ open: true, tab: "computer" });
+});
+
+it("on a narrow window, offers the screen instead of covering the chat with it", async () => {
+  vi.stubGlobal("matchMedia", () => ({ matches: false }));
+  act(() =>
+    root.render(<Harness run={runOf("r1")} tools={[tool("t1", "mcp__bee__computer_click")]} />),
+  );
+  expect(workspace).toMatchObject({ open: false, liveTab: "computer" });
 });
 
 it("remembers the tab the owner picks for each bot", async () => {

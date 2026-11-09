@@ -5,7 +5,13 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Podman } from "./podman.ts";
-import { limitProblems, patchBootstrap, patchContainersConf, setup } from "./setup.ts";
+import {
+  limitProblems,
+  MachineRestartNeeded,
+  patchBootstrap,
+  patchContainersConf,
+  setup,
+} from "./setup.ts";
 import { testRunSpec } from "./testing.ts";
 
 // Podman 5.8's /root/bootstrap in the WSL machine (S3).
@@ -92,12 +98,30 @@ describe("setup", () => {
     await NodeFs.rm(dir, { recursive: true });
   });
 
-  it("refuses to serve when limits are not enforced", async () => {
+  it("asks for a machine restart while the cgroup fix is in place but not yet live", async () => {
     const dir = await NodeFs.mkdtemp(NodePath.join(NodeOs.tmpdir(), "boxd-setup-"));
     const { podman } = host("max\nmax\nmax 100000\n");
-    await expect(setup(podman, testRunSpec.engine, NodePath.join(dir, "c.conf"))).rejects.toThrow(
-      "restart the Podman machine",
+    const conf = NodePath.join(dir, "c.conf");
+    await expect(setup(podman, testRunSpec.engine, conf)).rejects.toBeInstanceOf(
+      MachineRestartNeeded,
     );
+    // A retry before the restart finds the fix already written, and still asks for it.
+    await expect(setup(podman, testRunSpec.engine, conf)).rejects.toBeInstanceOf(
+      MachineRestartNeeded,
+    );
+    await NodeFs.rm(dir, { recursive: true });
+  });
+
+  it("refuses to serve without asking for a restart where there is no cgroup fix", async () => {
+    const dir = await NodeFs.mkdtemp(NodePath.join(NodeOs.tmpdir(), "boxd-setup-"));
+    const { podman } = host("max\nmax\nmax 100000\n");
+    const linux: Podman = {
+      ...podman,
+      host: async () => ({ code: 1, stdout: "", stderr: "no such file" }),
+    };
+    const failure = setup(linux, testRunSpec.engine, NodePath.join(dir, "c.conf"));
+    await expect(failure).rejects.toThrow("container limits are not enforced");
+    await expect(failure).rejects.not.toBeInstanceOf(MachineRestartNeeded);
     await NodeFs.rm(dir, { recursive: true });
   });
 });

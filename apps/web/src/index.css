@@ -619,6 +619,15 @@
   }
 }
 
+@keyframes progress-slide {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 300% 0;
+  }
+}
+
 @keyframes shimmer {
   from {
     background-position: 100% 0;

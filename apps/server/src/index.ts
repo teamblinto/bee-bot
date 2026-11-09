@@ -92,6 +92,7 @@ async function boot(bootstrap: Bootstrap) {
     probe: machine.probe,
     initMachine: machine.init,
     startMachine: machine.start,
+    stopMachine: machine.stop,
     buildImage: machine.buildImage,
     setUpBefore: (name) => store.boxMachineSetUp() === name,
     markSetUp: store.setBoxMachineSetUp,

@@ -7,7 +7,8 @@ import { createPodmanEgress, noEgress } from "./egress.ts";
 import { createPodman } from "./podman.ts";
 import { parseRunSpec } from "./policy.ts";
 import { type Bootstrap, type Hello, Kind, frameReader, jsonFrame } from "./protocol.ts";
-import { setup } from "./setup.ts";
+import { becomeOnlyBoxd } from "./instance.ts";
+import { MachineRestartNeeded, setup } from "./setup.ts";
 
 // stdout carries frames only; anything else goes to stderr.
 const send = (data: Buffer) => process.stdout.write(data);
@@ -66,6 +67,7 @@ function parseBootstrap(payload: Buffer): Bootstrap {
 async function boot(bootstrap: Bootstrap) {
   // The image's own policy files are installed next to boxd, inside the Linux host.
   const dir = NodePath.dirname(NodePath.resolve(process.argv[1] ?? "."));
+  await becomeOnlyBoxd(NodePath.join(dir, "boxd.pid"));
   const runSpec = parseRunSpec(NodeFs.readFileSync(NodePath.join(dir, "runSpec.json"), "utf8"));
   const seccomp = NodePath.join(dir, "seccomp-chromium.json");
   if (!NodeFs.existsSync(seccomp)) {
@@ -144,7 +146,10 @@ const read = frameReader((channel, kind, payload) => {
         }
       },
       (error: unknown) => {
-        hello({ fatal: error instanceof Error ? error.message : String(error) });
+        hello({
+          fatal: error instanceof Error ? error.message : String(error),
+          ...(error instanceof MachineRestartNeeded && { restartMachine: true }),
+        });
         process.exitCode = 1;
         process.stdin.destroy();
       },

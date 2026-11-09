@@ -2,6 +2,7 @@ import { type BoxAvailability, BoxMachineName } from "@beebot/contracts";
 import { type FormEvent, useState, useSyncExternalStore } from "react";
 
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
+import { SetupProgress } from "./SetupProgress";
 
 function Check({ label, done }: { label: string; done: boolean }) {
   return (
@@ -14,7 +15,7 @@ function Check({ label, done }: { label: string; done: boolean }) {
 
 function statusLine(availability: BoxAvailability) {
   if (availability.settingUp) {
-    return availability.problem ?? "Setting up.";
+    return availability.progress ? null : "Setting up.";
   }
   return availability.available ? "Boxes are ready." : availability.problem;
 }
@@ -89,6 +90,9 @@ export function BoxesPanel() {
         <Check label="Box daemon installed" done={availability.boxdInstalled} />
         <Check label="Box image built" done={availability.imageBuilt} />
       </div>
+      {availability.settingUp && availability.progress && (
+        <SetupProgress progress={availability.progress} />
+      )}
       <p role="status" className="text-small text-ink-secondary">
         {statusLine(availability)}
       </p>

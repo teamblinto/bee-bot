@@ -103,6 +103,9 @@ export function limitProblems(output: string) {
 
 export type SetupResult = { bootstrapChanged: boolean; confChanged: boolean };
 
+// The cgroup fix is in place but limits still fail: it applies only once the machine starts again.
+export class MachineRestartNeeded extends Error {}
+
 // Idempotent. Throws when limits are not enforced, so boxd never serves a box without caps.
 export async function setup(
   podman: Podman,
@@ -110,6 +113,7 @@ export async function setup(
   confPath = NodePath.join(NodeOs.homedir(), ".config", "containers", "containers.conf"),
 ): Promise<SetupResult> {
   let bootstrapChanged = false;
+  let fixed = false;
   // Only a Podman WSL machine has this file. Elsewhere (Linux, macOS) sudo or the file is
   // missing and this step does nothing; those hosts are untested.
   const current = await podman.host("sudo", ["-n", "cat", "/root/bootstrap"]);
@@ -118,6 +122,7 @@ export async function setup(
     if (patched === null) {
       throw new Error("unrecognised /root/bootstrap; cannot apply the cgroup fix");
     }
+    fixed = true;
     if (patched !== current.stdout) {
       const backup = await podman.host("sudo", [
         "-n",
@@ -145,10 +150,10 @@ export async function setup(
   const probe = await podman.run(probeArgs(image));
   const problems = probe.code === 0 ? limitProblems(probe.stdout) : [probe.stderr.trim()];
   if (problems.length > 0) {
-    const restart = bootstrapChanged
-      ? " The cgroup fix was just applied: restart the Podman machine."
-      : "";
-    throw new Error(`container limits are not enforced: ${problems.join("; ")}.${restart}`);
+    const message = `container limits are not enforced: ${problems.join("; ")}.`;
+    throw fixed
+      ? new MachineRestartNeeded(`${message} The cgroup fix applies when the machine restarts.`)
+      : new Error(message);
   }
   return { bootstrapChanged, confChanged };
 }

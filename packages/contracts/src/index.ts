@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 27;
+export const protocolVersion = 28;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -289,6 +289,15 @@ export const BoxAvailability = z.object({
   imageBuilt: z.boolean(),
   available: z.boolean(),
   settingUp: z.boolean(),
+  // What setup is doing, while it runs. `fraction` is how far through that step, only when it
+  // can be measured; `detail` says the same in words, e.g. "41 MB of 162 MB".
+  progress: z
+    .object({
+      label: z.string(),
+      fraction: z.number().min(0).max(1).nullable(),
+      detail: z.string().nullable(),
+    })
+    .nullable(),
   // Plain words for the owner. Null when boxes are available.
   problem: z.string().nullable(),
 });

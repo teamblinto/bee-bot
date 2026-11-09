@@ -30,6 +30,7 @@ import {
   socketUrl,
 } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
+import { SetupProgress } from "./SetupProgress";
 import { keyInput, mouseInput } from "./HandoffMapping";
 import { iconProps } from "./ui";
 
@@ -67,6 +68,10 @@ function loadWidth() {
   const stored = Number(load(widthKey));
   return stored ? clampWidth(stored) : 480;
 }
+
+// Below lg the panel covers the chat, so it waits to be asked (the header's Watch).
+const roomBeside = () =>
+  typeof matchMedia !== "function" || matchMedia("(min-width: 1024px)").matches;
 
 // Bee's tools reach the engine as `mcp__bee__computer_click` and the like.
 export function screenTab(toolName: string): WorkspaceTab | undefined {
@@ -109,7 +114,7 @@ export function useWorkspace(
 
   if (cue?.key !== seenCue) {
     setSeenCue(cue?.key);
-    if (cue && !open && !(closedIn && closedIn.runId === run?.id)) {
+    if (cue && !open && !(closedIn && closedIn.runId === run?.id) && roomBeside()) {
       setOpen(true);
       setTab(cue.tab);
     }
@@ -170,7 +175,7 @@ export function Workspace({
     <aside
       aria-label={`${bot.name}'s computer`}
       style={{ width }}
-      className="relative flex shrink-0 flex-col border-l border-edge bg-sidebar max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full"
+      className="relative flex shrink-0 flex-col border-l border-edge bg-sidebar max-lg:absolute max-lg:inset-0 max-lg:z-30 max-lg:!w-full lg:max-w-[calc(100%-22rem)]"
     >
       <div
         role="separator"
@@ -180,7 +185,7 @@ export function Workspace({
         aria-valuemax={maxWidth}
         aria-valuenow={width}
         tabIndex={0}
-        className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-honey-surface focus-visible:bg-honey-surface max-md:hidden"
+        className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize transition-colors hover:bg-honey-surface focus-visible:bg-honey-surface max-lg:hidden"
         onKeyDown={(event) => {
           const delta =
             event.key === "ArrowLeft" ? widthStep : event.key === "ArrowRight" ? -widthStep : 0;
@@ -262,7 +267,6 @@ export function Workspace({
 // Bots' computers run in boxes, so the first one is set up from here rather than from Usage.
 function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
   const [error, setError] = useState<string>();
-  const settingUp = boxes?.settingUp === true;
 
   async function setUp() {
     setError(undefined);
@@ -272,23 +276,28 @@ function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
     }
   }
 
+  if (boxes?.settingUp) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+        <p className="text-name font-medium">Setting up computers</p>
+        {boxes.progress && <SetupProgress progress={boxes.progress} />}
+        <p className="text-label text-ink-faint">
+          This happens once and can take several minutes. You can keep chatting meanwhile.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
       <p className="text-small text-ink-secondary">
         {!boxes
           ? "This server can't run computers for bots."
-          : settingUp
-            ? (boxes.problem ?? "Setting up computers…")
-            : `Computers for your bots aren't set up yet. ${boxes.problem ?? ""}`}
+          : (boxes.problem ?? "Computers for your bots aren't set up yet.")}
       </p>
       {boxes && (
-        <button
-          type="button"
-          className="button button-primary"
-          disabled={settingUp}
-          onClick={() => void setUp()}
-        >
-          {settingUp ? "Setting up…" : "Set up computers"}
+        <button type="button" className="button button-primary" onClick={() => void setUp()}>
+          Set up computers
         </button>
       )}
       {error && <p className="text-small text-danger">{error}</p>}
