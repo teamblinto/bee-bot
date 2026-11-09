@@ -198,10 +198,14 @@ async function askPermission(
   return isWaitingMessage(message) ? "waiting" : "denied";
 }
 
-// Memory tools answer as plain JSON, not as the approval stream.
-async function proposeMemory(permissions: Permissions, text: string, signal: AbortSignal) {
-  const params = { name: "memory_propose", arguments: { text, type: "user" } };
-  const response = await callTool(permissions, params, signal);
+// Bee's own tools answer as plain JSON, not as the approval stream.
+async function beeTool(
+  permissions: Permissions,
+  name: string,
+  args: Record<string, string>,
+  signal: AbortSignal,
+) {
+  const response = await callTool(permissions, { name, arguments: args }, signal);
   return ToolResult.parse(await response.json()).result.content[0].text;
 }
 
@@ -212,9 +216,9 @@ const fakeSessions = new Map<string, string[]>();
 const lastLine = (text: string) => (text.split("\n").at(-1) ?? "").trim();
 
 // The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
-// /approve <Tool> <detail...>, /remember <text...>, /work [thought] (a scripted multi-tool turn),
-// /recall (the last line of each earlier turn in the session). Anything else streams a reply word
-// by word.
+// /approve <Tool> <detail...>, /remember <text...>, /takeover <reason...>, /work [thought] (a
+// scripted multi-tool turn), /recall (the last line of each earlier turn in the session). Anything
+// else streams a reply word by word.
 export const fakeRunTurn: RunTurn = async ({
   prompt,
   sessionId,
@@ -266,8 +270,21 @@ export const fakeRunTurn: RunTurn = async ({
     }
     case "/remember": {
       onToolStart({ id: "fake-remember", name: "mcp__bee__memory_propose", detail: null });
-      const text = await proposeMemory(permissions, line.replace(/^\S+\s*/, ""), signal);
+      const text = await beeTool(
+        permissions,
+        "memory_propose",
+        { text: line.replace(/^\S+\s*/, ""), type: "user" },
+        signal,
+      );
       onToolEnd("fake-remember", false);
+      onDelta(text);
+      return { kind: "completed", text };
+    }
+    case "/takeover": {
+      onToolStart({ id: "fake-takeover", name: "mcp__bee__request_takeover", detail: null });
+      const reason = line.replace(/^\S+\s*/, "");
+      const text = await beeTool(permissions, "request_takeover", { reason }, signal);
+      onToolEnd("fake-takeover", false);
       onDelta(text);
       return { kind: "completed", text };
     }
