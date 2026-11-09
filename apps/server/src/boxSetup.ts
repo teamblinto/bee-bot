@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import type { SidecarEndpoint } from "./browserCdp.ts";
 import { podmanEnv } from "./boxdRuntime.ts";
-import type { BoxRuntime } from "./boxRuntime.ts";
+import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
 
 export const defaultBoxMachine = "podman-machine-default";
 
@@ -112,6 +112,7 @@ export type BoxHost = {
   prepare: (botId: string) => Promise<void>;
   applyEgress: (botId: string) => Promise<void>;
   sidecar: (botId: string) => Promise<SidecarEndpoint>;
+  display: (botId: string) => Promise<BoxAttach>;
   closed: Promise<void>;
   close: () => Promise<void>;
 };
@@ -212,6 +213,7 @@ export function createBoxService({
     writeBotFile: async (botId, name, content) =>
       current().runtime.writeBotFile(botId, name, content),
     cdp: async (botId) => current().runtime.cdp(botId),
+    display: async (botId, mode) => current().runtime.display(botId, mode),
     collect: async (botId, file, name) => current().runtime.collect(botId, file, name),
     start: async (botId) => current().runtime.start(botId),
     stop: async (botId) => current().runtime.stop(botId),
@@ -222,6 +224,7 @@ export function createBoxService({
   return {
     runtime,
     sidecar: async (botId: string) => current().sidecar(botId),
+    display: async (botId: string) => current().display(botId),
     prepare: async (botId: string) => current().prepare(botId),
     // With no host up there is no proxy to tell: a box's policy is pushed when it comes up.
     applyEgress: async (botId: string) => host?.host.applyEgress(botId),

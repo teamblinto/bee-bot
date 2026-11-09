@@ -19,6 +19,7 @@ export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
   writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
   cdp: (botId: string) => Promise<BoxAttach>;
+  display(botId: string, mode: "view"): Promise<BoxAttach>;
   collect: (botId: string, file: string, name: string) => Promise<void>;
   start: (botId: string) => Promise<void>;
   stop: (botId: string) => Promise<void>;
@@ -54,6 +55,9 @@ export function createFakeBoxRuntime(): BoxRuntime {
     writeBotFile: async (botId) => expect(botId, ["stopped", "running"]),
     cdp: async () => {
       throw new Error("no sidecar in the fake box runtime");
+    },
+    display: async () => {
+      throw new Error("no display in the fake box runtime");
     },
     collect: async (botId) => expect(botId, ["running"]),
     execAttach: async (botId, { argv: [command = "", ...args], env, cwd }) => {

@@ -42,6 +42,7 @@ import {
   serveHandoff,
   storeBrowserDeps,
 } from "./browser.ts";
+import { createDisplayTickets, maxDisplayClientBytes, serveDisplay } from "./display.ts";
 import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
@@ -251,6 +252,11 @@ export async function startServer({
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 });
   const handoffSockets = new WebSocketServer({ noServer: true, maxPayload: 4096 });
+  const displaySockets = new WebSocketServer({
+    noServer: true,
+    maxPayload: maxDisplayClientBytes,
+  });
+  const displayTickets = createDisplayTickets();
   const browser = createBrowserBroker({
     runtime: browserRuntime,
     ...storeBrowserDeps(store),
@@ -351,15 +357,11 @@ export async function startServer({
     );
   }
 
-  function refusal(
-    origin: string | undefined,
-    presentedToken: string | null | undefined,
-    url: URL,
-  ) {
+  function refusal(origin: string | undefined, authorized: boolean, url: URL) {
     if (!originAllowed(origin)) {
       return { status: 403, body: { code: "origin_refused" } };
     }
-    if (!tokenMatches(presentedToken)) {
+    if (!authorized) {
       return { status: 401, body: { code: "unauthorized" } };
     }
     const clientVersion = url.searchParams.get("protocolVersion");
@@ -639,6 +641,16 @@ export async function startServer({
         store.setBoxMachine(command.machine);
         void boxes?.refresh();
         return ok;
+      case "display-ticket": {
+        const bot = store.getBot(command.botId);
+        if (!bot) {
+          return notFound;
+        }
+        if (!boxes || bot.boundary !== "box") {
+          return { status: 409, body: { code: "no_display" } };
+        }
+        return { status: 200, body: displayTickets.issue(bot.id, command.mode) };
+      }
       case "set-up-boxes":
         if (!boxes) {
           return { status: 409, body: { code: "boxes_unsupported" } };
@@ -831,7 +843,11 @@ export async function startServer({
       return;
     }
 
-    const refused = refusal(origin, request.headers.authorization?.replace(/^Bearer /, ""), url);
+    const refused = refusal(
+      origin,
+      tokenMatches(request.headers.authorization?.replace(/^Bearer /, "")),
+      url,
+    );
     if (refused) {
       sendJson(response, refused.status, refused.body);
       return;
@@ -873,14 +889,27 @@ export async function startServer({
     socket.on("error", () => socket.destroy());
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
     const terminal = url?.pathname === "/terminal" && terminals;
-    if (url?.pathname !== "/ws" && url?.pathname !== "/browser" && !terminal) {
+    const display = url?.pathname === "/display";
+    if (url?.pathname !== "/ws" && url?.pathname !== "/browser" && !terminal && !display) {
       refuseUpgrade(socket, 404, { code: "not_found" });
       return;
     }
     // Browsers can't set headers on a WebSocket, so the token rides in the query.
-    const refused = refusal(request.headers.origin, url.searchParams.get("token"), url);
+    const grant = display ? displayTickets.consume(url.searchParams.get("ticket")) : undefined;
+    const authorized = display ? grant !== undefined : tokenMatches(url.searchParams.get("token"));
+    const refused = refusal(request.headers.origin, authorized, url);
     if (refused) {
       refuseUpgrade(socket, refused.status, refused.body);
+      return;
+    }
+    if (grant) {
+      if (!boxes || !store.getBot(grant.botId)) {
+        refuseUpgrade(socket, 404, { code: "not_found" });
+        return;
+      }
+      displaySockets.handleUpgrade(request, socket, head, (client) =>
+        serveDisplay(client, () => boxes.display(grant.botId)),
+      );
       return;
     }
     if (terminal) {
@@ -969,7 +998,11 @@ export async function startServer({
       terminals?.close();
       approvals.close();
       await supervisor.close();
-      for (const client of [...sockets.clients, ...handoffSockets.clients]) {
+      for (const client of [
+        ...sockets.clients,
+        ...handoffSockets.clients,
+        ...displaySockets.clients,
+      ]) {
         client.terminate();
       }
       await browser.close();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 21;
+export const protocolVersion = 22;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -419,6 +419,10 @@ export const HandoffServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("unavailable") }),
 ]);
 export type HandoffServerMessage = z.infer<typeof HandoffServerMessage>;
+
+// Opens one `/display` socket, once, for a short while. `expiresAt` is epoch milliseconds.
+export const DisplayTicket = z.object({ ticket: z.string(), expiresAt: z.number() });
+export type DisplayTicket = z.infer<typeof DisplayTicket>;
 
 export const MemoryType = z.enum(["user", "feedback", "project", "reference"]);
 export type MemoryType = z.infer<typeof MemoryType>;
@@ -850,6 +854,7 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
   z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
   z.object({ type: z.literal("set-up-boxes") }),
+  z.object({ type: z.literal("display-ticket"), botId: z.uuid(), mode: z.literal("view") }),
   z.object({ type: z.literal("set-bot-egress-hosts"), botId: z.uuid(), hosts: EgressHosts }),
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
 ]);

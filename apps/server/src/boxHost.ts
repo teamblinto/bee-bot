@@ -101,6 +101,10 @@ export function readyBoxRuntime(
       await ready(botId);
       return runtime.cdp(botId);
     },
+    display: async (botId, mode) => {
+      await ready(botId);
+      return runtime.display(botId, mode);
+    },
     ready,
   };
 }
@@ -111,7 +115,8 @@ export const boxQuietMs = 15 * 60_000;
 
 export type BoxUse = { attached: number; lastUsedAt: number };
 
-// Idle: nothing attached to the engine, and no byte through the sidecar's DevTools, for `quietMs`.
+// Idle: nothing attached to the engine, and no byte through the sidecar's DevTools or an open
+// display view, for `quietMs`.
 export function idleBoxes(uses: ReadonlyMap<string, BoxUse>, now: number, quietMs: number) {
   return [...uses]
     .filter(([, use]) => use.attached === 0 && now - use.lastUsedAt >= quietMs)
@@ -213,6 +218,17 @@ export function sidecarEndpoint(
   };
 }
 
+// The owner watching counts as use, so an open view keeps the box up.
+export async function displayView(
+  runtime: BoxRuntime,
+  botId: string,
+  touch: (botId: string) => void = () => {},
+) {
+  touch(botId);
+  const attach = await runtime.display(botId, "view");
+  return { ...attach, stream: touching(attach.stream, () => touch(botId)) };
+}
+
 export async function startBoxHost({
   host,
   installDir,
@@ -259,6 +275,7 @@ export async function startBoxHost({
     egress,
     applyEgress: egress.apply,
     sidecar: async (botId: string) => sidecarEndpoint(idle.runtime, botId, idle.touch),
+    display: (botId: string) => displayView(idle.runtime, botId, idle.touch),
     stderr: boxd.stderr,
     closed: boxd.closed,
     close: async () => {

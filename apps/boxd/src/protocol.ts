@@ -69,7 +69,8 @@ export type Verb =
   | "cdp"
   | "egress"
   | "put"
-  | "collect";
+  | "collect"
+  | "display";
 
 export type ExecRequest = {
   argv: string[];
@@ -88,6 +89,7 @@ export type Request = {
   channel?: number;
   put?: { name: string; content: string };
   collect?: { file: string; name: string };
+  mode?: "view" | "control";
 };
 
 export type Response =
