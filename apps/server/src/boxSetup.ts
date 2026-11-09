@@ -7,11 +7,17 @@ import { z } from "zod";
 
 import type { SidecarEndpoint } from "./browserCdp.ts";
 import { machineSsh, podmanEnv } from "./boxdRuntime.ts";
+import { boxRoot } from "./boxHost.ts";
 import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
 
-export const defaultBoxMachine = "podman-machine-default";
+// Bee's own machine, so creating and starting it never touches one the owner made.
+export const defaultBoxMachine = "beebot";
 
-const imageDir = NodePath.resolve(import.meta.dirname, "../../../images/box");
+// A box is a 2 GiB engine container and a 1 GiB browser container. WSL ignores this and shares
+// the host's memory.
+const machineMemoryMiB = 4096;
+
+const imageDir = NodePath.join(boxRoot, "images/box");
 
 export type MachineProbe = {
   found: boolean;
@@ -40,9 +46,25 @@ const boxImage = () =>
     .object({ image: z.string() })
     .parse(JSON.parse(NodeFs.readFileSync(NodePath.join(imageDir, "runSpec.json"), "utf8"))).image;
 
-// Read-only: Bee never creates, starts or removes a Podman machine.
+async function machineCommand(bin: string, args: string[], failed: string) {
+  const result = await podman(bin, ["machine", ...args]);
+  if (result.code !== 0) {
+    throw new Error(`${failed}: ${result.stderr.trim().split("\n").at(-1)}`);
+  }
+}
+
+// Creates and starts a machine, but never stops or removes one. Rootless: boxd runs as the
+// machine's own user either way (see machineSsh).
 export function podmanMachine(bin: string, installDir: string) {
   return {
+    init: (machine: string) =>
+      machineCommand(
+        bin,
+        ["init", "--memory", String(machineMemoryMiB), machine],
+        "The Podman machine wasn't created",
+      ),
+    start: (machine: string) =>
+      machineCommand(bin, ["start", machine], "The Podman machine didn't start"),
     probe: async (machine: string): Promise<MachineProbe> => {
       const none = { found: false, running: false, boxdInstalled: false, imageBuilt: false };
       const inspect = await podman(bin, ["machine", "inspect", machine]);
@@ -94,13 +116,13 @@ export function podmanMachine(bin: string, installDir: string) {
 
 function problemText(machine: string, probe: MachineProbe) {
   if (probe.podmanProblem) {
-    return `${probe.podmanProblem} Install Podman, then create a machine for boxes.`;
+    return `${probe.podmanProblem} Run the Podman installer from podman.io, then set up boxes.`;
   }
   if (!probe.found) {
-    return `There's no Podman machine named ${machine}. Create one in a terminal with "podman machine init ${machine}" and "podman machine start ${machine}", or enter the name of one you have.`;
+    return `There's no Podman machine named ${machine} yet. Set up boxes to create it.`;
   }
   if (!probe.running) {
-    return `The Podman machine ${machine} isn't running. Start it with "podman machine start ${machine}".`;
+    return `The Podman machine ${machine} isn't running. Set up boxes to start it.`;
   }
   return "Boxes aren't set up on this machine yet.";
 }
@@ -121,13 +143,22 @@ export type BoxHost = {
 export function createBoxService({
   machine,
   probe,
+  initMachine,
+  startMachine,
   buildImage,
   startHost,
+  setUpBefore,
+  markSetUp,
 }: {
   machine: () => string;
   probe: (machine: string) => Promise<MachineProbe>;
+  initMachine: (machine: string) => Promise<void>;
+  startMachine: (machine: string) => Promise<void>;
   buildImage: (machine: string) => Promise<void>;
   startHost: (machine: string) => Promise<BoxHost>;
+  // Whether boxes once came up in this machine, which makes it Bee's to start after a reboot.
+  setUpBefore: (machine: string) => boolean;
+  markSetUp: (machine: string) => void;
 }) {
   const listeners = new Set<(availability: BoxAvailability) => void>();
   let host: { machine: string; host: BoxHost } | undefined;
@@ -157,16 +188,40 @@ export function createBoxService({
       await old.close();
     }
     set({ machine: name, settingUp: setUp, available: host !== undefined });
-    const found = await probe(name);
-    let problem = found.running ? null : problemText(name, found);
+    let found = await probe(name);
+    let problem: string | null = null;
     try {
+      const recover = found.found && setUpBefore(name);
+      if (!found.running && !found.podmanProblem && (setUp || recover)) {
+        if (!found.found) {
+          set({
+            settingUp: true,
+            problem: `Creating the Podman machine ${name}. The first time downloads it, which takes a few minutes.`,
+          });
+          await initMachine(name);
+          found = { ...found, found: true };
+        }
+        set({
+          settingUp: true,
+          machineFound: true,
+          problem: `Starting the Podman machine ${name}.`,
+        });
+        await startMachine(name);
+        found = await probe(name);
+      }
       if (setUp && found.running && !found.imageBuilt) {
+        set({
+          machineFound: true,
+          problem: "Building the box image. The first time takes several minutes.",
+        });
         await buildImage(name);
         found.imageBuilt = true;
       }
       if (!host && found.running && found.imageBuilt && (setUp || found.boxdInstalled)) {
+        set({ machineFound: true, imageBuilt: true, problem: "Starting the box daemon." });
         const started = await startHost(name);
         found.boxdInstalled = true;
+        markSetUp(name);
         host = { machine: name, host: started };
         void started.closed.then(() => {
           if (host?.host === started) {
@@ -175,7 +230,7 @@ export function createBoxService({
           }
         });
       }
-      if (!host && problem === null) {
+      if (!host) {
         problem = problemText(name, found);
       }
     } catch (error) {

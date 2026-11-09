@@ -90,7 +90,11 @@ async function boot(bootstrap: Bootstrap) {
   const boxes = createBoxService({
     machine: () => store.boxMachine() ?? process.env.BEEBOT_PODMAN_MACHINE ?? defaultBoxMachine,
     probe: machine.probe,
+    initMachine: machine.init,
+    startMachine: machine.start,
     buildImage: machine.buildImage,
+    setUpBefore: (name) => store.boxMachineSetUp() === name,
+    markSetUp: store.setBoxMachineSetUp,
     startHost: (name) =>
       startBoxHost({
         host: { kind: "podman-machine", podman: podmanBin, machine: name },

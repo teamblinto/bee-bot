@@ -28,11 +28,14 @@ export async function boxdSecret(vault: Vault) {
   return secret;
 }
 
-const repo = NodePath.resolve(import.meta.dirname, "../../..");
+// Holds apps/boxd and images/box: the repo, or the copy the packaged desktop app ships, which
+// it names in BEEBOT_BOX_ROOT.
+export const boxRoot =
+  process.env.BEEBOT_BOX_ROOT ?? NodePath.resolve(import.meta.dirname, "../../..");
 
 // boxd ships as its TypeScript sources: the machine's Node runs them as they are.
 export function boxdFiles(
-  root = repo,
+  root = boxRoot,
   egress = NodePath.join(root, "apps/boxd/egress/dist/egress.mjs"),
 ) {
   const src = NodePath.join(root, "apps/boxd/src");

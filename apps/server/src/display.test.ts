@@ -86,7 +86,11 @@ async function start(
   const boxes = createBoxService({
     machine: () => "beebot-dev",
     probe: async () => ({ found: true, running: true, boxdInstalled: true, imageBuilt: true }),
+    initMachine: async () => {},
+    startMachine: async () => {},
     buildImage: async () => {},
+    setUpBefore: () => true,
+    markSetUp: () => {},
     startHost: async () => ({
       runtime: createFakeBoxRuntime(),
       prepare: async () => {},
