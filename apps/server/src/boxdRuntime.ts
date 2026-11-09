@@ -19,6 +19,7 @@ import {
   jsonFrame,
 } from "@beebot/boxd/protocol";
 import { machineInstallScript, nodeBin } from "@beebot/boxd/install";
+import { z } from "zod";
 
 import type { BoxAttach, BoxExec, BoxRuntime } from "./boxRuntime.ts";
 
@@ -329,6 +330,32 @@ export function podmanEnv(env: NodeJS.ProcessEnv = process.env, platform = proce
   return { ...env, [key]: `${openSsh};${env[key] ?? ""}` };
 }
 
+// A rootful machine's `podman machine ssh` logs in as root, but boxd is rootless: it runs as the
+// machine's own user, the one its default rootless connection uses. `inspect` is `podman machine
+// inspect` output.
+export function machineSsh(inspect: string, machine: string) {
+  let user: string | undefined;
+  try {
+    user = z
+      .array(z.object({ SSHConfig: z.object({ RemoteUsername: z.string().min(1) }) }))
+      .safeParse(JSON.parse(inspect)).data?.[0]?.SSHConfig.RemoteUsername;
+  } catch {
+    user = undefined;
+  }
+  return ["machine", "ssh", ...(user ? ["--username", user] : []), machine];
+}
+
+function inspectMachine(podman: string, machine: string) {
+  return new Promise<string>((resolve) => {
+    NodeChildProcess.execFile(
+      podman,
+      ["machine", "inspect", machine],
+      { env: podmanEnv(), windowsHide: true },
+      (error, stdout) => resolve(error ? "" : stdout),
+    );
+  });
+}
+
 function run(command: string, args: string[], stdin: string) {
   return new Promise<void>((resolve, reject) => {
     const child = NodeChildProcess.spawn(command, args, {
@@ -365,9 +392,10 @@ export async function launchBoxd({
   const entry = NodePath.basename(files.boxd[0] ?? "");
   let child: NodeChildProcess.ChildProcessWithoutNullStreams;
   if (host.kind === "podman-machine") {
+    const ssh = machineSsh(await inspectMachine(host.podman, host.machine), host.machine);
     await run(
       host.podman,
-      ["machine", "ssh", host.machine, "bash -s"],
+      [...ssh, "bash -s"],
       machineInstallScript(
         installDir,
         await Promise.all(
@@ -379,12 +407,7 @@ export async function launchBoxd({
     );
     child = NodeChildProcess.spawn(
       host.podman,
-      [
-        "machine",
-        "ssh",
-        host.machine,
-        `exec "$HOME/${installDir}/${nodeBin}" "$HOME/${installDir}/${entry}"`,
-      ],
+      [...ssh, `exec "$HOME/${installDir}/${nodeBin}" "$HOME/${installDir}/${entry}"`],
       { stdio: ["pipe", "pipe", "pipe"], env: podmanEnv(), windowsHide: true },
     );
   } else {

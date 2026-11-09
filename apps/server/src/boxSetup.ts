@@ -6,7 +6,7 @@ import type { BoxAvailability, BoxState } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { SidecarEndpoint } from "./browserCdp.ts";
-import { podmanEnv } from "./boxdRuntime.ts";
+import { machineSsh, podmanEnv } from "./boxdRuntime.ts";
 import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
 
 export const defaultBoxMachine = "podman-machine-default";
@@ -65,9 +65,7 @@ export function podmanMachine(bin: string, installDir: string) {
       const [image, boxd] = await Promise.all([
         podman(bin, ["--connection", machine, "image", "exists", boxImage()]),
         podman(bin, [
-          "machine",
-          "ssh",
-          machine,
+          ...machineSsh(inspect.stdout, machine),
           `test -x "$HOME/${installDir}/node/bin/node" && test -f "$HOME/${installDir}/main.ts"`,
         ]),
       ]);

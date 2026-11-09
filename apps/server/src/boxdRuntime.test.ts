@@ -1,7 +1,7 @@
 import { createFakePodman, serveInProcess } from "@beebot/boxd/testing";
 import { describe, expect, it } from "vite-plus/test";
 
-import { connectBoxd, podmanEnv } from "./boxdRuntime.ts";
+import { connectBoxd, machineSsh, podmanEnv } from "./boxdRuntime.ts";
 
 const node = (script: string) => ({
   argv: [process.execPath, "-e", script],
@@ -86,5 +86,11 @@ describe("podman environment", () => {
     expect(env.Path).toBe("C:\\Windows\\System32\\OpenSSH;C:\\tools\\usr\\bin");
     const linux = { PATH: "/usr/bin" };
     expect(podmanEnv(linux, "linux")).toBe(linux);
+  });
+
+  it("logs in to a rootful machine as its rootless user, not root", () => {
+    const inspect = JSON.stringify([{ Rootful: true, SSHConfig: { RemoteUsername: "user" } }]);
+    expect(machineSsh(inspect, "m")).toEqual(["machine", "ssh", "--username", "user", "m"]);
+    expect(machineSsh("", "m")).toEqual(["machine", "ssh", "m"]);
   });
 });
