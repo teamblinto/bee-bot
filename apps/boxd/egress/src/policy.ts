@@ -52,15 +52,20 @@ export function normalizeHost(raw: string) {
   return NodeNet.isIP(host) !== 0 || /^[0-9]+$/.test(last) ? null : host;
 }
 
-// Exact names only: a suffix or prefix of an allowed name is a different host.
-export function hostAllowed(allow: readonly string[], raw: string) {
+// Exact names only: a suffix or prefix of an allowed name is a different host. Any site opens every
+// name but a vendor host, which only a lane opens (connectHosts).
+const reachable = (allow: readonly string[], host: string, anySite: boolean) =>
+  allow.includes(host) || (anySite && !vendorHosts.has(host));
+
+export function hostAllowed(allow: readonly string[], raw: string, anySite = false) {
   const host = normalizeHost(raw);
-  return host !== null && allow.includes(host);
+  return host !== null && reachable(allow, host, anySite);
 }
 
 export function decideConnect(
   allow: readonly string[],
   authority: string,
+  anySite = false,
 ): Decision<{ host: string; port: number }> {
   const match = /^(\[[^\]]*\]|[^:[\]]+):([0-9]{1,5})$/.exec(authority);
   if (!match) {
@@ -77,7 +82,7 @@ export function decideConnect(
   if (host === null) {
     return { allow: false, reason: "bad host" };
   }
-  return allow.includes(host)
+  return reachable(allow, host, anySite)
     ? { allow: true, host, port: 443 }
     : { allow: false, reason: "host not allowlisted" };
 }

@@ -59,6 +59,7 @@ export function openPolicy(
   const updateBoundary = db.prepare(
     "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
   );
+  const updateAnySite = db.prepare("UPDATE bots SET egress_any_site = ? WHERE id = ?");
   const clearEgressHosts = db.prepare("DELETE FROM bot_egress_hosts WHERE bot_id = ?");
   const insertEgressHost = db.prepare(
     "INSERT INTO bot_egress_hosts (bot_id, host, created_at) VALUES (?, ?, ?)",
@@ -170,11 +171,12 @@ export function openPolicy(
       }),
 
     // `hosts` is already checked and normalized (ownerEgressHosts).
-    setBotEgressHosts: (botId: string, hosts: readonly string[]) =>
+    setBotEgressHosts: (botId: string, anySite: boolean, hosts: readonly string[]) =>
       transaction(() => {
         if (!getBot(botId)) {
           return undefined;
         }
+        updateAnySite.run(anySite ? 1 : 0, botId);
         clearEgressHosts.run(botId);
         const now = new Date().toISOString();
         for (const host of hosts) {
@@ -186,7 +188,7 @@ export function openPolicy(
           initiator: "human",
           attended: true,
           status: "egress_set",
-          reason: hosts.join(",").slice(0, 200),
+          reason: [...(anySite ? ["any site"] : []), ...hosts].join(",").slice(0, 200),
         });
         const bot = getBot(botId);
         if (bot) {

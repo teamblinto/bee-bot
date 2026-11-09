@@ -32,6 +32,7 @@ const bot: Bot = {
   profile: "operator",
   boundary: "host",
   manifest: [],
+  egressAnySite: true,
   egressHosts: [],
   unattendedLane: "api_key",
   avatarSeed: 7,

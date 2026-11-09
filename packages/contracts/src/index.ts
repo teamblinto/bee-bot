@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 25;
+export const protocolVersion = 26;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -143,6 +143,8 @@ export const Bot = z.object({
   profile: BotProfile,
   boundary: BotBoundary,
   manifest: Manifest,
+  // Whether its browser and box reach every public site. When off, only `egressHosts`.
+  egressAnySite: z.boolean(),
   // Hosts a boxed bot may reach besides its engine's own, granted by the owner.
   egressHosts: EgressHosts,
   // R7: what a boxed bot uses on its own when an API key is saved. A subscription is an opt-in.
@@ -886,7 +888,12 @@ export const Command = z.discriminatedUnion("type", [
     mode: z.enum(["view", "control"]),
     leaseId: z.uuid().optional(),
   }),
-  z.object({ type: z.literal("set-bot-egress-hosts"), botId: z.uuid(), hosts: EgressHosts }),
+  z.object({
+    type: z.literal("set-bot-egress-hosts"),
+    botId: z.uuid(),
+    anySite: z.boolean(),
+    hosts: EgressHosts,
+  }),
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
 ]);
 export type Command = z.infer<typeof Command>;

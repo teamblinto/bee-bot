@@ -698,6 +698,7 @@ describe("restart", () => {
         engineAccountId: "fake",
       });
       const bot = (await created.json()) as Bot;
+      await postCommand(port, { type: "set-bot-engine", botId: bot.id, access: "supervised" });
       await postCommand(port, {
         type: "send-message",
         messageId: NodeCrypto.randomUUID(),

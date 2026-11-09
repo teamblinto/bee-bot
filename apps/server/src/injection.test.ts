@@ -502,7 +502,12 @@ describe("vendor key", { timeout: 30_000 }, () => {
         return socket;
       },
       vault,
-      egressInput: () => ({ engineAccountId: "claude", lane: "api_key", hosts: ["pypi.org"] }),
+      egressInput: () => ({
+        engineAccountId: "claude",
+        lane: "api_key",
+        anySite: false,
+        hosts: ["pypi.org"],
+      }),
     });
     cleanups.push(() => egressControl.close());
     await egressControl.apply(rita.id);

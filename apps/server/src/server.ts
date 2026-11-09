@@ -706,7 +706,7 @@ export async function startServer({
         if (hosts === null) {
           return { status: 400, body: { code: "bad_egress_host" } };
         }
-        const bot = store.policy.setBotEgressHosts(command.botId, hosts);
+        const bot = store.policy.setBotEgressHosts(command.botId, command.anySite, hosts);
         if (!bot) {
           return notFound;
         }

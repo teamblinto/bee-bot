@@ -40,31 +40,42 @@ export function ownerEgressHosts(raw: readonly string[]) {
   return [...new Set(hosts.filter((host) => host !== null))].sort();
 }
 
-export type EgressInput = { engineAccountId: string; lane: EngineLane; hosts: string[] };
+export type EgressInput = {
+  engineAccountId: string;
+  lane: EngineLane;
+  anySite: boolean;
+  hosts: string[];
+};
 export type EgressPolicy = {
+  anySite: boolean;
   hosts: string[];
   subscription: Vendor | null;
   apiVendor: Vendor | null;
 };
 
-// Default deny: a bot reaches the hosts its owner granted, plus, on the subscription lane, its
-// vendor's hosts, which the proxy adds. On the API lane the vendor is reached only through the
-// key-injecting lane, so CONNECT to the vendor stays closed and cannot become an unauthenticated
-// side channel.
-export function egressPolicy({ engineAccountId, lane, hosts }: EgressInput): EgressPolicy {
+// A bot reaches any public site, or with that off only the hosts its owner granted, plus, on the
+// subscription lane, its vendor's hosts, which the proxy adds. On the API lane the vendor is
+// reached only through the key-injecting lane, so CONNECT to the vendor stays closed and cannot
+// become an unauthenticated side channel.
+export function egressPolicy({ engineAccountId, lane, anySite, hosts }: EgressInput): EgressPolicy {
   const vendor = vendorByAccount[engineAccountId] ?? null;
   return {
+    anySite,
     hosts: [...new Set(hosts.map(normalizeEgressHost).filter((host) => host !== null))].sort(),
     subscription: lane === "subscription" ? vendor : null,
     apiVendor: lane === "api_key" ? vendor : null,
   };
 }
 
-const PolicyRow = z.object({ engineAccountId: z.string(), lane: EngineLane });
+const PolicyRow = z.object({
+  engineAccountId: z.string(),
+  lane: EngineLane,
+  anySite: z.number().transform((value) => value === 1),
+});
 
 export function openEgress(db: DatabaseSync) {
   const selectBot = db.prepare(
-    `SELECT b.engine_account_id AS engineAccountId, a.lane FROM bots b
+    `SELECT b.engine_account_id AS engineAccountId, a.lane, b.egress_any_site AS anySite FROM bots b
      JOIN engine_accounts a ON a.id = b.engine_account_id WHERE b.id = ?`,
   );
   const selectHosts = db.prepare(
@@ -162,12 +173,13 @@ export function createEgressControl({
     if (input === null) {
       return { type: "forget", botId };
     }
-    const { hosts, subscription, apiVendor } = egressPolicy(input);
+    const { anySite, hosts, subscription, apiVendor } = egressPolicy(input);
     const key = apiVendor === null ? undefined : await vault.get(apiKeyName(input.engineAccountId));
     // No key means no API lane: the proxy then refuses those requests instead of sending them bare.
     return {
       type: "policy",
       botId,
+      anySite,
       hosts,
       subscription,
       api: apiVendor !== null && key ? { vendor: apiVendor, key } : null,

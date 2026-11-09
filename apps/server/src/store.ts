@@ -75,6 +75,7 @@ const IdRow = z.object({ id: z.string() });
 const BotRow = Bot.extend({
   manifest: z.string().transform(parseManifest),
   egressHosts: z.string().transform((json) => z.array(z.string()).parse(JSON.parse(json))),
+  egressAnySite: z.number().transform((value) => value === 1),
 });
 
 export const migrations: Array<{
@@ -642,6 +643,14 @@ export const migrations: Array<{
     );
     CREATE INDEX takeovers_open ON takeovers (bot_id) WHERE state IN ('waiting', 'taken');`,
   },
+  {
+    name: "open_defaults",
+    // Stored events lack the new required field, so they would not parse. Clients get a snapshot.
+    // The owner's call: every bot reaches any public site and has Full Access, until narrowed.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN egress_any_site INTEGER NOT NULL DEFAULT 1;
+    UPDATE bots SET access = 'full';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -903,7 +912,7 @@ export function openEventStore(dataDir: string) {
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
     b.profile, b.boundary, b.manifest, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
-    b.unattended_lane AS unattendedLane,
+    b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
   const selectBots = db.prepare(
@@ -916,8 +925,9 @@ export function openEventStore(dataDir: string) {
   );
   const insertBot = db.prepare(
     `INSERT INTO bots
-     (id, name, personality, status, engine_account_id, model, avatar_seed, project_path, created_at)
-     VALUES (?, ?, ?, 'ready', ?, ?, ?, ?, ?)`,
+     (id, name, personality, status, engine_account_id, model, access, avatar_seed, project_path,
+       created_at)
+     VALUES (?, ?, ?, 'ready', ?, ?, 'full', ?, ?, ?)`,
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",

@@ -2,7 +2,12 @@ import * as NodeNet from "node:net";
 
 import { connectHosts, normalizeHost, type Vendor, vendors } from "./policy.ts";
 
-export type BotPolicy = { hosts: string[]; api: { vendor: Vendor; key: string } | null };
+export type BotPolicy = {
+  hosts: string[];
+  // Every public site besides `hosts`; a name that resolves to a private address is still refused.
+  anySite: boolean;
+  api: { vendor: Vendor; key: string } | null;
+};
 
 // One JSON object per line on the control socket. `bind` ties a box's source address to a bot;
 // `policy` says where that bot may go and holds the API key in memory. `listen` adds an address
@@ -11,7 +16,7 @@ export type ControlMessage =
   | { type: "listen"; address: string }
   | { type: "bind"; address: string; botId: string }
   | { type: "unbind"; address: string }
-  | { type: "policy"; botId: string; hosts: string[]; api: BotPolicy["api"] }
+  | ({ type: "policy"; botId: string } & BotPolicy)
   | { type: "forget"; botId: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -48,6 +53,7 @@ export function parseControl(line: string): ControlMessage | string {
       return isId(value.botId) ? { type: "forget", botId: value.botId } : "forget needs botId";
     case "policy": {
       const { botId, hosts, subscription, api } = value;
+      const anySite = value.anySite === true;
       if (!isId(botId) || !Array.isArray(hosts) || hosts.length > 1000) {
         return "policy needs botId and hosts";
       }
@@ -67,13 +73,13 @@ export function parseControl(line: string): ControlMessage | string {
         lane ?? null,
       );
       if (api === null) {
-        return { type: "policy", botId, hosts: allowed, api };
+        return { type: "policy", botId, hosts: allowed, anySite, api };
       }
       const vendor = isRecord(api) ? vendors.find((name) => name === api.vendor) : undefined;
       if (!isRecord(api) || vendor === undefined || typeof api.key !== "string" || api.key === "") {
         return "policy api needs vendor and key";
       }
-      return { type: "policy", botId, hosts: allowed, api: { vendor, key: api.key } };
+      return { type: "policy", botId, hosts: allowed, anySite, api: { vendor, key: api.key } };
     }
     default:
       return "unknown type";
@@ -104,7 +110,7 @@ export function createPolicyTable() {
         }
         case "policy":
           policies.set(message.botId, {
-            policy: { hosts: message.hosts, api: message.api },
+            policy: { hosts: message.hosts, anySite: message.anySite, api: message.api },
             owner,
           });
           return [message.botId];

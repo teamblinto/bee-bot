@@ -1,12 +1,13 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeDgram from "node:dgram";
+import * as NodeDns from "node:dns";
 import { once } from "node:events";
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, type MockInstance, vi } from "vite-plus/test";
 
 import { dnsQuery } from "./dns.ts";
 import { type LogLine, startEgress } from "./proxy.ts";
@@ -279,6 +280,42 @@ describe("egress proxy on real sockets", () => {
     expect(await boxDns(ports.dns, "pypi.org")).toEqual({ rcode: 3, answers: 0 });
     expect(await boxConnect(ports.proxy, "api.anthropic.com:443")).toBe("HTTP/1.1 403 Forbidden");
     expect(vendor.seen).toHaveLength(2);
+  });
+
+  it("lets an any-site bot look up any name, but not connect where it resolves privately", async () => {
+    const vendor = await recorder((_request, response) => response.end("ok"));
+    const { control, logs, ports } = await startProxy(vendor.port);
+    const client = await controlClient(control);
+    await client.send({ type: "bind", address: "127.0.0.1", botId: "b1" });
+    await client.send({
+      type: "policy",
+      botId: "b1",
+      hosts: [],
+      anySite: true,
+      subscription: null,
+      api: { vendor: "anthropic", key: canary },
+    });
+    expect(await boxDns(ports.dns, "example.com")).toEqual({ rcode: 0, answers: 1 });
+    expect(await boxDns(ports.dns, "api.anthropic.com")).toEqual({ rcode: 3, answers: 0 });
+
+    // A public name whose DNS answers with a private address, as in DNS rebinding.
+    // The proxy calls the `all: true` overload, which spyOn's inferred type can't pick.
+    const lookup = vi.spyOn(NodeDns.promises, "lookup") as unknown as MockInstance<
+      () => Promise<NodeDns.LookupAddress[]>
+    >;
+    cleanups.push(() => lookup.mockRestore());
+    for (const address of ["10.1.2.3", "169.254.169.254", "127.0.0.1", "100.64.0.1"]) {
+      lookup.mockResolvedValueOnce([{ address, family: 4 }]);
+      expect(await boxConnect(ports.proxy, "rebind.example:443")).toBe("HTTP/1.1 403 Forbidden");
+      expect(logs.at(-1)).toMatchObject({
+        host: "rebind.example:443",
+        ip: address,
+        reason: "resolved to denied range",
+      });
+    }
+    expect(await boxConnect(ports.proxy, "169.254.169.254:443")).toBe("HTTP/1.1 403 Forbidden");
+    expect(await boxConnect(ports.proxy, "api.anthropic.com:443")).toBe("HTTP/1.1 403 Forbidden");
+    expect(vendor.seen).toEqual([]);
   });
 
   it("denies a source that no bot is bound to, and a bot with no API key", async () => {

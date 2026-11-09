@@ -48,19 +48,39 @@ describe("the owner's egress list", () => {
 
 describe("egress policy", () => {
   it.each([
-    [{ engineAccountId: "claude", lane: "subscription", hosts: [] }, [], "anthropic", null],
-    [{ engineAccountId: "codex", lane: "subscription", hosts: [] }, [], "openai", null],
-    [{ engineAccountId: "claude", lane: "api_key", hosts: [] }, [], null, "anthropic"],
     [
-      { engineAccountId: "codex", lane: "api_key", hosts: ["PyPI.org."] },
+      { engineAccountId: "claude", lane: "subscription", anySite: false, hosts: [] },
+      [],
+      "anthropic",
+      null,
+    ],
+    [
+      { engineAccountId: "codex", lane: "subscription", anySite: false, hosts: [] },
+      [],
+      "openai",
+      null,
+    ],
+    [
+      { engineAccountId: "claude", lane: "api_key", anySite: false, hosts: [] },
+      [],
+      null,
+      "anthropic",
+    ],
+    [
+      { engineAccountId: "codex", lane: "api_key", anySite: false, hosts: ["PyPI.org."] },
       ["pypi.org"],
       null,
       "openai",
     ],
-    [{ engineAccountId: "fake", lane: "subscription", hosts: [] }, [], null, null],
-    [{ engineAccountId: "fake", lane: "api_key", hosts: [] }, [], null, null],
+    [{ engineAccountId: "fake", lane: "subscription", anySite: false, hosts: [] }, [], null, null],
+    [{ engineAccountId: "fake", lane: "api_key", anySite: false, hosts: [] }, [], null, null],
     [
-      { engineAccountId: "claude", lane: "api_key", hosts: ["github.com", "10.0.0.1", "a b", ""] },
+      {
+        engineAccountId: "claude",
+        lane: "api_key",
+        anySite: false,
+        hosts: ["github.com", "10.0.0.1", "a b", ""],
+      },
       ["github.com"],
       null,
       "anthropic",
@@ -68,7 +88,7 @@ describe("egress policy", () => {
   ] as [EgressInput, string[], string | null, string | null][])(
     "%j",
     (input, hosts, subscription, apiVendor) => {
-      expect(egressPolicy(input)).toEqual({ hosts, subscription, apiVendor });
+      expect(egressPolicy(input)).toEqual({ anySite: false, hosts, subscription, apiVendor });
     },
   );
 
@@ -87,6 +107,7 @@ describe("egress policy", () => {
     expect(egress.egressInput("b1")).toEqual({
       engineAccountId: "codex",
       lane: "api_key",
+      anySite: true,
       hosts: ["pypi.org"],
     });
     expect(egress.egressInput("nobody")).toBeNull();
@@ -118,8 +139,8 @@ function fakeProxy(reply: (message: Record<string, unknown>) => object = () => (
 }
 
 const inputs: Record<string, EgressInput> = {
-  api: { engineAccountId: "claude", lane: "api_key", hosts: ["pypi.org"] },
-  sub: { engineAccountId: "claude", lane: "subscription", hosts: [] },
+  api: { engineAccountId: "claude", lane: "api_key", anySite: false, hosts: ["pypi.org"] },
+  sub: { engineAccountId: "claude", lane: "subscription", anySite: false, hosts: [] },
 };
 
 describe("egress control", () => {
@@ -139,11 +160,19 @@ describe("egress control", () => {
       {
         type: "policy",
         botId: "api",
+        anySite: false,
         hosts: ["pypi.org"],
         subscription: null,
         api: { vendor: "anthropic", key: "sk-ant-secret" },
       },
-      { type: "policy", botId: "sub", hosts: [], subscription: "anthropic", api: null },
+      {
+        type: "policy",
+        botId: "sub",
+        anySite: false,
+        hosts: [],
+        subscription: "anthropic",
+        api: null,
+      },
       { type: "forget", botId: "gone" },
     ]);
   });

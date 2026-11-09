@@ -92,6 +92,25 @@ describe("CONNECT by lane", () => {
     expect(decision.allow ? "allow" : decision.reason).toBe(expected);
   });
 
+  it.each([
+    ["www.wikipedia.org:443", "allow"],
+    ["platform.claude.com:443", "allow"],
+    ["api.anthropic.com:443", "allow"],
+    ["chatgpt.com:443", "host not allowlisted"],
+    ["www.wikipedia.org:80", "port not 443"],
+    ["169.254.169.254:443", "IP literal"],
+    ["localhost:443", "bad host"],
+  ] as const)("any site on the subscription lane: %s -> %s", (authority, expected) => {
+    const decision = decideConnect(lanes.subscription, authority, true);
+    expect(decision.allow ? "allow" : decision.reason).toBe(expected);
+  });
+
+  it("keeps the vendor closed to any site on the API lane", () => {
+    expect(decideConnect(lanes.api, "api.anthropic.com:443", true)).toMatchObject({ allow: false });
+    expect(hostAllowed(lanes.api, "api.anthropic.com", true)).toBe(false);
+    expect(hostAllowed(lanes.api, "www.wikipedia.org", true)).toBe(true);
+  });
+
   it("adds a key only on the API lane's own host, never to a login host", () => {
     expect(keyHeader("anthropic", new URL("https://platform.claude.com/v1/oauth/token"), "k")).toBe(
       null,

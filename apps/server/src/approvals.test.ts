@@ -140,6 +140,7 @@ async function boot(options: BootOptions = {}) {
     const bot = (await (
       await post({ type: "create-bot", name: "Ada", personality: "", engineAccountId, projectPath })
     ).json()) as Bot;
+    await post({ type: "set-bot-engine", botId: bot.id, access: "supervised" });
     const before = turns.length;
     await post({
       type: "send-message",
@@ -860,6 +861,7 @@ describe("the fake engine's /approve", () => {
     const bot = (await (
       await post({ type: "create-bot", name: "Fay", personality: "", engineAccountId: "fake" })
     ).json()) as Bot;
+    await post({ type: "set-bot-engine", botId: bot.id, access: "supervised" });
 
     await send(bot.roomId, "/approve Bash npm run build --flag");
     const card = await nextCard();

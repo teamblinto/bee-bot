@@ -82,6 +82,7 @@ export function BotForm({
   const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
   const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? false);
   const [inBox, setInBox] = useState(bot?.boundary === "box");
+  const [anySite, setAnySite] = useState(bot?.egressAnySite ?? true);
   const [egressHosts, setEgressHosts] = useState(bot?.egressHosts ?? []);
   const [unattendedLane, setUnattendedLane] = useState<EngineLane>(
     bot?.unattendedLane ?? "api_key",
@@ -164,9 +165,15 @@ export function BotForm({
     const egressResult =
       boxed &&
       (browser || inBox) &&
-      (boxed.egressHosts.length !== egressHosts.length ||
+      (boxed.egressAnySite !== anySite ||
+        boxed.egressHosts.length !== egressHosts.length ||
         boxed.egressHosts.some((host, index) => host !== egressHosts[index]))
-        ? await postCommand({ type: "set-bot-egress-hosts", botId: boxed.id, hosts: egressHosts })
+        ? await postCommand({
+            type: "set-bot-egress-hosts",
+            botId: boxed.id,
+            anySite,
+            hosts: egressHosts,
+          })
         : undefined;
     const unattendedResult =
       boxed && inBox && boxed.unattendedLane !== unattendedLane
@@ -345,11 +352,28 @@ export function BotForm({
       {(browser || inBox) && (
         <div className={labelClass}>
           Sites it can reach
-          <HostList hosts={egressHosts} onChange={setEgressHosts} />
-          <p className="text-small text-ink-secondary">
-            Its browser and box reach only these sites, besides its engine. Each name is exact:
-            www.wikipedia.org doesn't cover en.wikipedia.org.
-          </p>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={anySite}
+              onChange={(event) => setAnySite(event.target.checked)}
+            />
+            Any site
+          </label>
+          {anySite ? (
+            <p className="text-small text-ink-secondary">
+              Its browser and box reach any public site. Your computer and local network stay out of
+              reach.
+            </p>
+          ) : (
+            <>
+              <HostList hosts={egressHosts} onChange={setEgressHosts} />
+              <p className="text-small text-ink-secondary">
+                Its browser and box reach only these sites, besides its engine. Each name is exact:
+                www.wikipedia.org doesn't cover en.wikipedia.org.
+              </p>
+            </>
+          )}
         </div>
       )}
       <label className={labelClass}>

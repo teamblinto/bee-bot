@@ -125,6 +125,7 @@ it("grants the browser on save, keeping the bot's other grants", async () => {
     profile: "operator",
     boundary: "box",
     manifest: ["gmail.read"],
+    egressAnySite: true,
     egressHosts: [],
     unattendedLane: "api_key",
     avatarSeed: 7,
@@ -157,6 +158,7 @@ it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
     profile: "operator",
     boundary: "box",
     manifest: [],
+    egressAnySite: false,
     egressHosts: ["pypi.org"],
     unattendedLane: "api_key",
     avatarSeed: 7,
@@ -190,7 +192,12 @@ it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
     await act(async () => host.querySelector("form")?.requestSubmit());
     expect(postCommand.mock.calls.map(([command]) => command)).toEqual([
       expect.objectContaining({ type: "update-bot" }),
-      { type: "set-bot-egress-hosts", botId: bot.id, hosts: ["files.pythonhosted.org"] },
+      {
+        type: "set-bot-egress-hosts",
+        botId: bot.id,
+        anySite: false,
+        hosts: ["files.pythonhosted.org"],
+      },
       { type: "set-bot-unattended-lane", botId: bot.id, lane: "subscription" },
     ]);
   } finally {
@@ -198,7 +205,7 @@ it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
   }
 });
 
-it("saves the sites of a bot with a browser but no box", async () => {
+it("narrows a bot with a browser but no box from any site to its own list", async () => {
   const bot: Bot = {
     id: "00000000-0000-4000-8000-000000000001",
     name: "Ada",
@@ -215,6 +222,7 @@ it("saves the sites of a bot with a browser but no box", async () => {
     profile: "operator",
     boundary: "host",
     manifest: ["browser"],
+    egressAnySite: true,
     egressHosts: [],
     unattendedLane: "api_key",
     avatarSeed: 7,
@@ -222,6 +230,13 @@ it("saves the sites of a bot with a browser but no box", async () => {
   };
   postCommand.mockResolvedValue({ ok: true, body: bot });
   show(bot);
+  expect(host.querySelector('input[aria-label="Site to allow"]')).toBeNull();
+  act(() =>
+    [...host.querySelectorAll("label")]
+      .find(({ textContent }) => textContent === "Any site")
+      ?.querySelector("input")
+      ?.click(),
+  );
   const site = host.querySelector<HTMLInputElement>('input[aria-label="Site to allow"]');
   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   act(() => {
@@ -234,7 +249,12 @@ it("saves the sites of a bot with a browser but no box", async () => {
   await act(async () => host.querySelector("form")?.requestSubmit());
   expect(postCommand.mock.calls.map(([command]) => command)).toEqual([
     expect.objectContaining({ type: "update-bot" }),
-    { type: "set-bot-egress-hosts", botId: bot.id, hosts: ["www.wikipedia.org"] },
+    {
+      type: "set-bot-egress-hosts",
+      botId: bot.id,
+      anySite: false,
+      hosts: ["www.wikipedia.org"],
+    },
   ]);
 });
 
@@ -258,6 +278,7 @@ it("offers the subscription only after the automated-access notice was read", ()
       profile: "operator",
       boundary: "box",
       manifest: [],
+      egressAnySite: true,
       egressHosts: [],
       unattendedLane: "api_key",
       avatarSeed: 7,
@@ -290,6 +311,7 @@ it("warns when editing a bot that's already on Codex", () => {
     profile: "operator",
     boundary: "host",
     manifest: [],
+    egressAnySite: true,
     egressHosts: [],
     unattendedLane: "api_key",
     avatarSeed: 7,

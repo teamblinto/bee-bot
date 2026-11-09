@@ -519,19 +519,41 @@ describe("a boxed bot's egress and lane", () => {
   it("validates, stores and audits the owner's hosts", async () => {
     const { base, store } = await start();
     const bot = Bot.parse(await (await createBot(base)).json());
-    expect(bot.egressHosts).toEqual([]);
+    expect(bot).toMatchObject({ egressAnySite: true, egressHosts: [], access: "full" });
     const set = (hosts: string[]) =>
-      command(base, { type: "set-bot-egress-hosts", botId: bot.id, hosts });
+      command(base, { type: "set-bot-egress-hosts", botId: bot.id, anySite: false, hosts });
     for (const bad of ["*.com", "10.0.0.1", "https://pypi.org", "printer.local"]) {
       expect((await set(["pypi.org", bad])).status).toBe(400);
     }
     const saved = Bot.parse(await (await set(["PyPI.org.", "files.pythonhosted.org"])).json());
+    expect(saved.egressAnySite).toBe(false);
     expect(saved.egressHosts).toEqual(["files.pythonhosted.org", "pypi.org"]);
-    expect(store.egress.egressInput(bot.id)?.hosts).toEqual(saved.egressHosts);
+    expect(store.egress.egressInput(bot.id)).toMatchObject({
+      anySite: false,
+      hosts: saved.egressHosts,
+    });
     expect(Bot.parse(await (await set([])).json()).egressHosts).toEqual([]);
     expect(
       store.policy.auditPage({ unattended: false, limit: 10 }).entries.map((entry) => entry.status),
     ).toEqual(["egress_set", "egress_set"]);
+  });
+
+  it("opens every existing bot to any site with Full Access, keeping its list", async () => {
+    const id = "6f1c2a4e-0000-4000-8000-000000000002";
+    (
+      await seedBefore(
+        "open_defaults",
+        `${oldBot(id)}
+        UPDATE bots SET access = 'auto-edits', boundary = 'box';
+        INSERT INTO bot_egress_hosts (bot_id, host, created_at) VALUES ('${id}', 'pypi.org', 'then');`,
+      )
+    ).close();
+    const { store } = await start();
+    expect(store.state().bots[0]).toMatchObject({
+      access: "full",
+      egressAnySite: true,
+      egressHosts: ["pypi.org"],
+    });
   });
 
   it("opts into the subscription only after the notice, and keeps the API key otherwise", async () => {
@@ -623,7 +645,7 @@ describe("bot engine settings", () => {
       model: "sonnet",
       effort: null,
       mode: "build",
-      access: "supervised",
+      access: "full",
     });
     await command(base, { type: "set-bot-engine", botId, effort: "high" });
     await command(base, { type: "set-bot-engine", botId, mode: "plan" });

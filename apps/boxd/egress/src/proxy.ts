@@ -160,7 +160,7 @@ export async function startEgress(
     if (botId === null || policy === null) {
       return deny(botId === null ? "unknown source" : "no policy");
     }
-    const decision = decideConnect(policy.hosts, target);
+    const decision = decideConnect(policy.hosts, target, policy.anySite);
     if (!decision.allow) {
       return deny(decision.reason);
     }
@@ -368,7 +368,9 @@ export async function startEgress(
     socket.on("message", (message, from) => {
       const { botId, policy } = table.lookup(from.address);
       const result = dnsReply(message, (name) =>
-        policy !== null && hostAllowed(policy.hosts, name) ? { address: self } : null,
+        policy !== null && hostAllowed(policy.hosts, name, policy.anySite)
+          ? { address: self }
+          : null,
       );
       if (result === null) {
         return;

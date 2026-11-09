@@ -305,7 +305,12 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
       owner: prefix,
       vault,
       account: () => "claude",
-      egressInput: () => ({ engineAccountId: "claude", lane: "api_key", hosts: [] }),
+      egressInput: () => ({
+        engineAccountId: "claude",
+        lane: "api_key",
+        anySite: false,
+        hosts: [],
+      }),
       beebotdPort: () => (beebotd.address() as NodeNet.AddressInfo).port,
       setBox: () => {},
       bootstrap: {
@@ -522,7 +527,7 @@ describe.skipIf(!available || !keyFile)(
         owner: prefix,
         vault,
         account: () => "claude",
-        egressInput: () => ({ engineAccountId: "claude", lane: "api_key", hosts }),
+        egressInput: () => ({ engineAccountId: "claude", lane: "api_key", anySite: false, hosts }),
         beebotdPort: () => port,
         setBox: () => {},
         bootstrap: { prefix, labels: { "beebot-dev": "1" } },

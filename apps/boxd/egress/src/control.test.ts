@@ -61,6 +61,7 @@ describe("control messages", () => {
       type: "policy",
       botId: "b",
       hosts: ["pypi.org"],
+      anySite: false,
       api: null,
     });
     expect(parseControl('{"type":"bind","address":"::ffff:10.0.0.5","botId":"b"}')).toEqual({
@@ -102,7 +103,13 @@ describe("control messages", () => {
 });
 
 describe("policy table", () => {
-  const policy: ControlMessage = { type: "policy", botId: "b1", hosts: ["pypi.org"], api: null };
+  const policy: ControlMessage = {
+    type: "policy",
+    botId: "b1",
+    hosts: ["pypi.org"],
+    anySite: false,
+    api: null,
+  };
 
   it("knows a source only once it is bound and has a policy", () => {
     const table = createPolicyTable();
@@ -125,6 +132,7 @@ describe("policy table", () => {
       type: "policy",
       botId: "b1",
       hosts: [],
+      anySite: false,
       api: { vendor: "anthropic", key: "sk" },
     });
     expect(table.dropOwner(server)).toEqual(["b1"]);
