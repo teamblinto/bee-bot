@@ -79,7 +79,9 @@ async function boot(bootstrap: Bootstrap) {
 
   // Box bots run in boxd's containers in a Podman machine (Windows; see boxdRuntime.ts).
   let port = 0;
-  const podmanBin = process.platform === "win32" ? windowsPodman : "podman";
+  // The per-user Podman installer puts podman.exe on PATH instead of under Program Files.
+  const podmanBin =
+    process.platform === "win32" && NodeFS.existsSync(windowsPodman) ? windowsPodman : "podman";
   const installDir = "beebot/boxd";
   const machine = podmanMachine(podmanBin, installDir);
   // R7: a box bot's lane, for its turns and its egress alike. Unattended runs without one are
