@@ -18,6 +18,7 @@ import {
   copyInArgs,
   copyOutArgs,
   createArgs,
+  displayArgv,
   downloadName,
   execArgs,
   execKillArgs,
@@ -67,6 +68,7 @@ const verbs = new Set<string>([
   "snapshot",
   "exec",
   "cdp",
+  "display",
   "egress",
   "put",
   "collect",
@@ -123,6 +125,16 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
     case "egress": {
       const channel = get("channel");
       return isChannel(channel) ? { ...base, channel } : { id, error: "bad channel" };
+    }
+    case "display": {
+      const channel = get("channel");
+      if (!isChannel(channel)) {
+        return { id, error: "bad channel" };
+      }
+      // Control (input) waits for the takeover lease.
+      return get("mode") === "view"
+        ? { ...base, channel, mode: "view" }
+        : { id, error: "bad mode" };
     }
     case "put": {
       const put = get("put");
@@ -379,7 +391,11 @@ export function createBoxd(options: BoxdOptions) {
       await egress.unbind(address);
     }
     const names = boxNames(box);
-    await podmanOk(["stop", "-t", "5", names.container.engine, names.container.browser]);
+    // The browser's entrypoint gives its desktop processes 5 s to exit before it kills them.
+    await Promise.all([
+      podmanOk(["stop", "-t", "5", names.container.engine]),
+      podmanOk(["stop", "-t", "10", names.container.browser]),
+    ]);
   }
 
   async function stopAttached(entry: Attached) {
@@ -474,6 +490,9 @@ export function createBoxd(options: BoxdOptions) {
           return { id, ok: true };
         case "cdp":
           await exec(box, "browser", { argv: cdpArgv, env: {}, channel: request.channel ?? 0 });
+          return { id, ok: true };
+        case "display":
+          await exec(box, "browser", { argv: displayArgv, env: {}, channel: request.channel ?? 0 });
           return { id, ok: true };
         case "put":
           if (request.put === undefined) {
@@ -574,8 +593,10 @@ export function createBoxd(options: BoxdOptions) {
     },
 
     async reapOrphans() {
-      for (const { name } of await owned("engine")) {
-        await podman.run(execReapArgs(name));
+      for (const role of roles) {
+        for (const { name } of await owned(role)) {
+          await podman.run(execReapArgs(name));
+        }
       }
     },
 

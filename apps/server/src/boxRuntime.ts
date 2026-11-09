@@ -14,11 +14,13 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 
 // `create` takes a bot ID and its engine account: boxd derives image, mounts, caps and network
 // itself (R24). `writeBotFile` fills the bot's read-only directory in the box, `cdp` attaches to
-// the sidecar's DevTools, and `collect` copies a finished download into the workspace.
+// the sidecar's DevTools, `display` to its desktop's VNC server, and `collect` copies a finished
+// download into the workspace.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
   writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
   cdp: (botId: string) => Promise<BoxAttach>;
+  display: (botId: string, mode: "view") => Promise<BoxAttach>;
   collect: (botId: string, file: string, name: string) => Promise<void>;
   start: (botId: string) => Promise<void>;
   stop: (botId: string) => Promise<void>;
@@ -53,6 +55,9 @@ export function createFakeBoxRuntime(): BoxRuntime {
     snapshot: async (botId) => states.get(botId) ?? "absent",
     writeBotFile: async (botId) => expect(botId, ["stopped", "running"]),
     cdp: async () => {
+      throw new Error("no sidecar in the fake box runtime");
+    },
+    display: async () => {
       throw new Error("no sidecar in the fake box runtime");
     },
     collect: async (botId) => expect(botId, ["running"]),

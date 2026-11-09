@@ -5,7 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { createBoxd } from "./boxd.ts";
 import { type Egress, noEgress } from "./egress.ts";
-import { boxNames } from "./policy.ts";
+import { boxNames, displayArgv } from "./policy.ts";
 import {
   Kind,
   type Response,
@@ -208,6 +208,23 @@ describe("boxd", () => {
     expect(String(of(1, Kind.data)[0]?.payload)).toBe("hi");
     expect(JSON.parse(String(of(1, Kind.exit)[0]?.payload))).toBe(0);
     expect(JSON.parse(String(of(2, Kind.exit)[0]?.payload))).not.toBe(0);
+  });
+
+  it("streams the sidecar's view-only display, and refuses control", async () => {
+    const { call, fake } = harness();
+    await call("create");
+    await call("start");
+    expect(await call("display", { mode: "view" })).toMatchObject({ error: "bad channel" });
+    expect(await call("display", { channel: 3, mode: "control" })).toMatchObject({
+      error: "bad mode",
+    });
+    expect(await call("display", { channel: 3 })).toMatchObject({ error: "bad mode" });
+    expect(await call("display", { channel: 3, mode: "view" })).toMatchObject({ ok: true });
+    const spawned = fake.calls.find(
+      (entry) => entry.args[0] === "exec" && entry.args.includes(names.container.browser),
+    );
+    expect(spawned?.args.slice(0, 3)).toEqual(["exec", "-i", names.container.browser]);
+    expect(spawned?.args.slice(-3)).toEqual(displayArgv);
   });
 
   it("kills every attached turn when the server goes away", async () => {

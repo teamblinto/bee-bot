@@ -58,8 +58,9 @@ export type Bootstrap = {
   testUpstreams?: Record<string, string>;
 };
 
-// `cdp` attaches to the sidecar's DevTools, `egress` to the proxy's control socket, `put` writes a
-// file into the bot's read-only directory, and `collect` copies a download into the workspace.
+// `cdp` attaches to the sidecar's DevTools, `display` to its view-only VNC socket, `egress` to the
+// proxy's control socket, `put` writes a file into the bot's read-only directory, and `collect`
+// copies a download into the workspace.
 export type Verb =
   | "create"
   | "start"
@@ -67,6 +68,7 @@ export type Verb =
   | "snapshot"
   | "exec"
   | "cdp"
+  | "display"
   | "egress"
   | "put"
   | "collect";
@@ -86,6 +88,7 @@ export type Request = {
   exec?: ExecRequest;
   account?: string;
   channel?: number;
+  mode?: "view" | "control";
   put?: { name: string; content: string };
   collect?: { file: string; name: string };
 };

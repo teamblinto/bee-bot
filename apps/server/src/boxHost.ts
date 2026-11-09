@@ -101,6 +101,10 @@ export function readyBoxRuntime(
       await ready(botId);
       return runtime.cdp(botId);
     },
+    display: async (botId, mode) => {
+      await ready(botId);
+      return runtime.display(botId, mode);
+    },
     ready,
   };
 }

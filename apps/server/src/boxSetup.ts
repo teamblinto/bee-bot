@@ -212,6 +212,7 @@ export function createBoxService({
     writeBotFile: async (botId, name, content) =>
       current().runtime.writeBotFile(botId, name, content),
     cdp: async (botId) => current().runtime.cdp(botId),
+    display: async (botId, mode) => current().runtime.display(botId, mode),
     collect: async (botId, file, name) => current().runtime.collect(botId, file, name),
     start: async (botId) => current().runtime.start(botId),
     stop: async (botId) => current().runtime.stop(botId),

@@ -341,6 +341,9 @@ export function execReapArgs(container: string) {
 // through boxd, so no network path to it exists from any box or from the egress proxy.
 export const cdpArgv = ["socat", "STDIO", "TCP:127.0.0.1:9222"];
 
+// The sidecar desktop's view-only VNC server, which listens on a Unix socket and no TCP port.
+export const displayArgv = ["socat", "STDIO", "UNIX-CONNECT:/tmp/bee-display/view.sock"];
+
 // A finished download, named by Chromium's GUID, goes from the sidecar into the engine's
 // workspace under the name the owner saw. Both names are checked here, since they reach a shell.
 export const downloadName = /^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$/;
