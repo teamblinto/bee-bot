@@ -10,7 +10,8 @@ const { watchWall, unwatch } = vi.hoisted(() => {
   const unwatch = vi.fn();
   return { unwatch, watchWall: vi.fn(() => unwatch) };
 });
-vi.mock("../serverConnection", () => ({
+vi.mock("../serverConnection", async (actual) => ({
+  ...(await actual<typeof import("../serverConnection")>()),
   watchWall,
   postCommand: vi.fn(async () => ({ ok: false, message: "no" })),
   socketUrl: (path: string) => new URL(`ws://127.0.0.1${path}`),
@@ -56,10 +57,19 @@ const running = (botId: string) => ({ botId, state: "running" }) as BoxStatus;
 
 function connection(): ConnectionState {
   const chat = {
-    bots: [bot("ada", "Ada"), bot("bo", "Bo"), { ...bot("cy", "Cy"), boundary: "host" }],
+    bots: [
+      bot("ada", "Ada"),
+      bot("bo", "Bo"),
+      { ...bot("cy", "Cy"), boundary: "host" },
+      bot("di", "Di"),
+    ],
     runs: [{ id: "run-ada", botId: "ada", status: "Running" } as Run],
-    boxes: [running("ada"), running("bo")],
-  } as ChatState;
+    boxes: [running("ada"), running("bo"), running("di")],
+    approvals: [{ id: "a1", botId: "di", status: "pending" }],
+    continuations: [],
+    routines: [],
+    firings: [],
+  } as unknown as ChatState;
   return {
     chat,
     liveTools: {
@@ -76,8 +86,8 @@ it("shows each box bot's screen, status, tool and controller, and opens its focu
   expect(watchWall).toHaveBeenCalledTimes(1);
 
   const tiles = [...host.querySelectorAll("li")];
-  expect(tiles).toHaveLength(2);
-  const [ada, bo] = tiles;
+  expect(tiles).toHaveLength(3);
+  const [ada, bo, di] = tiles;
   expect(ada?.textContent).toContain("Working");
   expect(ada?.textContent).toContain("Ada has control");
   expect(ada?.textContent).toContain("Running ls");
@@ -85,6 +95,7 @@ it("shows each box bot's screen, status, tool and controller, and opens its focu
   expect(bo?.textContent).toContain("Idle");
   expect(bo?.textContent).toContain("You have control");
   expect(bo?.querySelector("img")).toBeNull();
+  expect(di?.textContent).toContain("Waiting for you");
 
   expect(host.querySelector("dialog")).toBeNull();
   await act(async () => ada?.querySelector("button")?.click());

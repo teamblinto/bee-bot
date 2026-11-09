@@ -75,6 +75,11 @@ export function openCards({ routines, firings }: ChatState, botId: string) {
   });
 }
 
+export const waitingOnOwner = (chat: ChatState, botId: string) =>
+  chat.approvals.some((approval) => approval.botId === botId && approval.status === "pending") ||
+  chat.continuations.some((continuation) => continuation.botId === botId) ||
+  openCards(chat, botId).length > 0;
+
 function upsert<T extends { id: string }>(items: T[], item: T) {
   return items.some(({ id }) => id === item.id)
     ? items.map((existing) => (existing.id === item.id ? item : existing))

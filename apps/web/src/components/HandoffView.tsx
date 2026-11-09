@@ -188,39 +188,41 @@ export function HandoffView({
         </p>
       )}
       <p className="text-small text-ink-secondary">{status}</p>
-      <div className="scroller relative min-h-0 overflow-auto">
-        <ActivityOverlay activity={activity} />
-        <div
-          ref={screen}
-          role="img"
-          aria-label={`${bot.name}'s desktop`}
-          className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${desktop ? "" : "hidden"}`}
-        />
-        {desktop || unavailable ? null : frame?.data ? (
-          <img
-            alt={`${bot.name}'s browser`}
-            src={`data:image/jpeg;base64,${frame.data}`}
-            tabIndex={mine ? 0 : -1}
-            draggable={false}
-            className={`w-full rounded-md border border-edge outline-none ${mine ? "cursor-default focus:border-honey" : "opacity-90"}`}
-            onPointerDown={(event) => {
-              pressed.current = true;
-              event.currentTarget.focus();
-              sendMouse("down", event);
-            }}
-            onPointerUp={(event) => {
-              pressed.current = false;
-              sendMouse("up", event);
-            }}
-            onPointerMove={(event) => pressed.current && sendMouse("move", event)}
-            onWheel={(event) => sendMouse("wheel", event)}
-            onKeyDown={(event) => sendKey("down", event)}
-            onKeyUp={(event) => sendKey("up", event)}
-            onContextMenu={(event) => event.preventDefault()}
+      <div className="scroller min-h-0 overflow-auto">
+        <div className="relative">
+          <ActivityOverlay activity={activity} />
+          <div
+            ref={screen}
+            role="img"
+            aria-label={`${bot.name}'s desktop`}
+            className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${desktop ? "" : "hidden"}`}
           />
-        ) : (
-          <p className="text-small text-ink-faint">Waiting for the page…</p>
-        )}
+          {desktop || unavailable ? null : frame?.data ? (
+            <img
+              alt={`${bot.name}'s browser`}
+              src={`data:image/jpeg;base64,${frame.data}`}
+              tabIndex={mine ? 0 : -1}
+              draggable={false}
+              className={`w-full rounded-md border border-edge outline-none ${mine ? "cursor-default focus:border-honey" : "opacity-90"}`}
+              onPointerDown={(event) => {
+                pressed.current = true;
+                event.currentTarget.focus();
+                sendMouse("down", event);
+              }}
+              onPointerUp={(event) => {
+                pressed.current = false;
+                sendMouse("up", event);
+              }}
+              onPointerMove={(event) => pressed.current && sendMouse("move", event)}
+              onWheel={(event) => sendMouse("wheel", event)}
+              onKeyDown={(event) => sendKey("down", event)}
+              onKeyUp={(event) => sendKey("up", event)}
+              onContextMenu={(event) => event.preventDefault()}
+            />
+          ) : (
+            <p className="text-small text-ink-faint">Waiting for the page…</p>
+          )}
+        </div>
       </div>
       {mine && desktop && (
         <p className="text-small text-ink-secondary">

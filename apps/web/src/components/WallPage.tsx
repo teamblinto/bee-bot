@@ -3,14 +3,14 @@ import { Monitor, PanelLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { toolRowLabel } from "../labels";
-import { type ConnectionState, watchWall } from "../serverConnection";
+import { type ConnectionState, waitingOnOwner, watchWall } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
 import { HandoffView } from "./HandoffView";
 import { iconProps } from "./ui";
 
 function tileStatus(bot: Bot, { chat }: ConnectionState) {
   const run = chat.runs.find(({ botId }) => botId === bot.id);
-  if (bot.pauseReason === "browser_session") {
+  if (bot.pauseReason === "browser_session" || waitingOnOwner(chat, bot.id)) {
     return "Waiting for you";
   }
   if (run?.status === "Running") {
