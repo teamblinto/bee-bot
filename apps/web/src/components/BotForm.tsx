@@ -94,9 +94,7 @@ export function BotForm({
     subscribeToConnection,
     () => getConnectionState().boxAvailability,
   );
-  const [browser, setBrowser] = useState(
-    bot?.manifest.includes(browserGrant) ?? boxes?.available === true,
-  );
+  const [browser, setBrowser] = useState(bot?.manifest.includes(browserGrant) ?? true);
   const apiKeys = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().chat.vault.apiKeys,

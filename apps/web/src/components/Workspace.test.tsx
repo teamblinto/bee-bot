@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { Bot, Run } from "@beebot/contracts";
+import type { Bot, BoxAvailability, Run } from "@beebot/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -86,12 +86,27 @@ function receive(message: object) {
 const lease = (fields: object) =>
   receive({ type: "lease", requested: null, note: null, holder: "bot", mine: false, ...fields });
 
-async function show(tab: "computer" | "browser" = "computer", onEdit = vi.fn(), shown = bot) {
+const ready: BoxAvailability = {
+  machine: "beebot",
+  machineFound: true,
+  boxdInstalled: true,
+  imageBuilt: true,
+  available: true,
+  settingUp: false,
+  problem: null,
+};
+
+async function show(
+  tab: "computer" | "browser" = "computer",
+  onEdit = vi.fn(),
+  shown = bot,
+  boxes: BoxAvailability | undefined = ready,
+) {
   await act(async () =>
     root.render(
       <Workspace
         bot={shown}
-        boxes={undefined}
+        boxes={boxes}
         activity={undefined}
         tab={tab}
         liveTab={undefined}
@@ -222,6 +237,17 @@ it("offers the bot's settings instead of a screen when it has no computer or bro
   expect(postCommand).not.toHaveBeenCalled();
   act(() => query<HTMLButtonElement>("aside button.button-outline")?.click());
   expect(onEdit).toHaveBeenCalled();
+});
+
+it("sets up computers from the panel when the bot wants one and boxes aren't ready", async () => {
+  postCommand.mockResolvedValue({ ok: true, body: {} });
+  const stopped = { ...ready, available: false, boxdInstalled: false, problem: "Not running." };
+  await show("computer", vi.fn(), bot, stopped);
+  expect(sockets).toHaveLength(0);
+  await act(async () => query<HTMLButtonElement>("aside button.button-primary")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "set-up-boxes" });
+  await show("computer", vi.fn(), bot, { ...stopped, settingUp: true });
+  expect(query<HTMLButtonElement>("aside button.button-primary")?.disabled).toBe(true);
 });
 
 type Hook = ReturnType<typeof useWorkspace>;

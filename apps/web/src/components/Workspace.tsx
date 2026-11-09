@@ -157,7 +157,7 @@ export function Workspace({
 }) {
   const [width, setWidth] = useState(loadWidth);
   const drag = useRef<{ x: number; width: number }>(null);
-  const hasScreen = hasComputer(bot, boxes) || bot.manifest.includes(browserGrant);
+  const wantsScreen = bot.boundary === "box" || bot.manifest.includes(browserGrant);
 
   function endDrag() {
     if (drag.current) {
@@ -241,14 +241,14 @@ export function Workspace({
           <X {...iconProps} />
         </button>
       </header>
-      {hasScreen ? (
+      {hasComputer(bot, boxes) ? (
         <Screen bot={bot} tab={tab} activity={activity} />
+      ) : wantsScreen ? (
+        <SetUp boxes={boxes} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           <p className="text-small text-ink-secondary">
             {bot.name} has no computer or browser. Turn on Computer and browser in its settings.
-            {!boxes?.available &&
-              " A computer of its own also needs boxes, which you set up on the Usage page."}
           </p>
           <button type="button" className="button button-outline" onClick={onEdit}>
             Edit {bot.name}
@@ -256,6 +256,43 @@ export function Workspace({
         </div>
       )}
     </aside>
+  );
+}
+
+// Bots' computers run in boxes, so the first one is set up from here rather than from Usage.
+function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
+  const [error, setError] = useState<string>();
+  const settingUp = boxes?.settingUp === true;
+
+  async function setUp() {
+    setError(undefined);
+    const result = await postCommand({ type: "set-up-boxes" });
+    if (!result.ok) {
+      setError(result.message);
+    }
+  }
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+      <p className="text-small text-ink-secondary">
+        {!boxes
+          ? "This server can't run computers for bots."
+          : settingUp
+            ? (boxes.problem ?? "Setting up computers…")
+            : `Computers for your bots aren't set up yet. ${boxes.problem ?? ""}`}
+      </p>
+      {boxes && (
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={settingUp}
+          onClick={() => void setUp()}
+        >
+          {settingUp ? "Setting up…" : "Set up computers"}
+        </button>
+      )}
+      {error && <p className="text-small text-danger">{error}</p>}
+    </div>
   );
 }
 
