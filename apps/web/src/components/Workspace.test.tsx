@@ -124,11 +124,19 @@ async function show(
 
 const query = <T extends Element>(selector: string) => host.querySelector<T>(selector);
 
-it("keeps the screencast when there is no display ticket", async () => {
+const button = (name: string) =>
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+    (each) => each.textContent?.trim().startsWith(name) || each.getAttribute("aria-label") === name,
+  );
+
+it("waits for the desktop on the Screen tab, and shows the page on the Browser tab", async () => {
   postCommand.mockResolvedValue({ ok: false, message: "no" });
   await show();
   expect(postCommand).toHaveBeenCalledWith({ type: "display-ticket", botId: bot.id, mode: "view" });
   expect(rfb).not.toHaveBeenCalled();
+  expect(query("img")).toBeNull();
+  expect(host.textContent).toContain("Connecting to Ada's desktop…");
+  await show("browser");
   expect(query("img")?.getAttribute("alt")).toBe("Ada's browser");
 });
 
@@ -168,9 +176,27 @@ it("drives the desktop with a control ticket for the held lease, and watches aga
   expect(rfb.mock.calls[2]?.[0]).toMatchObject({ viewOnly: true });
 });
 
+it("takes the desktop from the bot, and hands it back from the banner", async () => {
+  postCommand.mockResolvedValue({ ok: true, body: { ticket: "t", expiresAt: 1 } });
+  await show();
+  lease({ leaseId: null });
+  act(() => button("Take control")?.click());
+  expect(sockets[0]?.sent).toEqual([{ type: "take" }]);
+
+  lease({ holder: "human", mine: true, leaseId });
+  expect(button("Take control")).toBeUndefined();
+  expect(host.textContent).toContain("You're in control");
+  expect(host.textContent).toContain("Ada's clicks and keystrokes are refused");
+  act(() => button("Hand control back")?.click());
+  expect(sockets[0]?.sent).toEqual([{ type: "take" }, { type: "give" }]);
+
+  lease({ holder: "human", mine: false, leaseId: null });
+  expect(button("Take control")?.disabled).toBe(true);
+});
+
 it("drops the last frame and the lease once the browser is gone", async () => {
   postCommand.mockResolvedValue({ ok: false, message: "no" });
-  await show();
+  await show("browser");
   lease({});
   expect(query("img")).not.toBeNull();
   receive({ type: "unavailable" });
@@ -233,13 +259,48 @@ it("resizes within its bounds and remembers the width", async () => {
   expect(query("[role=separator]")?.getAttribute("aria-valuenow")).toBe(String(minWidth));
 });
 
-it("offers the bot's settings instead of a screen when it has no computer or browser", async () => {
+it("switches where a bot works from its panel, and asks the settings before this PC", async () => {
   const onEdit = vi.fn();
-  await show("computer", onEdit, { ...bot, control: "none" });
+  const off = { ...bot, control: "none" as const };
+  await show("computer", onEdit, off);
   expect(sockets).toHaveLength(0);
   expect(postCommand).not.toHaveBeenCalled();
-  act(() => query<HTMLButtonElement>("aside button.button-outline")?.click());
+  expect(host.textContent).toContain("Ada has no screen.");
+  expect(button("Off")?.getAttribute("aria-pressed")).toBe("true");
+  expect(button("This PC")?.disabled).toBe(true);
+
+  postCommand.mockResolvedValue({ ok: true, body: {} });
+  await act(async () => button("Private desktop")?.click());
+  expect(postCommand).toHaveBeenCalledWith({
+    type: "set-bot-control",
+    botId: bot.id,
+    control: "computer",
+  });
+
+  postCommand.mockClear();
+  await act(async () =>
+    root.render(
+      <Workspace
+        bot={off}
+        boxes={ready}
+        hostControl={{ available: true, problem: null, held: false }}
+        working={false}
+        activity={undefined}
+        tab="computer"
+        liveTab={undefined}
+        onTab={vi.fn()}
+        onClose={vi.fn()}
+        onEdit={onEdit}
+      />,
+    ),
+  );
+  await act(async () => button("This PC")?.click());
   expect(onEdit).toHaveBeenCalled();
+  expect(postCommand).not.toHaveBeenCalled();
+
+  postCommand.mockResolvedValue({ ok: false, message: "This bot is working." });
+  await act(async () => button("Browser")?.click());
+  expect(host.textContent).toContain("This bot is working.");
 });
 
 it("sets up computers from the panel when the bot wants one and boxes aren't ready", async () => {
@@ -330,18 +391,18 @@ it("shows only the tabs the bot's control mode has", async () => {
   postCommand.mockResolvedValue({ ok: false, message: "no" });
   const tabNames = () => [...host.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
   await show("computer");
-  expect(tabNames()).toEqual(["Computer", "Browser"]);
+  expect(tabNames()).toEqual(["Screen", "Browser"]);
 
   postCommand.mockClear();
   await show("browser", vi.fn(), { ...bot, control: "browser" });
-  expect(tabNames()).toEqual(["Browser"]);
+  expect(tabNames()).toEqual(["Screen", "Browser"]);
   expect(postCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "display-ticket" }));
 
   await showHost({ available: true, problem: null, held: false });
-  expect(tabNames()).toEqual(["Your screen"]);
+  expect(tabNames()).toEqual(["Screen"]);
 
   await show("computer", vi.fn(), { ...bot, control: "none" });
-  expect(tabNames()).toEqual([]);
+  expect(tabNames()).toEqual(["Screen"]);
 });
 
 async function showHost(hostControl: HostControlAvailability | undefined, working = false) {
@@ -396,12 +457,12 @@ it("polls the owner's screen, faster while the bot works, and stops when closed"
 it("takes the owner's computer back from bots, and hands it back", async () => {
   postCommand.mockResolvedValue({ ok: true, body: {} });
   await showHost({ available: true, problem: null, held: false });
-  const holdButton = () => query<HTMLButtonElement>("aside > div.border-b button");
-  await act(async () => holdButton()?.click());
+  await act(async () => button("Take control")?.click());
   expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: true });
 
   await showHost({ available: true, problem: null, held: true });
-  await act(async () => holdButton()?.click());
+  expect(host.textContent).toContain("You're in control");
+  await act(async () => button("Hand control back")?.click());
   expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: false });
 });
 
@@ -429,10 +490,11 @@ it("opens a host bot's screen tools and remembered tab on the owner's screen", a
 });
 
 it("gives a browser-only bot's takeover the Browser tab", async () => {
-  localStorage.setItem(`beebot.workspaceTab.${bot.id}`, "computer");
   const browserBot = { ...bot, control: "browser" as const };
   act(() => root.render(<Harness run={undefined} tools={[]} shown={browserBot} />));
   expect(workspace.tab).toBe("browser");
+  act(() => workspace.choose("computer"));
+  expect(workspace.tab).toBe("computer");
   act(() =>
     root.render(
       <Harness

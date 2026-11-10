@@ -49,9 +49,13 @@ const controlNotes: Record<BotControl, string> = {
     "You have your own web browser, apart from the owner's computer. Use it with the browser_* " +
     "tools. When a page needs the owner, such as a sign-in, ask with request_takeover.",
   computer:
-    "You have your own computer: a Linux desktop apart from the owner's computer, with a web " +
-    "browser on it. See and use the desktop with the computer_* tools, and use the browser_* " +
-    "tools for web pages. When a step needs the owner, ask with request_takeover.",
+    "You have your own computer: a private Xfce Linux desktop apart from the owner's computer. " +
+    "Its top bar has the Applications menu and open windows; its bottom dock opens a terminal, " +
+    "the file manager, the web browser and the app finder. See and use it with the computer_* " +
+    "tools, taking a screenshot first, and use the browser_* tools for web pages in its " +
+    "browser. Its terminal and files are on that desktop, not in your own working folder. While " +
+    "the owner has control, your clicks and keys are refused. When a step needs the owner, ask " +
+    "with request_takeover.",
   host:
     "You may use the owner's own computer, their real desktop with their apps and accounts, " +
     "with the computer_* tools, and only while they watch. Take a screenshot first. Do only what " +

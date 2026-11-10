@@ -3,4 +3,5 @@
 !browser.sh
 !tmux.conf
 !chromium-policy.json
-!openbox.xml
+!chromium.flags
+!xfce

@@ -27,16 +27,16 @@ On Windows, keep the repo root under about 90 characters: `dist:desktop:win` fai
 
 ## Computers and browsers
 
-Each bot works on one of four things, chosen under **Works on** in its settings and kept in `bots.control`:
+Each bot works on one of four things, chosen under **Works on** in its settings or in **Where it works** on its panel's Screen tab, and kept in `bots.control`:
 
-- **Own browser** (`browser`): its own Chromium, web pages only, through the `browser_*` tools. The Browser tab shows it.
-- **Own computer** (`computer`, the default for new bots): its own Linux desktop with that browser on it, through the `computer_*` and `browser_*` tools. The Computer and Browser tabs show it.
-- **This computer** (`host`): the owner's real desktop, through the `computer_*` tools. Windows and the desktop app only. The Your screen tab shows it.
-- **None** (`none`): no browser or computer tools.
+- **Browser** (`browser`): its own Chromium, web pages only, through the `browser_*` tools. The Browser tab shows it.
+- **Private desktop** (`computer`, the default for new bots): its own Xfce Linux desktop, with a top bar, a dock of terminal, file manager, browser and app finder, and that Chromium on it, through the `computer_*` and `browser_*` tools. The Screen tab shows it live; Take control hands the owner its mouse and keyboard and refuses the bot's until they hand it back, and Full screen fills the screen with it. The Browser tab shows its browser.
+- **This PC** (`host`): the owner's real desktop, through the `computer_*` tools. Windows and the desktop app only, and moving onto it asks for consent in the bot's settings. The Screen tab shows it.
+- **Off** (`none`): no browser or computer tools.
 
 The mode alone grants the browser and desktop tools (`grantsOf` in `apps/server/src/broker.ts`), so the tools a bot is offered, the broker's checks and the note in its persona always agree. A change waits until the bot has no run going, because a turn keeps the tools it started with, and each change is audited.
 
-An own browser or own computer runs in a Linux desktop (Xvfb, openbox, headed Chromium) in a rootless Podman container next to the bot's engine container. The two share no network, and both reach the internet only through Bee Bot's egress proxy. `apps/boxd` runs inside a Podman machine and is the only thing that touches containers. The server reaches the desktop through boxd's verbs: CDP for the `browser_*` tools, xdotool for the `computer_*` tools, and VNC for the live view. A browser-only bot's box has the same desktop, but neither the bot nor the owner's view reaches anything but its browser.
+A bot's browser or private desktop runs in a Linux desktop (Xvfb, Xfce, headed Chromium) in a rootless Podman container next to the bot's engine container. The desktop's home and Chromium's profile live on the box's volume, so they outlast restarts; closing Chromium or a part of the desktop brings it back a second later. The two share no network, and both reach the internet only through Bee Bot's egress proxy. `apps/boxd` runs inside a Podman machine and is the only thing that touches containers. The server reaches the desktop through boxd's verbs: CDP for the `browser_*` tools, xdotool for the `computer_*` tools, and VNC for the live view. A browser-only bot's box has the same desktop, but neither the bot nor the owner's view reaches anything but its browser.
 
 - **Setup.** Installing Podman is the user's one manual step. "Set up computers" in a chat's computer panel (or Set up boxes on the Usage page) creates the `beebot` Podman machine if it is missing, starts it, builds the box image and starts boxd. A progress bar follows each step, and the package download and install are measured. The first time on a Windows (WSL) machine, boxd moves systemd into its own cgroup so container limits hold, and Bee Bot restarts the machine once for that to take effect. When Bee Bot starts, it restarts a machine it has set up before and rebuilds the image after an update. If the machine stops while Bee Bot runs, it reconnects by itself. Only one boxd runs per machine: a newly launched one stops any older one first. There are no other accounts or logins.
 - **Image updates.** `images/box/imageTag.test.ts` fails until a change to the image's build inputs comes with a new tag in `runSpec.json`. When a box was made from an older image, boxd replaces its containers and keeps its volumes, so the bot's files and browser profile survive.

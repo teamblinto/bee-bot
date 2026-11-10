@@ -294,6 +294,40 @@ describe.skipIf(!podmanUp)("box image", () => {
     expect(await hasSocket()).toBe(false);
     expect(await listeners(id)).toEqual(["0100007F:2406"]);
 
+    // A whole desktop, not a lone browser: the bot clicks the dock's terminal launcher, which
+    // opens a shell at home, and its typing runs a command there.
+    for (const name of ["xfwm4", "xfce4-panel", "xfdesktop", "xfsettingsd"]) {
+      expect((await exec(id, `pgrep -x ${name}`)).code, name).toBe(0);
+    }
+    await input([
+      { type: "move", x: 567, y: 777 },
+      { type: "click", button: 1 },
+    ]);
+    await until(async () => {
+      const { stdout } = await exec(
+        id,
+        "DISPLAY=:1 xdotool search --onlyvisible --class xfce4-terminal",
+      );
+      return stdout.trim() || undefined;
+    }, "the terminal window");
+    await sleep(500);
+    await input([{ type: "type", text: "pwd > /tmp/typed\n" }]);
+    const typed = await until(async () => {
+      const { stdout } = await exec(id, "cat /tmp/typed");
+      return stdout.trim() || undefined;
+    }, "the typed command");
+    expect(typed).toBe("/browser/home");
+
+    // Closing the browser on the desktop brings it back, DevTools and all.
+    const chromium = async () =>
+      (await exec(id, "pgrep -of remote-debugging-port=9222")).stdout.trim();
+    const first = await chromium();
+    await exec(id, `kill ${first}`);
+    await until(async () => {
+      const next = await chromium();
+      return next && next !== first ? next : undefined;
+    }, "chromium again");
+
     // Only for this test: a relay so the WebSocket below can reach DevTools from the host.
     await podmanOk(["exec", "-d", id, "socat", "TCP-LISTEN:9223,fork", "TCP:127.0.0.1:9222"]);
     const address = (await podmanOk(["port", id, "9223/tcp"])).split("\n")[0];
@@ -315,10 +349,13 @@ describe.skipIf(!podmanUp)("box image", () => {
     expect(Date.now() - stopping).toBeLessThan(10_000);
     expect(await podmanOk(["inspect", id, "--format", "{{.State.ExitCode}}"])).toBe("0");
     const { stderr } = await podman(["logs", id]);
-    expect(stderr.match(/(?<=bee-browser: stopping )\w+/g)).toEqual([
+    expect(stderr.match(/(?<=bee-browser: stopping )[\w-]+/g)).toEqual([
       "chromium",
+      "xfdesktop",
+      "xfce4-panel",
+      "xfwm4",
+      "xfsettingsd",
       "x11vnc",
-      "openbox",
       "dbus",
       "Xvfb",
     ]);

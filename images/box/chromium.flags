@@ -1,0 +1,3 @@
+# Every Chromium started on the desktop, from the panel or a terminal, joins the one the bot's
+# browser tools drive instead of opening a second profile.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --user-data-dir=/browser/profile --no-first-run --hide-crash-restore-bubble"

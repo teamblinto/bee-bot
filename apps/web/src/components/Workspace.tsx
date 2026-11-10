@@ -11,9 +11,10 @@ import {
   type HostControlAvailability,
   type Run,
 } from "@beebot/contracts";
-import { ArrowLeft, ArrowRight, Globe, Monitor, Laptop, RotateCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Globe, Hand, Maximize2, Monitor, RotateCw, X } from "lucide-react";
 import {
   type FormEvent,
+  type ReactNode,
   type KeyboardEvent,
   type PointerEvent,
   useEffect,
@@ -25,7 +26,6 @@ import {
 import {
   type BotActivity,
   displaySocketUrl,
-  drivesBox,
   hasBoxScreen,
   isActive,
   type LiveTool,
@@ -33,6 +33,7 @@ import {
   socketUrl,
 } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
+import { controlOptions, controlOrder } from "./controlOptions";
 import { SetupProgress } from "./SetupProgress";
 import { keyInput, mouseInput } from "./HandoffMapping";
 import { iconProps } from "./ui";
@@ -40,24 +41,32 @@ import { iconProps } from "./ui";
 export type WorkspaceTab = "computer" | "browser" | "host";
 
 const tabInfo = {
-  computer: { label: "Computer", Icon: Monitor },
+  computer: { label: "Screen", Icon: Monitor },
   browser: { label: "Browser", Icon: Globe },
-  host: { label: "Your screen", Icon: Laptop },
+  host: { label: "Screen", Icon: Monitor },
 } as const;
 
+// Every bot has a Screen tab, where the owner picks where it works.
 const controlTabs: Record<BotControl, WorkspaceTab[]> = {
-  browser: ["browser"],
+  browser: ["computer", "browser"],
   computer: ["computer", "browser"],
   host: ["host"],
-  none: [],
+  none: ["computer"],
+};
+
+// Where the bot's own use of its screen shows, and where the panel opens by default.
+const mainTab: Record<BotControl, WorkspaceTab> = {
+  browser: "browser",
+  computer: "computer",
+  host: "host",
+  none: "computer",
 };
 
 const hostPollMs = { working: 1000, idle: 5000 };
 
 // The tab the bot actually has for `wanted`. A host bot's computer is the owner's own screen.
 function tabFor(control: BotControl, wanted: string | null | undefined): WorkspaceTab {
-  const own = controlTabs[control];
-  return own.find((tab) => tab === wanted) ?? own[0] ?? "computer";
+  return controlTabs[control].find((tab) => tab === wanted) ?? mainTab[control];
 }
 
 export const minWidth = 360;
@@ -117,7 +126,7 @@ export function useWorkspace(
   );
   // Derived, so a change of the bot's control mode never leaves a tab it no longer has.
   const tab = tabFor(bot.control, chosen);
-  const screen = tabFor(bot.control, "computer");
+  const screen = mainTab[bot.control];
   const [closedIn, setClosedIn] = useState<{ runId: string | undefined }>();
   const takeover = bot.pauseReason === "browser_session";
   const used = isActive(run)
@@ -196,6 +205,8 @@ export function Workspace({
       save(widthKey, String(width));
     }
   }
+
+  const place = <WhereWorks bot={bot} hostControl={hostControl} onEdit={onEdit} />;
 
   return (
     <aside
@@ -276,22 +287,136 @@ export function Workspace({
         </button>
       </header>
       {bot.control === "host" ? (
-        <HostScreen bot={bot} hostControl={hostControl} working={working} activity={activity} />
+        <HostScreen
+          bot={bot}
+          hostControl={hostControl}
+          working={working}
+          activity={activity}
+          place={place}
+        />
+      ) : tab === "computer" && bot.control !== "computer" ? (
+        <div className="scroller min-h-0 flex-1 overflow-auto px-4 py-3">
+          <ScreenHeader bot={bot} inControl={false} />
+          <div className="flex aspect-[16/10] w-full flex-col items-center justify-center gap-3 rounded-xl bg-raised p-6 text-center">
+            <p className="text-small text-ink-secondary">
+              {bot.control === "browser"
+                ? `${bot.name} works in a browser of its own, with no desktop.`
+                : `${bot.name} has no screen.`}
+            </p>
+            {bot.control === "browser" && (
+              <button
+                type="button"
+                className="button button-outline"
+                onClick={() => onTab("browser")}
+              >
+                <Globe {...iconProps} size={14} />
+                Watch its browser
+              </button>
+            )}
+          </div>
+          {place}
+        </div>
       ) : hasBoxScreen(bot, boxes) ? (
-        <Screen bot={bot} tab={tab} activity={activity} />
-      ) : drivesBox(bot) ? (
-        <SetUp boxes={boxes} />
+        <Screen bot={bot} tab={tab} activity={activity} place={place} />
       ) : (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-          <p className="text-small text-ink-secondary">
-            {bot.name} has no computer or browser. Choose one in its settings.
-          </p>
-          <button type="button" className="button button-outline" onClick={onEdit}>
-            Edit {bot.name}
-          </button>
+        <div className="scroller min-h-0 flex-1 overflow-auto px-4 py-3">
+          <SetUp boxes={boxes} />
+          {tab === "computer" && place}
         </div>
       )}
     </aside>
+  );
+}
+
+// "Ada's screen", and what that screen is, or that the owner is driving it.
+function ScreenHeader({ bot, inControl }: { bot: Bot; inControl: boolean }) {
+  return (
+    <div className="mb-1.5 flex items-center justify-between gap-2 text-small text-ink-secondary">
+      <span className="truncate">{bot.name}'s screen</span>
+      {inControl ? (
+        <span className="flex shrink-0 items-center gap-1.5 text-label font-medium text-ink">
+          <span className="size-1.5 rounded-full bg-honey-fill" />
+          You're in control
+        </span>
+      ) : (
+        <span className="shrink-0 text-label">{controlOptions[bot.control].name}</span>
+      )}
+    </div>
+  );
+}
+
+// The owner's own control banner: while it shows, the bot's input is refused.
+function InControl({ line, onGive }: { line: string; onGive: () => void }) {
+  return (
+    <div className="mt-3 rounded-xl border border-honey/40 bg-honey-surface p-4">
+      <p className="text-small text-ink">{line}</p>
+      <button type="button" className="button button-primary mt-2 w-full" onClick={onGive}>
+        <Hand {...iconProps} size={14} />
+        Hand control back
+      </button>
+    </div>
+  );
+}
+
+// The mode is the bot's own setting, so changing it here is the same as in its settings. Moving
+// onto the owner's computer needs their consent, which only the settings ask for.
+function WhereWorks({
+  bot,
+  hostControl,
+  onEdit,
+}: {
+  bot: Bot;
+  hostControl: HostControlAvailability | undefined;
+  onEdit: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function choose(control: BotControl) {
+    if (control === bot.control || pending) {
+      return;
+    }
+    if (control === "host") {
+      onEdit();
+      return;
+    }
+    setPending(true);
+    setError(undefined);
+    const result = await postCommand({ type: "set-bot-control", botId: bot.id, control });
+    setPending(false);
+    setError(result.ok ? undefined : result.message);
+  }
+
+  return (
+    <section aria-label={`Where ${bot.name} works`} className="mt-4 rounded-xl bg-raised p-4">
+      <h2 className="text-name font-medium text-ink">Where {bot.name} works</h2>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {controlOrder.map((control) => {
+          const { name, Icon } = controlOptions[control];
+          const selected = control === bot.control;
+          const unavailable = control === "host" && !selected && hostControl?.available !== true;
+          return (
+            <button
+              key={control}
+              type="button"
+              aria-pressed={selected}
+              disabled={unavailable || pending}
+              title={
+                unavailable ? (hostControl?.problem ?? undefined) : controlOptions[control].help
+              }
+              className={`flex min-w-0 flex-col items-center gap-1.5 rounded-lg border px-1.5 py-2.5 text-center transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${selected ? "border-honey bg-honey-surface text-ink" : "border-edge text-ink-secondary enabled:hover:border-honey/60 enabled:hover:bg-hover"}`}
+              onClick={() => void choose(control)}
+            >
+              <Icon {...iconProps} size={16} className={selected ? "text-honey" : undefined} />
+              <span className="w-full truncate text-label font-medium">{name}</span>
+              {unavailable && <span className="w-full truncate text-micro">Unavailable</span>}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-small text-ink-secondary">{controlOptions[bot.control].line}</p>
+      {error && <p className="mt-2 text-small text-danger">{error}</p>}
+    </section>
   );
 }
 
@@ -309,7 +434,7 @@ function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
 
   if (boxes?.settingUp) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="flex flex-col items-center gap-4 py-8 text-center">
         <p className="text-name font-medium">Setting up computers</p>
         {boxes.progress && <SetupProgress progress={boxes.progress} />}
         <p className="text-label text-ink-faint">
@@ -320,7 +445,7 @@ function SetUp({ boxes }: { boxes: BoxAvailability | undefined }) {
   }
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+    <div className="flex flex-col items-center gap-3 py-8 text-center">
       <p className="text-small text-ink-secondary">
         {!boxes
           ? "This server can't run computers for bots."
@@ -342,11 +467,13 @@ function HostScreen({
   hostControl,
   working,
   activity,
+  place,
 }: {
   bot: Bot;
   hostControl: HostControlAvailability | undefined;
   working: boolean;
   activity: BotActivity | undefined;
+  place: ReactNode;
 }) {
   const [frame, setFrame] = useState<HostFrame>();
   const [frameError, setFrameError] = useState<string>();
@@ -386,51 +513,60 @@ function HostScreen({
     setHoldError(result.ok ? undefined : result.message);
   }
 
-  if (!available) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-small text-ink-secondary">
+  return (
+    <div className="scroller min-h-0 flex-1 overflow-auto px-4 py-3">
+      <ScreenHeader bot={bot} inControl={held} />
+      {!available ? (
+        <p className="rounded-xl bg-raised p-6 text-center text-small text-ink-secondary">
           {hostControl?.problem ?? "Bots can't use this computer from here."}
         </p>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
-        <p className="min-w-0 flex-1 text-small text-ink-secondary">
-          {held
-            ? "You have your computer. Bots can't use it until you hand it back."
-            : `${bot.name} can use your screen while you watch. Moving your mouse stops it.`}
-        </p>
-        <button
-          type="button"
-          className={held ? "button button-primary" : "button button-outline"}
-          onClick={() => void hold()}
-        >
-          {held ? "Hand back" : "Take control"}
-        </button>
-      </div>
-      <div className="scroller min-h-0 flex-1 overflow-auto px-2 py-3">
-        <div className="relative">
-          <ActivityOverlay activity={activity} />
-          {frame ? (
-            <img
-              alt="Your screen"
-              src={`data:image/jpeg;base64,${frame.data}`}
-              draggable={false}
-              className="w-full rounded-md border border-edge"
+      ) : (
+        <>
+          <div
+            className={`relative overflow-hidden rounded-xl bg-raised ${held ? "ring-2 ring-honey" : ""}`}
+          >
+            <ActivityOverlay activity={activity} />
+            {frame ? (
+              <img
+                alt="Your screen"
+                src={`data:image/jpeg;base64,${frame.data}`}
+                draggable={false}
+                className="block w-full"
+              />
+            ) : (
+              <p className="flex aspect-[16/10] items-center justify-center text-small text-ink-faint">
+                Waiting for your screen…
+              </p>
+            )}
+          </div>
+          {held ? (
+            <InControl
+              line="You have your computer. Bots' clicks and keystrokes are refused until you hand it back."
+              onGive={() => void hold()}
             />
           ) : (
-            <p className="text-small text-ink-faint">Waiting for your screen…</p>
+            <>
+              <button
+                type="button"
+                className="button button-primary mt-3 w-full"
+                title="Stop bots from using your computer until you hand it back"
+                onClick={() => void hold()}
+              >
+                <Hand {...iconProps} size={14} />
+                Take control
+              </button>
+              <p className="mt-2 text-small text-ink-secondary">
+                {bot.name} can use your screen while you watch. Moving your mouse stops it.
+              </p>
+            </>
           )}
-        </div>
-        {(holdError ?? frameError) && (
-          <p className="mt-2 text-small text-danger">{holdError ?? frameError}</p>
-        )}
-      </div>
-    </>
+          {(holdError ?? frameError) && (
+            <p className="mt-2 text-small text-danger">{holdError ?? frameError}</p>
+          )}
+        </>
+      )}
+      {place}
+    </div>
   );
 }
 
@@ -456,17 +592,21 @@ function parse(data: unknown) {
 const withScheme = (address: string) =>
   /^[a-z][a-z\d+.-]*:/i.test(address) ? address : `https://${address}`;
 
-// Both tabs share the one handoff socket, so the lease is the same whichever is shown.
+// Both tabs share the one handoff socket, so the lease is the same whichever is shown. The desktop
+// view stays mounted on either tab, so its connection follows the lease and not the tab.
 function Screen({
   bot,
   tab,
   activity,
+  place,
 }: {
   bot: Bot;
   tab: WorkspaceTab;
   activity: BotActivity | undefined;
+  place: ReactNode;
 }) {
   const socket = useRef<WebSocket>(null);
+  const frameBox = useRef<HTMLDivElement>(null);
   const screen = useRef<HTMLDivElement>(null);
   const pressed = useRef(false);
   const [lease, setLease] = useState<Lease>();
@@ -576,7 +716,10 @@ function Screen({
     }
   }
 
-  const showDesktop = desktop && tab === "computer";
+  const canTake = lease !== undefined && !unavailable && lease.holder !== "human";
+  const take = () => send({ type: "take" });
+  const give = () => send({ type: "give" });
+  const onDesktop = tab === "computer";
   const status = unavailable
     ? `${bot.name} has no browser running.`
     : !lease
@@ -586,121 +729,179 @@ function Screen({
         : lease.holder === "human"
           ? "Someone else has control in another window."
           : `${bot.name} has control. Take it to click and type.`;
+  const request = lease?.requested && (
+    <p className="mt-3 rounded-md border border-honey/40 px-3 py-2 text-small">
+      {requestLines[lease.requested](lease.note ?? "A site")}
+    </p>
+  );
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
-        <p className="min-w-0 flex-1 text-small text-ink-secondary">{status}</p>
-        {lease && !unavailable && (
-          <button
-            type="button"
-            className={mine ? "button button-primary" : "button button-outline"}
-            disabled={lease.holder === "human" && !mine}
-            onClick={() => send({ type: mine ? "give" : "take" })}
+      {!onDesktop && (
+        <>
+          <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-2">
+            <p className="min-w-0 flex-1 text-small text-ink-secondary">{status}</p>
+            {lease && !unavailable && (
+              <button
+                type="button"
+                className={mine ? "button button-primary" : "button button-outline"}
+                disabled={!mine && !canTake}
+                onClick={mine ? give : take}
+              >
+                {mine ? `Give back to ${bot.name}` : "Take control"}
+              </button>
+            )}
+          </div>
+          <form
+            className="flex shrink-0 items-center gap-1 border-b border-edge px-2 py-1.5"
+            onSubmit={navigate}
           >
-            {mine ? `Give back to ${bot.name}` : "Take control"}
-          </button>
-        )}
-      </div>
-      {lease?.requested && (
-        <p className="mx-3 mt-3 rounded-md border border-honey/40 px-3 py-2 text-small">
-          {requestLines[lease.requested](lease.note ?? "A site")}
-        </p>
+            <button
+              type="button"
+              aria-label="Back"
+              className="button !px-2"
+              disabled={!mine || !page?.canGoBack}
+              onClick={() => send({ type: "history", direction: "back" })}
+            >
+              <ArrowLeft {...iconProps} />
+            </button>
+            <button
+              type="button"
+              aria-label="Forward"
+              className="button !px-2"
+              disabled={!mine || !page?.canGoForward}
+              onClick={() => send({ type: "history", direction: "forward" })}
+            >
+              <ArrowRight {...iconProps} />
+            </button>
+            <button
+              type="button"
+              aria-label="Reload"
+              className="button !px-2"
+              disabled={!mine || !page}
+              onClick={() => send({ type: "reload" })}
+            >
+              <RotateCw {...iconProps} />
+            </button>
+            <input
+              aria-label="Address"
+              title={page?.title || undefined}
+              className="field min-w-0 flex-1 !py-1 !text-small text-ink"
+              readOnly={!mine}
+              spellCheck={false}
+              placeholder={mine ? "Type an address" : undefined}
+              value={address ?? page?.url ?? ""}
+              onChange={(event) => setAddress(event.target.value)}
+              onBlur={() => setAddress(undefined)}
+            />
+          </form>
+        </>
       )}
-      {tab === "browser" && (
-        <form
-          className="flex shrink-0 items-center gap-1 border-b border-edge px-2 py-1.5"
-          onSubmit={navigate}
+      <div
+        className={`scroller min-h-0 flex-1 overflow-auto ${onDesktop ? "px-4 py-3" : "px-2 py-3"}`}
+      >
+        {onDesktop && <ScreenHeader bot={bot} inControl={mine} />}
+        {!onDesktop && request}
+        <div
+          ref={frameBox}
+          className={`relative aspect-[16/10] w-full overflow-hidden rounded-xl bg-raised ${mine ? "ring-2 ring-honey" : ""} ${onDesktop && hasDesktop ? "" : "hidden"}`}
         >
-          <button
-            type="button"
-            aria-label="Back"
-            className="button !px-2"
-            disabled={!mine || !page?.canGoBack}
-            onClick={() => send({ type: "history", direction: "back" })}
-          >
-            <ArrowLeft {...iconProps} />
-          </button>
-          <button
-            type="button"
-            aria-label="Forward"
-            className="button !px-2"
-            disabled={!mine || !page?.canGoForward}
-            onClick={() => send({ type: "history", direction: "forward" })}
-          >
-            <ArrowRight {...iconProps} />
-          </button>
-          <button
-            type="button"
-            aria-label="Reload"
-            className="button !px-2"
-            disabled={!mine || !page}
-            onClick={() => send({ type: "reload" })}
-          >
-            <RotateCw {...iconProps} />
-          </button>
-          <input
-            aria-label="Address"
-            title={page?.title || undefined}
-            className="field min-w-0 flex-1 !py-1 !text-small text-ink"
-            readOnly={!mine}
-            spellCheck={false}
-            placeholder={mine ? "Type an address" : undefined}
-            value={address ?? page?.url ?? ""}
-            onChange={(event) => setAddress(event.target.value)}
-            onBlur={() => setAddress(undefined)}
-          />
-        </form>
-      )}
-      <div className="scroller min-h-0 flex-1 overflow-auto px-2 py-3">
-        <div className="relative">
-          {tab === "computer" && <ActivityOverlay activity={activity} />}
           <div
             ref={screen}
             role="img"
             aria-label={`${bot.name}'s desktop`}
-            className={`aspect-[16/10] w-full overflow-hidden rounded-md border border-edge ${showDesktop ? "" : "hidden"}`}
+            className={`size-full ${desktop ? "" : "invisible"}`}
           />
-          {showDesktop || unavailable ? null : frame?.data ? (
-            <img
-              alt={`${bot.name}'s browser`}
-              src={`data:image/jpeg;base64,${frame.data}`}
-              tabIndex={mine ? 0 : -1}
-              draggable={false}
-              className={`w-full rounded-md border border-edge outline-none ${mine ? "cursor-default focus:border-honey" : "opacity-90"}`}
-              onPointerDown={(event) => {
-                pressed.current = true;
-                event.currentTarget.focus();
-                sendMouse("down", event);
-              }}
-              onPointerUp={(event) => {
-                pressed.current = false;
-                sendMouse("up", event);
-              }}
-              onPointerMove={(event) => pressed.current && sendMouse("move", event)}
-              onWheel={(event) => sendMouse("wheel", event)}
-              onKeyDown={(event) => sendKey("down", event)}
-              onKeyUp={(event) => sendKey("up", event)}
-              onContextMenu={(event) => event.preventDefault()}
-            />
-          ) : (
-            <p className="text-small text-ink-faint">Waiting for the page…</p>
+          <ActivityOverlay activity={activity} />
+          {!desktop && (
+            <p className="absolute inset-0 flex items-center justify-center p-4 text-center text-small text-ink-faint">
+              Connecting to {bot.name}'s desktop…
+            </p>
+          )}
+          {desktop && !mine && canTake && (
+            <button
+              type="button"
+              aria-label={`Open ${bot.name}'s desktop and take control`}
+              className="group absolute inset-0 cursor-pointer"
+              onClick={take}
+            >
+              <span className="pointer-events-none absolute top-2 right-2 flex items-center gap-1 rounded-md bg-black/70 px-2 py-1 text-label font-medium text-white opacity-80 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                <Maximize2 {...iconProps} size={12} />
+                Open
+              </span>
+            </button>
           )}
         </div>
-      </div>
-      <div className="flex shrink-0 flex-col gap-2 border-t border-edge px-3 py-3">
-        {mine && showDesktop && (
-          <p className="text-small text-ink-secondary">
-            Type passwords in the private field below, not on the desktop.
-          </p>
+        {onDesktop ? (
+          <>
+            {request}
+            {mine && (
+              <InControl
+                line={`You have the wheel. ${bot.name}'s clicks and keystrokes are refused until you hand it back.`}
+                onGive={give}
+              />
+            )}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!mine && (
+                <button
+                  type="button"
+                  className="button button-primary flex-auto"
+                  disabled={!canTake}
+                  title={`Pause ${bot.name}'s hands and drive this computer yourself`}
+                  onClick={take}
+                >
+                  <Hand {...iconProps} size={14} />
+                  Take control
+                </button>
+              )}
+              <button
+                type="button"
+                className="button button-outline flex-auto"
+                disabled={!desktop}
+                onClick={() => void frameBox.current?.requestFullscreen()}
+              >
+                <Maximize2 {...iconProps} size={14} />
+                Full screen
+              </button>
+            </div>
+            {!mine && lease?.holder === "human" && (
+              <p className="mt-2 text-small text-ink-secondary">
+                Someone else has control in another window.
+              </p>
+            )}
+          </>
+        ) : unavailable ? null : frame?.data ? (
+          <img
+            alt={`${bot.name}'s browser`}
+            src={`data:image/jpeg;base64,${frame.data}`}
+            tabIndex={mine ? 0 : -1}
+            draggable={false}
+            className={`w-full rounded-md border border-edge outline-none ${mine ? "cursor-default focus:border-honey" : "opacity-90"}`}
+            onPointerDown={(event) => {
+              pressed.current = true;
+              event.currentTarget.focus();
+              sendMouse("down", event);
+            }}
+            onPointerUp={(event) => {
+              pressed.current = false;
+              sendMouse("up", event);
+            }}
+            onPointerMove={(event) => pressed.current && sendMouse("move", event)}
+            onWheel={(event) => sendMouse("wheel", event)}
+            onKeyDown={(event) => sendKey("down", event)}
+            onKeyUp={(event) => sendKey("up", event)}
+            onContextMenu={(event) => event.preventDefault()}
+          />
+        ) : (
+          <p className="text-small text-ink-faint">Waiting for the page…</p>
         )}
         {mine && (
-          <form className="flex items-center gap-2" onSubmit={typePrivately}>
+          <form className="mt-3 flex items-center gap-2" onSubmit={typePrivately}>
             <input
               type="password"
               autoComplete="off"
               aria-label="Private text"
-              placeholder="Click a field in the page, then type here"
+              placeholder="Click a field, then type here"
               className="field min-w-0 flex-1 text-ink"
               value={privateText}
               onChange={(event) => setPrivateText(event.target.value)}
@@ -710,12 +911,15 @@ function Screen({
             </button>
           </form>
         )}
-        <p className="text-label text-ink-faint">
-          What you type in the private field never reaches {bot.name}, its logs or the audit log.
-          What you type on the desktop goes to the page as you type it, and {bot.name} may read it
-          there later. The page itself may still show your account to {bot.name} later.
-          {!showDesktop && " Native dialogs and the browser's own menus don't appear in this view."}
-        </p>
+        {mine && (
+          <p className="mt-2 text-label text-ink-faint">
+            Type passwords in the private field, not on the screen. It never reaches {bot.name}, its
+            logs or the audit log. What you type on the screen goes there as you type it, and{" "}
+            {bot.name} may read it later.
+            {!onDesktop && " Native dialogs and the browser's own menus don't appear in this view."}
+          </p>
+        )}
+        {onDesktop && place}
       </div>
     </>
   );

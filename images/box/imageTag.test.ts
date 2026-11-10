@@ -11,8 +11,12 @@ const buildInputs = [
   "engine.sh",
   "browser.sh",
   "tmux.conf",
-  "openbox.xml",
   "chromium-policy.json",
+  "chromium.flags",
+  "xfce/helpers.rc",
+  "xfce/xfconf/xfce-perchannel-xml/xfce4-desktop.xml",
+  "xfce/xfconf/xfce-perchannel-xml/xfce4-panel.xml",
+  "xfce/xfconf/xfce-perchannel-xml/xsettings.xml",
 ];
 
 // A Podman machine keeps an image by its tag and setup only builds a missing one, so changed
@@ -24,6 +28,6 @@ it("names a new image tag whenever what the image is built from changes", () => 
   }
   const { image } = JSON.parse(readFileSync(join(imageDir, "runSpec.json"), "utf8"));
   expect(`${image} ${hash.digest("hex").slice(0, 16)}`).toBe(
-    "localhost/beebot-box:2 c0de87269de2a3e0",
+    "localhost/beebot-box:3 cdc42567ec5e24fc",
   );
 });

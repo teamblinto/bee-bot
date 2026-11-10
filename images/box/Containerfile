@@ -1,13 +1,16 @@
 FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # Engine: tmux, git, and what the vendor installers need (bash, curl, CA roots).
-# Browser: headed Chromium and fonts on a desktop (Xvfb, dbus, openbox, portals for file
-# pickers), a VNC server, xdotool and ImageMagick for input and screenshots, and socat for boxd
-# to reach loopback-only DevTools and the VNC socket via podman exec.
+# Computer: an Xfce desktop on Xvfb (window manager, panels, desktop icons, terminal, file
+# manager, app finder) with headed Chromium, dbus and portals for file pickers, a VNC server,
+# xdotool and ImageMagick for input and screenshots, and socat for boxd to reach loopback-only
+# DevTools and the VNC socket via podman exec.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates curl git tmux \
       chromium fonts-noto-core socat \
-      xvfb openbox dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk x11vnc xdotool imagemagick \
+      xvfb dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk x11vnc xdotool imagemagick \
+      xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf xfce4-terminal thunar xfce4-appfinder \
+      exo-utils x11-utils elementary-xfce-icon-theme \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -u 10001 -U -m -d /home/bee -s /bin/bash bee \
  && install -d -o 10001 -g 10001 /work /browser /downloads
@@ -15,7 +18,8 @@ RUN apt-get update \
 COPY --chmod=0755 engine.sh /usr/local/bin/bee-engine
 COPY --chmod=0755 browser.sh /usr/local/bin/bee-browser
 COPY tmux.conf /etc/bee/tmux.conf
-COPY openbox.xml /etc/bee/openbox.xml
+COPY xfce/ /etc/xdg/xfce4/
+COPY chromium.flags /etc/chromium.d/bee
 COPY chromium-policy.json /etc/chromium/policies/managed/bee.json
 
 # /home/bee is the persistent volume the vendor installers write into (~/.local/bin).

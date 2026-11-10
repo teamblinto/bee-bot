@@ -2,7 +2,7 @@ import {
   Bot,
   type BoxAvailability,
   BotProfile,
-  BotControl,
+  type BotControl,
   defaultBotModel,
   EngineAccountId,
   EngineLane,
@@ -20,6 +20,7 @@ import {
 import { codexRulesWarning, laneLabels, projectPathValue } from "../labels";
 import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { Avatar } from "./Avatar";
+import { controlOptions, controlOrder } from "./controlOptions";
 import { ModelPicker } from "./ModelPicker";
 import { AutomatedAccessNotice } from "./VaultPanel";
 import { iconProps } from "./ui";
@@ -40,13 +41,6 @@ const profileLabels: Record<BotProfile, { name: string; help: string }> = {
     name: "Researcher",
     help: "Reads the web and acts, but holds none of your private data. Reaching your data waits for you.",
   },
-};
-
-const controlLabels: Record<BotControl, { name: string; help: string }> = {
-  browser: { name: "Own browser", help: "Web pages only, in a box apart from your computer" },
-  computer: { name: "Own computer", help: "A private desktop with a browser, in a box" },
-  host: { name: "This computer", help: "Your screen and apps, only while you watch" },
-  none: { name: "None", help: "No browser or computer" },
 };
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
@@ -311,7 +305,7 @@ export function BotForm({
       </p>
       <fieldset className={labelClass}>
         <legend className="mb-1">Works on</legend>
-        {BotControl.options.map((option) => {
+        {controlOrder.map((option) => {
           // A bot already on this computer can always stay or leave.
           const unavailable =
             option === "host" && bot?.control !== "host" && hostControl?.available !== true;
@@ -328,12 +322,12 @@ export function BotForm({
               />
               <span className="flex flex-col">
                 <span className={unavailable ? "text-ink-faint" : "text-ink"}>
-                  {controlLabels[option].name}
+                  {controlOptions[option].name}
                 </span>
                 <span className="text-small">
                   {unavailable
                     ? (hostControl?.problem ?? "Bots can't use this computer from here.")
-                    : controlLabels[option].help}
+                    : controlOptions[option].help}
                 </span>
               </span>
             </label>
