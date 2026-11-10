@@ -29,7 +29,6 @@ const bot: Bot = {
   effort: null,
   mode: "build",
   access: "supervised",
-  profile: "operator",
   boundary: "host",
   manifest: [],
   control: "none",

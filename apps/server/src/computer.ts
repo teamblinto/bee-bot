@@ -425,6 +425,6 @@ export function computerExecutors(computer: Pick<Computer, "perform">) {
       output: ok ? `${tool} ran. Take a screenshot to see the screen now.` : said.join("\n"),
     };
   };
-  // A screenshot too: an Operator's first one adds the untrusted-read leg, so it asks.
+  // A screenshot too, for an injected policy that asks about one.
   return [...computerToolNames].map((name) => [name, execute] as const);
 }

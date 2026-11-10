@@ -262,12 +262,13 @@ type Run = RunMode & { id: string; botId: string; tokenHash: Buffer };
 
 // Runs only after the path policy passed, so a forbidden path never gets here. A Plan turn is
 // asked about everything: the CLI leaves Bash to the model there, and the owner asked for no changes.
+// Full access with nobody watching is still bounded by the broker's Rule of Two.
 function accessAllows(access: BotAccess, tool: ApprovalTool, inside: boolean, run: RunMode) {
   if (run.plan) {
     return false;
   }
   if (access === "full") {
-    return run.attended;
+    return true;
   }
   return (
     access === "auto-edits" && inside && (tool === "Write" || tool === "Edit" || tool === "Patch")
@@ -535,21 +536,27 @@ export function createApprovals({
         store.auditTool(run.id, run.botId, tool, "refused", null);
         return { behavior: "deny", message: policy.message };
       }
-      const bot = store.getBot(run.botId);
-      if (bot?.boundary === "box") {
-        return boxApprove(run, bot, tool, input, toolUseId, ruling);
-      }
-      if (ruling.kind !== "allow") {
-        return { behavior: "deny", message: refusedText(ruling) };
-      }
       // Read on every call, so lowering the level holds the running turn's next call.
       const access = store.botAccess(run.botId);
-      if (access && accessAllows(access, tool, policy.inside, run)) {
+      const accessAllowed =
+        ruling.kind === "allow" &&
+        access !== undefined &&
+        accessAllows(access, tool, policy.inside, run);
+      const bot = store.getBot(run.botId);
+      if (bot?.boundary === "box") {
+        // Reading inside the box needs no one: it holds nothing of the owner's.
+        const asks = ruling.kind === "allow" && !accessAllowed && !alwaysAllowable.has(tool);
+        return boxApprove(run, bot, tool, input, toolUseId, asks ? { kind: "approve" } : ruling);
+      }
+      if (ruling.kind === "deny" || ruling.kind === "hand_off") {
+        return { behavior: "deny", message: refusedText(ruling) };
+      }
+      if (accessAllowed) {
         store.auditTool(run.id, run.botId, tool, "allowed", `access:${access}`);
         return { behavior: "allow", updatedInput: input };
       }
       const canAlwaysAllow = alwaysAllowable.has(tool) && policy.inside;
-      if (canAlwaysAllow && store.toolGranted(run.botId, tool)) {
+      if (ruling.kind === "allow" && canAlwaysAllow && store.toolGranted(run.botId, tool)) {
         store.auditTool(run.id, run.botId, tool, "allowed", "always");
         return { behavior: "allow", updatedInput: input };
       }

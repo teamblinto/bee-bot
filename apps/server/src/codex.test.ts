@@ -7,7 +7,6 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   type BotAccess,
-  type BotProfile,
   type Command,
   type EngineLane,
   EngineStatus,
@@ -838,7 +837,6 @@ describe("through the real server, store and approvals", () => {
     scenario: string,
     access: BotAccess = "supervised",
     lane: EngineLane = "subscription",
-    profile: BotProfile = "operator",
   ) {
     const store = openEventStore(dataDir);
     const server = await startServer({
@@ -891,7 +889,6 @@ describe("through the real server, store and approvals", () => {
       })
     ).json()) as { id: string; roomId: string };
     await post({ type: "set-bot-engine", botId: bot.id, access });
-    await post({ type: "set-bot-profile", botId: bot.id, profile });
     await post({ type: "set-account-lane", engineAccountId: "claude", lane });
     plantEnv("FAKE_PROJECT", workspacePath(dataDir, bot.id));
     await post({
@@ -951,14 +948,6 @@ describe("through the real server, store and approvals", () => {
     expect(decisions()).toEqual(["accept"]);
     expect(auditRows()).toEqual([{ tool: "Bash", status: "allowed", reason: "owner" }]);
     expect(brokerRows()).toEqual([{ tool: "Bash", status: "allow" }]);
-  });
-
-  it("declines a command the bot's profile doesn't allow, before any card", async () => {
-    await boot("approve", "full", "subscription", "reader");
-    await runFinished();
-    expect(decisions()).toEqual(["decline"]);
-    expect(brokerRows()).toEqual([{ tool: "Bash", status: "approve" }]);
-    expect(auditRows()).toEqual([]);
   });
 
   it("declines a command the owner denied", async () => {

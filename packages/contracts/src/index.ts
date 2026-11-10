@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 29;
+export const protocolVersion = 30;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -90,11 +90,6 @@ export type BotMode = z.infer<typeof BotMode>;
 export const BotAccess = z.enum(["supervised", "auto-edits", "full"]);
 export type BotAccess = z.infer<typeof BotAccess>;
 
-// Rule of Two: Reader holds untrusted input and private data, Researcher untrusted input and side
-// effects, Operator private data and side effects. A session with all three needs a person.
-export const BotProfile = z.enum(["reader", "researcher", "operator"]);
-export type BotProfile = z.infer<typeof BotProfile>;
-
 // Only a box run may be unattended.
 export const BotBoundary = z.enum(["host", "box"]);
 export type BotBoundary = z.infer<typeof BotBoundary>;
@@ -148,7 +143,6 @@ export const Bot = z.object({
   effort: Effort.nullable(),
   mode: BotMode,
   access: BotAccess,
-  profile: BotProfile,
   boundary: BotBoundary,
   manifest: Manifest,
   control: BotControl,
@@ -908,7 +902,6 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("delete-routine"), routineId: z.uuid() }),
   z.object({ type: z.literal("start-firing"), firingId: z.uuid() }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
-  z.object({ type: z.literal("set-bot-profile"), botId: z.uuid(), profile: BotProfile }),
   // Box mode (R17). On a hand_off, "approve" means the owner did it themselves.
   z.object({
     type: z.literal("decide-continuation"),

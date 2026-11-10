@@ -4,9 +4,9 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   type AuditPage,
   type Bot,
+  BotAccess,
   type BotBoundary,
   BotControl,
-  BotProfile,
   type EngineLane,
   type Manifest,
 } from "@beebot/contracts";
@@ -28,7 +28,7 @@ export type BrokerRun = { id: string; botId: string; attended: boolean };
 
 const flag = z.number().transform((value) => value === 1);
 const Legs = z.object({ readsUntrusted: flag, readsPrivate: flag, sideEffect: flag });
-const BotPolicy = z.object({ profile: BotProfile, manifest: z.string(), control: BotControl });
+const BotPolicy = z.object({ access: BotAccess, manifest: z.string(), control: BotControl });
 
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -55,8 +55,7 @@ export function openPolicy(
   getBot: (id: string) => Bot | undefined,
 ) {
   const { appendAudit, auditPage, brokenAuditRow } = openAudit(db);
-  const selectBotPolicy = db.prepare("SELECT profile, manifest, control FROM bots WHERE id = ?");
-  const updateProfile = db.prepare("UPDATE bots SET profile = ? WHERE id = ?");
+  const selectBotPolicy = db.prepare("SELECT access, manifest, control FROM bots WHERE id = ?");
   const updateManifest = db.prepare("UPDATE bots SET manifest = ? WHERE id = ?");
   const updateBoundary = db.prepare(
     "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
@@ -106,11 +105,11 @@ export function openPolicy(
         const rule = ruleFor(tool);
         let decision: PolicyDecision = { kind: "deny", reason: "unknown_run" };
         if (row && legsRow) {
-          const { profile, manifest, control } = BotPolicy.parse(row);
+          const { access, manifest, control } = BotPolicy.parse(row);
           decision = decideTool(
             { botId: run.botId, runId: run.id, tool },
             {
-              profile,
+              access,
               manifest: grantsOf(parseManifest(manifest), control),
               session: Legs.parse(legsRow),
               attended: run.attended,
@@ -135,24 +134,6 @@ export function openPolicy(
           digest: rule && !rule.typed ? digestOf(tool, args) : null,
         });
         return decision;
-      }),
-
-    setBotProfile: (botId: string, profile: BotProfile) =>
-      transaction(() => {
-        updateProfile.run(profile, botId);
-        const bot = getBot(botId);
-        if (bot) {
-          emit({ type: "bot.changed", bot });
-          appendAudit({
-            runId: null,
-            botId,
-            initiator: "human",
-            attended: true,
-            status: "profile_set",
-            reason: profile,
-          });
-        }
-        return bot;
       }),
 
     // Takes effect at the next call: every call reads the manifest afresh.
@@ -296,7 +277,7 @@ export function refusedText(decision: Exclude<PolicyDecision, { kind: "allow" }>
   return JSON.stringify({ status: "refused", reason, note: refusals[decision.kind] });
 }
 
-// For Bee's own tools on /mcp. Until approvals can wait (workstream 5), approve and hand_off refuse.
+// For Bee's own tools on /mcp. The broker never asks about them, so only a refusal stops one.
 export function gateTool(
   policy: Policy,
   run: BrokerRun,

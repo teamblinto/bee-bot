@@ -99,7 +99,6 @@ const ready: BoxAvailability = {
 
 async function show(
   tab: "computer" | "browser" = "computer",
-  onEdit = vi.fn(),
   shown = bot,
   boxes: BoxAvailability | undefined = ready,
 ) {
@@ -115,7 +114,6 @@ async function show(
         liveTab={undefined}
         onTab={vi.fn()}
         onClose={vi.fn()}
-        onEdit={onEdit}
       />,
     ),
   );
@@ -259,10 +257,9 @@ it("resizes within its bounds and remembers the width", async () => {
   expect(query("[role=separator]")?.getAttribute("aria-valuenow")).toBe(String(minWidth));
 });
 
-it("switches where a bot works from its panel, and asks the settings before this PC", async () => {
-  const onEdit = vi.fn();
+it("switches where a bot works from its panel, and asks consent there before this PC", async () => {
   const off = { ...bot, control: "none" as const };
-  await show("computer", onEdit, off);
+  await show("computer", off);
   expect(sockets).toHaveLength(0);
   expect(postCommand).not.toHaveBeenCalled();
   expect(host.textContent).toContain("Ada has no screen.");
@@ -278,25 +275,41 @@ it("switches where a bot works from its panel, and asks the settings before this
   });
 
   postCommand.mockClear();
-  await act(async () =>
-    root.render(
-      <Workspace
-        bot={off}
-        boxes={ready}
-        hostControl={{ available: true, problem: null, held: false }}
-        working={false}
-        activity={undefined}
-        tab="computer"
-        liveTab={undefined}
-        onTab={vi.fn()}
-        onClose={vi.fn()}
-        onEdit={onEdit}
-      />,
-    ),
-  );
+  const showOff = (access: Bot["access"]) =>
+    act(async () =>
+      root.render(
+        <Workspace
+          bot={{ ...off, access }}
+          boxes={ready}
+          hostControl={{ available: true, problem: null, held: false }}
+          working={false}
+          activity={undefined}
+          tab="computer"
+          liveTab={undefined}
+          onTab={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      ),
+    );
+  await showOff("supervised");
   await act(async () => button("This PC")?.click());
-  expect(onEdit).toHaveBeenCalled();
   expect(postCommand).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("Let Ada use this PC?");
+  expect(host.textContent).not.toContain("Full access");
+  await act(async () => button("Cancel")?.click());
+  expect(host.textContent).not.toContain("Let Ada use this PC?");
+  expect(postCommand).not.toHaveBeenCalled();
+
+  await showOff("full");
+  await act(async () => button("This PC")?.click());
+  expect(host.textContent).toContain("With Full access it won't ask before each click.");
+  await act(async () => button("Use this PC")?.click());
+  expect(postCommand).toHaveBeenCalledWith({
+    type: "set-bot-control",
+    botId: bot.id,
+    control: "host",
+  });
+  expect(host.textContent).not.toContain("Let Ada use this PC?");
 
   postCommand.mockResolvedValue({ ok: false, message: "This bot is working." });
   await act(async () => button("Browser")?.click());
@@ -306,17 +319,17 @@ it("switches where a bot works from its panel, and asks the settings before this
 it("sets up computers from the panel when the bot wants one and boxes aren't ready", async () => {
   postCommand.mockResolvedValue({ ok: true, body: {} });
   const stopped = { ...ready, available: false, boxdInstalled: false, problem: "Not running." };
-  await show("computer", vi.fn(), bot, stopped);
+  await show("computer", bot, stopped);
   expect(sockets).toHaveLength(0);
   await act(async () => query<HTMLButtonElement>("aside button.button-primary")?.click());
   expect(postCommand).toHaveBeenCalledWith({ type: "set-up-boxes" });
   const downloading = { label: "Downloading", fraction: 0.42, detail: "42 MB of 100 MB" };
-  await show("computer", vi.fn(), bot, { ...stopped, settingUp: true, progress: downloading });
+  await show("computer", bot, { ...stopped, settingUp: true, progress: downloading });
   expect(query("aside button.button-primary")).toBeNull();
   const bar = query("[role=progressbar]");
   expect(bar?.getAttribute("aria-valuenow")).toBe("42");
   expect(bar?.getAttribute("aria-valuetext")).toBe("42 MB of 100 MB");
-  await show("computer", vi.fn(), bot, {
+  await show("computer", bot, {
     ...stopped,
     settingUp: true,
     progress: { ...downloading, fraction: null, detail: null },
@@ -394,14 +407,14 @@ it("shows only the tabs the bot's control mode has", async () => {
   expect(tabNames()).toEqual(["Screen", "Browser"]);
 
   postCommand.mockClear();
-  await show("browser", vi.fn(), { ...bot, control: "browser" });
+  await show("browser", { ...bot, control: "browser" });
   expect(tabNames()).toEqual(["Screen", "Browser"]);
   expect(postCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "display-ticket" }));
 
   await showHost({ available: true, problem: null, held: false });
   expect(tabNames()).toEqual(["Screen"]);
 
-  await show("computer", vi.fn(), { ...bot, control: "none" });
+  await show("computer", { ...bot, control: "none" });
   expect(tabNames()).toEqual(["Screen"]);
 });
 
@@ -418,7 +431,6 @@ async function showHost(hostControl: HostControlAvailability | undefined, workin
         liveTab={undefined}
         onTab={vi.fn()}
         onClose={vi.fn()}
-        onEdit={vi.fn()}
       />,
     ),
   );

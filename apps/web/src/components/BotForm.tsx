@@ -1,7 +1,6 @@
 import {
   Bot,
   type BoxAvailability,
-  BotProfile,
   type BotControl,
   defaultBotModel,
   EngineAccountId,
@@ -26,22 +25,6 @@ import { AutomatedAccessNotice } from "./VaultPanel";
 import { iconProps } from "./ui";
 
 const randomSeed = () => crypto.getRandomValues(new Uint32Array(1))[0] ?? 0;
-
-// Rule of Two: each profile holds two of untrusted input, private data and side effects.
-const profileLabels: Record<BotProfile, { name: string; help: string }> = {
-  operator: {
-    name: "Operator",
-    help: "Works on your files and data and acts on them. Reading untrusted content, such as web pages, waits for you.",
-  },
-  reader: {
-    name: "Reader",
-    help: "Reads untrusted content and your private data, but only reports back to you. Acting or sending waits for you.",
-  },
-  researcher: {
-    name: "Researcher",
-    help: "Reads the web and acts, but holds none of your private data. Reaching your data waits for you.",
-  },
-};
 
 const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
 
@@ -80,7 +63,6 @@ export function BotForm({
     () => getConnectionState().chat.accounts,
   );
   const [laneChoice, setLaneChoice] = useState<EngineLane>();
-  const [profile, setProfile] = useState<BotProfile>(bot?.profile ?? "operator");
   const [inBox, setInBox] = useState(bot?.boundary === "box");
   const [anySite, setAnySite] = useState(bot?.egressAnySite ?? true);
   const [egressHosts, setEgressHosts] = useState(bot?.egressHosts ?? []);
@@ -151,10 +133,6 @@ export function BotForm({
               : { type: "create-bot", ...fields, engineAccountId: engine },
           );
     const created = result.ok ? Bot.safeParse(result.body).data : undefined;
-    const profileResult =
-      created && created.profile !== profile
-        ? await postCommand({ type: "set-bot-profile", botId: created.id, profile })
-        : undefined;
     const controlResult =
       created && created.control !== control
         ? await postCommand({ type: "set-bot-control", botId: created.id, control })
@@ -188,14 +166,7 @@ export function BotForm({
         : undefined;
     saving.current = false;
     setBusy(false);
-    const results = [
-      result,
-      profileResult,
-      controlResult,
-      boundaryResult,
-      egressResult,
-      unattendedResult,
-    ];
+    const results = [result, controlResult, boundaryResult, egressResult, unattendedResult];
     // The first refusal, so a later step that went through can't hide it.
     const last =
       results.find((step) => step?.ok === false) ??
@@ -285,24 +256,6 @@ export function BotForm({
           the key and pauses bots if the login doesn't match.
         </p>
       )}
-      <label className={labelClass}>
-        Profile
-        <select
-          className="field text-ink"
-          aria-describedby="profile-help"
-          value={profile}
-          onChange={(event) => setProfile(BotProfile.parse(event.target.value))}
-        >
-          {BotProfile.options.map((option) => (
-            <option key={option} value={option}>
-              {profileLabels[option].name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <p id="profile-help" className="text-small text-ink-secondary">
-        {profileLabels[profile].help} With nobody watching, it is refused.
-      </p>
       <fieldset className={labelClass}>
         <legend className="mb-1">Works on</legend>
         {controlOrder.map((option) => {

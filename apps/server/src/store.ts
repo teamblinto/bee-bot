@@ -8,7 +8,6 @@ import {
   type ApprovalTool,
   Bot,
   type BotAccess,
-  type BotProfile,
   ChatMessage,
   type ChatState,
   defaultBotModel,
@@ -39,7 +38,7 @@ import { openEgress } from "./egress.ts";
 import type { BotLaunch } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
-import { parseManifest, profileLegs } from "./broker.ts";
+import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
@@ -671,6 +670,15 @@ export const migrations: Array<{
       manifest = (SELECT json_group_array(value) FROM
         (SELECT value FROM json_each(bots.manifest) WHERE value <> 'browser' ORDER BY value));`,
   },
+  {
+    name: "access_only",
+    // Stored events lack the removed field, so they would not parse. Clients get a snapshot.
+    // Access is the only setting now. A Reader or Researcher couldn't run commands unasked, so it
+    // keeps asking.
+    sql: `DELETE FROM events;
+    UPDATE bots SET access = 'supervised' WHERE profile IN ('reader', 'researcher');
+    ALTER TABLE bots DROP COLUMN profile;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -931,7 +939,7 @@ export function openEventStore(dataDir: string) {
 
   const botColumns = `b.id, b.name, b.personality, b.summary, b.status, b.pause_reason AS pauseReason,
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
-    b.profile, b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
+    b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
     b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
@@ -1010,7 +1018,6 @@ export function openEventStore(dataDir: string) {
   );
   const heldLegs = (scopeId: string) =>
     z.object({ untrusted: z.number(), private: z.number() }).parse(selectHeldLegs.get(scopeId));
-  const isUntrusted = (scopeId: string) => heldLegs(scopeId).untrusted === 1;
   const holdPrivate = db.prepare("UPDATE scopes SET legs_private = 1 WHERE id = ?");
   // A scope's input is every message in its room but its own bot's. Bot rows from before bot_id
   // are the scope's own bot.
@@ -1572,11 +1579,6 @@ export function openEventStore(dataDir: string) {
     }
   }
 
-  const withMemory = (profile: BotProfile, scopeId: string) => {
-    const allowed = profileLegs[profile];
-    return allowed.readsPrivate && (allowed.readsUntrusted || !isUntrusted(scopeId));
-  };
-
   const hasTaintedInput = (scope: Scope, highSeq: number) =>
     selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId) !== undefined;
 
@@ -1586,13 +1588,13 @@ export function openEventStore(dataDir: string) {
     }
   };
 
-  // A profile that may not read untrusted input could still answer it from private data its
-  // transcript already holds, and a reply passes no broker check. So that input opens a new session.
-  const needsCleanSession = (scope: Scope, profile: BotProfile, highSeq: number) => {
+  // An unattended run could answer untrusted input from private data its transcript already
+  // holds, and a reply passes no broker check. So that input opens a new session.
+  const needsCleanSession = (scope: Scope, attended: boolean, highSeq: number) => {
     const held = heldLegs(scope.id);
     return (
       scope.sessionStarted &&
-      !profileLegs[profile].readsUntrusted &&
+      !attended &&
       held.private === 1 &&
       held.untrusted === 0 &&
       hasTaintedInput(scope, highSeq)
@@ -2394,12 +2396,14 @@ export function openEventStore(dataDir: string) {
           return undefined;
         }
         const run = RunRow.parse(row);
-        const { name, personality, model, effort, mode, projectPath, profile, control } =
-          BotRow.parse(selectBot.get(run.botId));
+        const { name, personality, model, effort, mode, projectPath, control } = BotRow.parse(
+          selectBot.get(run.botId),
+        );
+        const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
         let scope = getScope(run.scopeId);
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         let sessionId = scope.sessionId;
-        if (!sessionId || needsCleanSession(scope, profile, highSeq)) {
+        if (!sessionId || needsCleanSession(scope, attended, highSeq)) {
           sessionId = NodeCrypto.randomUUID();
           saveSession.run(sessionId, scope.id);
           scope = getScope(scope.id);
@@ -2407,10 +2411,9 @@ export function openEventStore(dataDir: string) {
         pinInput.run(highSeq, id);
         taintFromInput(scope, highSeq);
         recordRun(run);
-        // Memory is private data: a Researcher never holds it (§12), and an Operator only while its
-        // session has taken in nothing untrusted, since its reply can reach a bot. The session
-        // holds it from here on, so the broker counts it.
-        const memory = withMemory(profile, scope.id)
+        // Memory is private data, so the session holds it from here on. With nobody watching it
+        // isn't given up front: the run may choose untrusted input instead, and search memory if not.
+        const memory = attended
           ? buildMemory(z.array(MemoryItem).parse(selectActiveItems.all(run.botId)))
           : "";
         if (memory) {
@@ -2418,7 +2421,7 @@ export function openEventStore(dataDir: string) {
         }
         return {
           id,
-          attended: Attended.parse(selectWakeAttended.get(run.wakeId)).attended,
+          attended,
           sessionId,
           resume: scope.sessionStarted,
           prompt: turnPrompt(scope, highSeq),
@@ -2462,8 +2465,8 @@ export function openEventStore(dataDir: string) {
         return undefined;
       }
       // Left to the pending wake, whose claim opens the new session.
-      const { profile } = BotRow.parse(selectBot.get(run.botId));
-      if (needsCleanSession(scope, profile, highSeq)) {
+      const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
+      if (needsCleanSession(scope, attended, highSeq)) {
         return undefined;
       }
       return { text: inputText(scope, input), highSeq };

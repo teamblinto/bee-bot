@@ -183,7 +183,6 @@ export function Workspace({
   liveTab,
   onTab,
   onClose,
-  onEdit,
 }: {
   bot: Bot;
   boxes: BoxAvailability | undefined;
@@ -194,7 +193,6 @@ export function Workspace({
   liveTab: WorkspaceTab | undefined;
   onTab: (tab: WorkspaceTab) => void;
   onClose: () => void;
-  onEdit: () => void;
 }) {
   const [width, setWidth] = useState(loadWidth);
   const drag = useRef<{ x: number; width: number }>(null);
@@ -206,7 +204,7 @@ export function Workspace({
     }
   }
 
-  const place = <WhereWorks bot={bot} hostControl={hostControl} onEdit={onEdit} />;
+  const place = <WhereWorks bot={bot} hostControl={hostControl} />;
 
   return (
     <aside
@@ -359,32 +357,36 @@ function InControl({ line, onGive }: { line: string; onGive: () => void }) {
 }
 
 // The mode is the bot's own setting, so changing it here is the same as in its settings. Moving
-// onto the owner's computer needs their consent, which only the settings ask for.
+// onto the owner's computer asks for their consent first, here in the panel.
 function WhereWorks({
   bot,
   hostControl,
-  onEdit,
 }: {
   bot: Bot;
   hostControl: HostControlAvailability | undefined;
-  onEdit: () => void;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
+  const [askingConsent, setAskingConsent] = useState(false);
 
-  async function choose(control: BotControl) {
-    if (control === bot.control || pending) {
-      return;
-    }
-    if (control === "host") {
-      onEdit();
-      return;
-    }
+  async function switchTo(control: BotControl) {
+    setAskingConsent(false);
     setPending(true);
     setError(undefined);
     const result = await postCommand({ type: "set-bot-control", botId: bot.id, control });
     setPending(false);
     setError(result.ok ? undefined : result.message);
+  }
+
+  function choose(control: BotControl) {
+    if (control === bot.control || pending) {
+      return;
+    }
+    if (control === "host") {
+      setAskingConsent(true);
+      return;
+    }
+    void switchTo(control);
   }
 
   return (
@@ -405,7 +407,7 @@ function WhereWorks({
                 unavailable ? (hostControl?.problem ?? undefined) : controlOptions[control].help
               }
               className={`flex min-w-0 flex-col items-center gap-1.5 rounded-lg border px-1.5 py-2.5 text-center transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${selected ? "border-honey bg-honey-surface text-ink" : "border-edge text-ink-secondary enabled:hover:border-honey/60 enabled:hover:bg-hover"}`}
-              onClick={() => void choose(control)}
+              onClick={() => choose(control)}
             >
               <Icon {...iconProps} size={16} className={selected ? "text-honey" : undefined} />
               <span className="w-full truncate text-label font-medium">{name}</span>
@@ -414,7 +416,36 @@ function WhereWorks({
           );
         })}
       </div>
-      <p className="mt-3 text-small text-ink-secondary">{controlOptions[bot.control].line}</p>
+      {askingConsent ? (
+        <div
+          role="group"
+          aria-label={`Let ${bot.name} use this PC?`}
+          className="mt-3 rounded-lg border border-honey/40 bg-honey-surface p-3"
+        >
+          <p className="text-small font-medium text-ink">Let {bot.name} use this PC?</p>
+          <p className="mt-1 text-small text-ink-secondary">
+            {bot.name} will see screenshots of your screen, which go to its model provider, and will
+            move your mouse and type. It can reach your apps and the accounts you're signed in to.
+            It works only while you watch, and moving your mouse stops it.
+            {bot.access === "full" && " With Full access it won't ask before each click."}
+          </p>
+          <div className="mt-3 flex justify-end gap-2">
+            <button type="button" className="button" onClick={() => setAskingConsent(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              autoFocus
+              onClick={() => void switchTo("host")}
+            >
+              Use this PC
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="mt-3 text-small text-ink-secondary">{controlOptions[bot.control].line}</p>
+      )}
       {error && <p className="mt-2 text-small text-danger">{error}</p>}
     </section>
   );

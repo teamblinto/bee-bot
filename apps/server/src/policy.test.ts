@@ -65,7 +65,7 @@ describe("broker taint", () => {
     expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("deny");
     expect(legs(run.id)).toMatchObject({ a: 0 });
     db.prepare("UPDATE bots SET control = 'browser' WHERE id = ?").run(bot.id);
-    expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("approve");
+    expect(store.policy.check(run, "browser_navigate", { url: "https://x" }).kind).toBe("allow");
     expect(legs(run.id)).toEqual({ a: 1, b: 1, c: 1, tainted: 1 });
   });
 
@@ -81,14 +81,12 @@ describe("broker taint", () => {
     expect(legs(run.id)).toEqual({ a: 0, b: 1, c: 0, tainted: 0 });
   });
 
-  it("follows a profile change on the next call", () => {
-    const { bot, run } = startRun(false);
-    expect(store.policy.check(run, "send_message", { text: "x" }).kind).toBe("allow");
-    expect(store.policy.setBotProfile(bot.id, "reader")?.profile).toBe("reader");
-    expect(store.policy.check(run, "send_message", { text: "x" })).toEqual({
-      kind: "deny",
-      reason: "nobody_watching",
-    });
+  it("follows an Access change on the next call", () => {
+    const { bot, run } = startRun();
+    db.prepare("UPDATE bots SET control = 'browser', access = 'full' WHERE id = ?").run(bot.id);
+    expect(store.policy.check(run, "browser_click", { index: 1 }).kind).toBe("allow");
+    db.prepare("UPDATE bots SET access = 'supervised' WHERE id = ?").run(bot.id);
+    expect(store.policy.check(run, "browser_click", { index: 1 }).kind).toBe("approve");
   });
 });
 
@@ -111,10 +109,7 @@ describe("audit", () => {
 
   it("keeps no digest of typed input", () => {
     const { bot, run } = startRun();
-    db.prepare("UPDATE bots SET control = 'browser', profile = ? WHERE id = ?").run(
-      "researcher",
-      bot.id,
-    );
+    db.prepare("UPDATE bots SET control = 'browser' WHERE id = ?").run(bot.id);
     store.policy.check(run, "browser_type", { text: "hunter2" });
     expect(lastAudit()).toMatchObject({ tool: "browser_type", digest: null });
   });
@@ -224,6 +219,37 @@ describe("the bot_control migration", () => {
         { id: "granted", control: "computer", manifest: '["gmail.send"]' },
         { id: "plain", control: "none", manifest: '["gmail.send"]' },
       ]);
+    } finally {
+      before.close();
+      NodeFS.rmSync(old, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the access_only migration", () => {
+  it("keeps a Reader or Researcher asking, and drops the profile", () => {
+    const old = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-access-"));
+    const before = new DatabaseSync(NodePath.join(old, "beebot.db"));
+    try {
+      migrate(
+        before,
+        migrations.findIndex(({ name }) => name === "access_only"),
+      );
+      const insert = before.prepare(
+        `INSERT INTO bots (id, name, personality, status, created_at, access, profile)
+         VALUES (?, 'Ada', '', 'ready', 'then', 'full', ?)`,
+      );
+      for (const profile of ["reader", "researcher", "operator"]) {
+        insert.run(profile, profile);
+      }
+      migrate(before);
+      expect(before.prepare("SELECT id, access FROM bots ORDER BY id").all()).toEqual([
+        { id: "operator", access: "full" },
+        { id: "reader", access: "supervised" },
+        { id: "researcher", access: "supervised" },
+      ]);
+      const columns = before.prepare("SELECT name FROM pragma_table_info('bots')").all();
+      expect(columns).not.toContainEqual({ name: "profile" });
     } finally {
       before.close();
       NodeFS.rmSync(old, { recursive: true, force: true });

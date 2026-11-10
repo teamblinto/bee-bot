@@ -81,7 +81,6 @@ const bot = {
   effort: null,
   mode: "build",
   access: "supervised",
-  profile: "operator",
   boundary: "host",
   manifest: [] as string[],
   control: "none",

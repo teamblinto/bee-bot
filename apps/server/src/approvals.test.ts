@@ -1208,7 +1208,7 @@ describe("access levels", () => {
     expect(await decisionOf(await held)).toMatchObject({ behavior: "deny" });
   });
 
-  it("gives full access to attended runs only", async () => {
+  it("lets an unattended Full access run act, until the Rule of Two refuses it", async () => {
     const store = openEventStore(dataDir);
     cleanups.push(() => store.close());
     const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
@@ -1228,15 +1228,21 @@ describe("access levels", () => {
     const mode = { attended: false, plan: false };
     approvals.openRun(claimed?.id as string, bot.id, mode);
     const run = { ...mode, id: claimed?.id as string, botId: bot.id, tokenHash: Buffer.alloc(0) };
-    const closed = new AbortController();
-    const decision = approvals.approve(
-      run,
-      { tool_name: "Bash", input: { command: "ls" } },
-      closed.signal,
-    );
-    expect(approvals.pending()).toHaveLength(1);
-    closed.abort();
-    expect(await decision).toMatchObject({ behavior: "deny" });
+    const bash = () =>
+      approvals.approve(
+        run,
+        { tool_name: "Bash", input: { command: "ls" } },
+        new AbortController().signal,
+      );
+    expect(await bash()).toMatchObject({ behavior: "allow" });
+    // Untrusted input arrives: the session now holds both kinds of read.
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.prepare(
+      "UPDATE scopes SET legs_untrusted = 1 WHERE id = (SELECT scope_id FROM runs WHERE id = ?)",
+    ).run(claimed?.id as string);
+    db.close();
+    expect(await bash()).toMatchObject({ behavior: "deny" });
+    expect(approvals.pending()).toEqual([]);
   });
 });
 
@@ -1616,7 +1622,7 @@ describe("in Box mode a tool call", () => {
     expect(ran).toHaveLength(1);
   });
 
-  it("holds an approved browser action as a continuation, and performs it once", async () => {
+  it("holds a Supervised browser action as a continuation, and performs it once", async () => {
     const replies: string[] = [];
     let calls = 0;
     const browserTurn: RunTurn = async ({ permissions }) => {
@@ -1641,6 +1647,7 @@ describe("in Box mode a tool call", () => {
       executors: new Map([["browser_click", click]]),
     });
     await post({ type: "set-bot-control", botId: bot.id, control: "browser" });
+    await post({ type: "set-bot-engine", botId: bot.id, access: "supervised" });
     expect(store.getBot(bot.id)?.control).toBe("browser");
     await send("click it");
     const card = await waiting();

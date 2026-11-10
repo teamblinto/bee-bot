@@ -302,7 +302,6 @@ export function ChatView({
           liveTab={workspace.liveTab}
           onTab={workspace.choose}
           onClose={workspace.close}
-          onEdit={onEdit}
         />
       )}
       {memoryOpen && (

@@ -1,17 +1,9 @@
-import { type BotControl, type BotProfile, browserGrant, Manifest } from "@beebot/contracts";
+import { type BotAccess, type BotControl, browserGrant, Manifest } from "@beebot/contracts";
 
 // Static per tool, never taken from the model: the Rule of Two legs a call touches.
 export type ToolLabels = { readsUntrusted: boolean; readsPrivate: boolean; sideEffect: boolean };
 
-const legNames = ["readsUntrusted", "readsPrivate", "sideEffect"] as const;
-
 export const noLegs: ToolLabels = { readsUntrusted: false, readsPrivate: false, sideEffect: false };
-
-export const profileLegs: Record<BotProfile, ToolLabels> = {
-  reader: { readsUntrusted: true, readsPrivate: true, sideEffect: false },
-  researcher: { readsUntrusted: true, readsPrivate: false, sideEffect: true },
-  operator: { readsUntrusted: false, readsPrivate: true, sideEffect: true },
-};
 
 // A manifest that doesn't parse grants nothing.
 export function parseManifest(text: string): Manifest {
@@ -24,7 +16,7 @@ export function parseManifest(text: string): Manifest {
 
 export type ToolRule = {
   labels: ToolLabels;
-  // A manifest entry the bot needs. Bee's own tools need none: the profile alone bounds them.
+  // A manifest entry the bot needs. Bee's own tools need none.
   grant?: string;
   // Only a person may do it, such as a payment or a credential change. Bee never runs it.
   humanOnly?: boolean;
@@ -32,13 +24,13 @@ export type ToolRule = {
   typed?: boolean;
 };
 
-const legs = (...names: Array<(typeof legNames)[number]>): ToolLabels => ({
+const legs = (...names: Array<keyof ToolLabels>): ToolLabels => ({
   readsUntrusted: names.includes("readsUntrusted"),
   readsPrivate: names.includes("readsPrivate"),
   sideEffect: names.includes("sideEffect"),
 });
 
-// Talking to the owner is how any profile reports back, so `notify`, `ask_user` and
+// Talking to the owner is how any bot reports back, so `notify`, `ask_user` and
 // `request_takeover` touch no leg. Anything another bot or the outside world acts on is a side
 // effect.
 const beeRules: Record<string, ToolRule> = {
@@ -124,7 +116,7 @@ export const ruleFor = (tool: string) =>
 export type ToolCall = { botId: string; runId: string; tool: string } & ToolRule;
 
 export type PolicyContext = {
-  profile: BotProfile;
+  access: BotAccess;
   manifest: Manifest;
   // The legs this session already holds. The broker sets them, never the bot.
   session: ToolLabels;
@@ -146,9 +138,14 @@ export const withLegs = (session: ToolLabels, labels: ToolLabels): ToolLabels =>
   sideEffect: session.sideEffect || labels.sideEffect,
 });
 
-// Within the profile's two legs a call runs. Past them a person must watch: every side effect and
-// every new leg asks, and with nobody there it is refused. A read the session already holds goes on.
-export const decide: Decide = (call, { profile, manifest, session, attended }) => {
+const screenGrants: ReadonlySet<string | undefined> = new Set([browserGrant, computerGrant]);
+
+// Access decides what asks: below Full access every click, key or page action does. Engine tools
+// are left to the approvals, which know the working folder.
+//
+// With nobody watching, the Rule of Two: a session may read untrusted content or private data,
+// never both. Its reply can reach another bot without passing here, so it always counts as acting.
+export const decide: Decide = (call, { access, manifest, session, attended }) => {
   if (call.grant !== undefined && !manifest.includes(call.grant)) {
     return { kind: "deny", reason: "not_granted" };
   }
@@ -156,15 +153,21 @@ export const decide: Decide = (call, { profile, manifest, session, attended }) =
     return { kind: "hand_off", reason: "human_only" };
   }
   const after = withLegs(session, call.labels);
-  const allowed = profileLegs[profile];
-  if (legNames.every((leg) => !after[leg] || allowed[leg])) {
-    return { kind: "allow" };
+  const addsRead =
+    (call.labels.readsUntrusted && !session.readsUntrusted) ||
+    (call.labels.readsPrivate && !session.readsPrivate);
+  if (
+    !attended &&
+    after.readsUntrusted &&
+    after.readsPrivate &&
+    (addsRead || call.labels.sideEffect)
+  ) {
+    return { kind: "deny", reason: "nobody_watching" };
   }
-  const addsLeg = legNames.some((leg) => call.labels[leg] && !session[leg]);
-  if (!addsLeg && !call.labels.sideEffect) {
-    return { kind: "allow" };
+  if (access !== "full" && call.labels.sideEffect && screenGrants.has(call.grant)) {
+    return { kind: "approve" };
   }
-  return attended ? { kind: "approve" } : { kind: "deny", reason: "nobody_watching" };
+  return { kind: "allow" };
 };
 
 // Default deny: a tool missing from the table is refused.

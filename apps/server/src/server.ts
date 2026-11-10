@@ -699,10 +699,6 @@ export async function startServer({
         }
         return result === "skipped" ? ok : { status: 409, body: { code: result } };
       }
-      case "set-bot-profile": {
-        const bot = store.policy.setBotProfile(command.botId, command.profile);
-        return bot ? { status: 200, body: bot } : notFound;
-      }
       case "set-bot-manifest": {
         const bot = store.policy.setBotManifest(command.botId, command.manifest);
         return bot ? { status: 200, body: bot } : notFound;

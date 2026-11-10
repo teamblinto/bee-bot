@@ -58,9 +58,11 @@ const controlNotes: Record<BotControl, string> = {
     "with request_takeover.",
   host:
     "You may use the owner's own computer, their real desktop with their apps and accounts, " +
-    "with the computer_* tools, and only while they watch. Take a screenshot first. Do only what " +
-    "they asked, and ask before anything you can't undo. If they move the mouse, stop and ask. " +
-    "Bee Bot's own window is off limits.",
+    "with the computer_* tools, and only while they watch. Take a screenshot first. Open and use " +
+    "apps on their screen as a person would, with the Start menu, the taskbar, clicks and keys; " +
+    "never launch or drive them with shell commands. Do only what they asked, and ask before " +
+    "anything you can't undo. If they move the mouse, stop and ask. Bee Bot's own window is off " +
+    "limits.",
   none: "You have no web browser or computer to use. If a task needs one, tell the owner.",
 };
 
