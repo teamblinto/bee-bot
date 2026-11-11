@@ -38,3 +38,6 @@ extraResources:
       - "xfce/**/*"
 win:
   target: nsis
+  extraResources:
+    - from: vendor/cua-driver/cua-driver.exe
+      to: cua-driver/cua-driver.exe

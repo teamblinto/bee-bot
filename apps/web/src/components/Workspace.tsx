@@ -31,6 +31,7 @@ import {
   type LiveTool,
   postCommand,
   socketUrl,
+  stopShortcut,
 } from "../serverConnection";
 import { ActivityOverlay } from "./ActivityOverlay";
 import { controlOptions, controlOrder } from "./controlOptions";
@@ -373,7 +374,13 @@ function WhereWorks({
     setAskingConsent(false);
     setPending(true);
     setError(undefined);
-    const result = await postCommand({ type: "set-bot-control", botId: bot.id, control });
+    const result = await postCommand({
+      type: "set-bot-control",
+      botId: bot.id,
+      control,
+      // Only the consent card's button switches to this PC.
+      ...(control === "host" && { hostConsent: true }),
+    });
     setPending(false);
     setError(result.ok ? undefined : result.message);
   }
@@ -425,8 +432,10 @@ function WhereWorks({
           <p className="text-small font-medium text-ink">Let {bot.name} use this PC?</p>
           <p className="mt-1 text-small text-ink-secondary">
             {bot.name} will see screenshots of your screen, which go to its model provider, and will
-            move your mouse and type. It can reach your apps and the accounts you're signed in to.
-            It works only while you watch, and moving your mouse stops it.
+            click and type in your apps. Where it can, it works behind your windows with a pointer
+            of its own; otherwise it briefly uses your mouse and keyboard. It can reach your apps
+            and the accounts you're signed in to. It works only while you watch, and Take control
+            {stopShortcut && ` (${stopShortcut})`} stops it.
             {bot.access === "full" && " With Full access it won't ask before each click."}
           </p>
           <div className="mt-3 flex justify-end gap-2">
@@ -560,7 +569,7 @@ function HostScreen({
             {frame ? (
               <img
                 alt="Your screen"
-                src={`data:image/jpeg;base64,${frame.data}`}
+                src={`data:${frame.mime};base64,${frame.data}`}
                 draggable={false}
                 className="block w-full"
               />
@@ -585,9 +594,10 @@ function HostScreen({
               >
                 <Hand {...iconProps} size={14} />
                 Take control
+                {stopShortcut && <kbd className="text-micro opacity-80">{stopShortcut}</kbd>}
               </button>
               <p className="mt-2 text-small text-ink-secondary">
-                {bot.name} can use your screen while you watch. Moving your mouse stops it.
+                {bot.name} can use your screen while you watch. Take control to stop it.
               </p>
             </>
           )}

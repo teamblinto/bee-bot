@@ -50,6 +50,13 @@ import {
   hasBoxDesktop,
   type Screen,
 } from "./computer.ts";
+import {
+  createCuaScreen,
+  type CuaDriver,
+  cuaExecutors,
+  cuaToolNames,
+  type IdleReading,
+} from "./cuaScreen.ts";
 import { createHostScreen, type HostDriver, hostAvailability } from "./hostScreen.ts";
 import { hostPlatform, openSetupTerminal } from "./hostSetup.ts";
 import {
@@ -114,6 +121,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   browserRuntime?: BrowserRuntime | undefined;
   // Only the desktop app's server on Windows gets it: `host` bots drive this desktop through it.
   hostDriver?: (() => Promise<HostDriver>) | undefined;
+  // With it too, they act in the background through cua-driver, and fall back on `hostDriver`.
+  cuaDriver?: (() => Promise<CuaDriver>) | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -195,10 +204,35 @@ export async function startServer({
   boxes,
   browserRuntime = noBrowser,
   hostDriver,
+  cuaDriver,
 }: Options) {
   const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
-  const host = hostDriver && createHostScreen({ start: hostDriver, busy: store.botBusy });
+  // Clients whose window can be seen. Electron's main process subscribes too, but never shows.
+  const visibleClients = new Set<WebSocket>();
+  const host =
+    hostDriver &&
+    createHostScreen({
+      start: hostDriver,
+      busy: store.botBusy,
+      watched: () => visibleClients.size > 0,
+      consented: store.policy.hostConsented,
+    });
   const hostControl = () => hostAvailability(host !== undefined, host?.held() ?? false);
+  // From the desktop, about once a second.
+  let ownerIdle: IdleReading | undefined;
+  const cua =
+    host &&
+    cuaDriver &&
+    createCuaScreen({
+      start: cuaDriver,
+      refuse: (run) => host.screen.refuse?.(run),
+      check: (run, tool, args) => store.policy.check(run, tool, args, decide ?? policyDecide),
+      appendAudit: store.appendAudit,
+      requestApproval: (run, tool, args) => approvals.requestApproval(run, tool, args),
+      idle: () => ownerIdle,
+      ownApp: NodePath.basename(process.execPath),
+      ownPids: [process.pid, process.ppid],
+    });
   // The screen a bot's control mode names: its box's desktop, or the owner's own.
   function screenOf(botId: string): Screen | undefined {
     const bot = store.getBot(botId);
@@ -394,10 +428,12 @@ export async function startServer({
     executors: new Map([
       ...browserExecutors(browser),
       ...computerExecutors(computer),
+      ...(cua ? cuaExecutors(cua) : []),
       ...(box ? boxExecutors(box) : []),
       ...(executors ?? []),
     ]),
     continuationTtlMs,
+    describe: cua?.describe,
     hasSurface: () => subscribers.size > 0,
     onSettled: () => supervisor.pump(),
     onChange: () => {
@@ -755,12 +791,16 @@ export async function startServer({
         if (control === "host" && !hostControl().available) {
           return { status: 409, body: { code: "host_control_unavailable" } };
         }
+        if (control === "host" && !command.hostConsent) {
+          return { status: 400, body: { code: "host_consent_required" } };
+        }
         // A turn keeps the tools it started with, so a change waits for the bot to be idle.
         if (store.botBusy(botId)) {
           return { status: 409, body: { code: "bot_busy" } };
         }
         computer.interrupt(botId);
-        const bot = store.policy.setBotControl(botId, control);
+        const consentAt = control === "host" ? new Date().toISOString() : null;
+        const bot = store.policy.setBotControl(botId, control, consentAt);
         if ((control === "browser" || control === "computer") && boxes?.ready()) {
           boxes.prepare(botId).catch((error: unknown) => {
             console.error(`beebotd: box for ${botId} didn't come up: ${(error as Error)?.message}`);
@@ -772,13 +812,15 @@ export async function startServer({
         if (!host || !hostControl().available) {
           return { status: 409, body: { code: "host_control_unavailable" } };
         }
-        return host.frame().then(
-          (frame) => ({ status: 200, body: frame }),
-          (error: unknown) => {
-            console.error(`beebotd: host frame failed: ${(error as Error)?.message}`);
-            return { status: 503, body: { code: "host_screen_failed" } };
-          },
-        );
+        return (cua?.ready() ?? Promise.resolve(false))
+          .then((background) => (background && cua ? cua.frame() : host.frame()))
+          .then(
+            (frame) => ({ status: 200, body: frame }),
+            (error: unknown) => {
+              console.error(`beebotd: host frame failed: ${(error as Error)?.message}`);
+              return { status: 503, body: { code: "host_screen_failed" } };
+            },
+          );
       case "host-hold": {
         if (!host) {
           return { status: 409, body: { code: "host_control_unavailable" } };
@@ -786,6 +828,9 @@ export async function startServer({
         const driving = host.hold(command.held);
         if (driving) {
           computer.interrupt(driving);
+        }
+        if (command.held) {
+          cua?.interrupt();
         }
         broadcast({ type: "host-control", availability: hostControl() });
         return ok;
@@ -901,11 +946,17 @@ export async function startServer({
             callBotTool(store, run, name, args, ({ runId }) => supervisor.parkWaitingUser(runId)),
           ),
         browser: (name, args) => browser.call(run, name, args),
-        computer: (name, args) => computer.call(run, name, args),
+        computer: (name, args) =>
+          cua && cuaToolNames.has(name)
+            ? cua.call(run, name, args)
+            : computer.call(run, name, args),
         tools: async () => {
           const control = store.getBot(run.botId)?.control ?? "none";
           if (control !== "host" || !host || !hostControl().available) {
             return toolsFor(control, undefined);
+          }
+          if (await cua?.ready()) {
+            return toolsFor(control, "cua");
           }
           // The bot's coordinates are the display's, fitted, so the size is read before it looks.
           await host.measure().catch((error: unknown) => {
@@ -1130,6 +1181,7 @@ export async function startServer({
       client.on("error", () => client.terminate());
       client.on("close", () => {
         subscribers.delete(client);
+        visibleClients.delete(client);
         watchWall(client, false);
       });
       client.on("message", (data) => {
@@ -1140,6 +1192,14 @@ export async function startServer({
         }
         if (message.type === "wall") {
           watchWall(client, message.watching);
+          return;
+        }
+        if (message.type === "visibility") {
+          if (message.visible) {
+            visibleClients.add(client);
+          } else {
+            visibleClients.delete(client);
+          }
           return;
         }
         // Store reads and broadcasts are synchronous, so no event can slip between this replay
@@ -1193,6 +1253,9 @@ export async function startServer({
     checkCodex,
     power: (state: "suspend" | "resume") =>
       state === "suspend" ? supervisor.suspend() : supervisor.resume(),
+    idle: (idleSeconds: number) => {
+      ownerIdle = { idleSeconds, at: Date.now() };
+    },
     close: async () => {
       stopSummaries.abort();
       await summaries;
@@ -1210,6 +1273,7 @@ export async function startServer({
       }
       desktop.close();
       host?.close();
+      cua?.close();
       await browser.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

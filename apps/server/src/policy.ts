@@ -61,7 +61,10 @@ export function openPolicy(
     "UPDATE bots SET boundary = ? WHERE id = ? AND boundary <> ? RETURNING id",
   );
   const updateControl = db.prepare(
-    "UPDATE bots SET control = ? WHERE id = ? AND control <> ? RETURNING id",
+    "UPDATE bots SET control = ?, host_consent_at = ? WHERE id = ? AND control <> ? RETURNING id",
+  );
+  const selectHostConsent = db.prepare(
+    "SELECT 1 FROM bots WHERE id = ? AND control = 'host' AND host_consent_at IS NOT NULL",
   );
   const updateAnySite = db.prepare("UPDATE bots SET egress_any_site = ? WHERE id = ?");
   const clearEgressHosts = db.prepare("DELETE FROM bot_egress_hosts WHERE bot_id = ?");
@@ -223,9 +226,11 @@ export function openPolicy(
       }),
 
     // Takes effect at the next call, like the manifest.
-    setBotControl: (botId: string, control: BotControl) =>
+    // Consent belongs to one move onto the owner's computer, so any other mode drops it.
+    setBotControl: (botId: string, control: BotControl, hostConsentAt: string | null = null) =>
       transaction(() => {
-        if (updateControl.get(control, botId, control)) {
+        const consentAt = control === "host" ? hostConsentAt : null;
+        if (updateControl.get(control, consentAt, botId, control)) {
           appendAudit({
             runId: null,
             botId,
@@ -241,6 +246,8 @@ export function openPolicy(
         }
         return bot;
       }),
+
+    hostConsented: (botId: string) => selectHostConsent.get(botId) !== undefined,
 
     auditPage: (query: AuditQuery): AuditPage => ({
       entries: auditPage(query),

@@ -28,6 +28,7 @@ import {
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { waitingMessage } from "./continuations.ts";
 import { fakeRunTurn, type RunTurn, type TurnOutcome, workspacePath } from "./engine.ts";
+import type { CuaDriver } from "./cuaScreen.ts";
 import type { HostDriver } from "./hostScreen.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
@@ -86,6 +87,7 @@ type BootOptions = {
   decide?: Decide;
   executors?: ReadonlyMap<string, Execute>;
   hostDriver?: () => Promise<HostDriver>;
+  cuaDriver?: () => Promise<CuaDriver>;
 };
 
 async function boot(options: BootOptions = {}) {
@@ -1725,7 +1727,12 @@ describe("the owner's computer", () => {
       const idle = (await (
         await post({ type: "create-bot", name: "Bo", personality: "", engineAccountId: "claude" })
       ).json()) as Bot;
-      const set = await post({ type: "set-bot-control", botId: idle.id, control: "host" });
+      const set = await post({
+        type: "set-bot-control",
+        botId: idle.id,
+        control: "host",
+        hostConsent: true,
+      });
       expect(set.status).toBe(200);
       expect(((await set.json()) as Bot).control).toBe("host");
 
@@ -1734,6 +1741,7 @@ describe("the owner's computer", () => {
         data: Buffer.from("jpeg").toString("base64"),
         width: 960,
         height: 480,
+        mime: "image/jpeg",
       });
 
       const { bot, turn } = await startTurn();
@@ -1758,6 +1766,176 @@ describe("the owner's computer", () => {
           availability: { available: true, problem: null, held: true },
         }),
       );
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "is given only with the owner's consent, which a move off it drops",
+    async () => {
+      const { post, store } = await boot({ hostDriver: fakeDriver });
+      const bot = (await (
+        await post({ type: "create-bot", name: "Bo", personality: "", engineAccountId: "claude" })
+      ).json()) as Bot;
+      const unasked = await post({ type: "set-bot-control", botId: bot.id, control: "host" });
+      expect(unasked.status).toBe(400);
+      expect(await unasked.json()).toEqual({ code: "host_consent_required" });
+      expect(store.getBot(bot.id)?.control).toBe("none");
+
+      const consented = await post({
+        type: "set-bot-control",
+        botId: bot.id,
+        control: "host",
+        hostConsent: true,
+      });
+      expect(consented.status).toBe(200);
+      expect(store.policy.hostConsented(bot.id)).toBe(true);
+      expect((await post({ type: "set-bot-control", botId: bot.id, control: "none" })).status).toBe(
+        200,
+      );
+      expect(store.policy.hostConsented(bot.id)).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "is used only by a consented bot, while a Bee Bot window can be seen",
+    async () => {
+      const { client, startTurn, store } = await boot({ hostDriver: fakeDriver });
+      const { bot, turn } = await startTurn();
+      const screenshot = async () => {
+        const call = rpc("tools/call", { name: "computer_screenshot", arguments: {} });
+        const response = await mcp(turn.permissions, call);
+        const { result } = (await response.json()) as {
+          result: { content: Array<{ type: string; text?: string }> };
+        };
+        return result.content[0];
+      };
+
+      store.policy.setBotControl(bot.id, "host");
+      expect((await screenshot())?.text).toContain("hasn't agreed");
+
+      store.policy.setBotControl(bot.id, "none");
+      store.policy.setBotControl(bot.id, "host", new Date().toISOString());
+      expect((await screenshot())?.text).toContain("window is hidden");
+
+      client.socket.send(JSON.stringify({ type: "visibility", visible: true }));
+      await vi.waitFor(async () => expect((await screenshot())?.type).toBe("image"));
+      client.socket.send(JSON.stringify({ type: "visibility", visible: false }));
+      await vi.waitFor(async () =>
+        expect((await screenshot())?.text).toContain("window is hidden"),
+      );
+    },
+  );
+
+  const toolNames = async (permissions: Permissions) => {
+    const listed = (await (await mcp(permissions, rpc("tools/list"))).json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    return listed.result.tools.map(({ name }) => name);
+  };
+
+  it.runIf(process.platform === "win32")(
+    "is used in the background through cua-driver when it runs",
+    async () => {
+      const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+      const cuaDriver = async (): Promise<CuaDriver> => ({
+        call: async (name, args) => {
+          calls.push({ name, args });
+          return name === "get_desktop_state"
+            ? {
+                isError: false,
+                content: [{ type: "image", data: "UE5H", mimeType: "image/png" }],
+                structured: { screenshot_width: 960, screenshot_height: 480 },
+              }
+            : { isError: false, content: [{ type: "text", text: "windows" }], structured: {} };
+        },
+        close: () => {},
+        kill: () => {},
+      });
+      const { client, post, startTurn, store } = await boot({ hostDriver: fakeDriver, cuaDriver });
+      const { bot, turn } = await startTurn();
+      store.policy.setBotControl(bot.id, "host", new Date().toISOString());
+      client.socket.send(JSON.stringify({ type: "visibility", visible: true }));
+      const names = await toolNames(turn.permissions);
+      expect(names).toContain("computer_look");
+      expect(names).not.toContain("computer_click");
+      await vi.waitFor(async () => {
+        const call = rpc("tools/call", { name: "computer_windows", arguments: {} });
+        const { result } = (await (await mcp(turn.permissions, call)).json()) as {
+          result: { content: Array<{ text?: string }> };
+        };
+        expect(result.content[0]?.text).toBe("windows");
+      });
+      expect(calls.at(-1)).toEqual({ name: "list_windows", args: { session: expect.any(String) } });
+      const frame = await post({ type: "host-frame" });
+      expect(HostFrame.parse(await frame.json())).toMatchObject({ mime: "image/png" });
+    },
+  );
+
+  // The card names the window by the title Bee last saw, which a restarted Bee hasn't seen.
+  it.runIf(process.platform === "win32")(
+    "runs an approved background action after a restart",
+    async () => {
+      const calls: string[] = [];
+      const cuaDriver = async (): Promise<CuaDriver> => ({
+        call: async (name) => {
+          calls.push(name);
+          const windows = [{ window_id: 11, pid: 101, title: "Notes", app_name: "Notepad.exe" }];
+          return {
+            isError: false,
+            content: [{ type: "text", text: name }],
+            structured: { windows },
+          };
+        },
+        close: () => {},
+        kill: () => {},
+      });
+      const first = await boot({ hostDriver: fakeDriver, cuaDriver });
+      const { bot, turn } = await first.startTurn();
+      first.store.policy.setBotControl(bot.id, "host", new Date().toISOString());
+      first.client.socket.send(JSON.stringify({ type: "visibility", visible: true }));
+      const callTool = async (name: string, args: unknown) => {
+        const call = rpc("tools/call", { name, arguments: args });
+        const { result } = (await (await mcp(turn.permissions, call)).json()) as {
+          result: { content: Array<{ text?: string }> };
+        };
+        return result.content[0]?.text;
+      };
+      await vi.waitFor(async () =>
+        expect(await callTool("computer_windows", {})).toBe("computer_windows"),
+      );
+      await callTool("computer_window_click", { window_id: 11, x: 5, y: 6 });
+      const [card] = first.store.state().continuations;
+      expect(card?.shown).toContain('"Notes"');
+      turn.finish({ kind: "completed", text: "waiting" });
+      await first.stop();
+
+      calls.length = 0;
+      const second = await boot({ hostDriver: fakeDriver, cuaDriver });
+      second.client.socket.send(JSON.stringify({ type: "visibility", visible: true }));
+      await vi.waitFor(() => expect(second.store.state().continuations).toEqual([card]));
+      const answer = await second.post({
+        type: "decide-continuation",
+        continuationId: card?.id ?? "",
+        digest: card?.digest ?? "",
+        decision: "approve",
+      });
+      expect(answer.status).toBe(200);
+      await vi.waitFor(() => expect(calls).toContain("click"));
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "is used the old way when cua-driver won't start",
+    async () => {
+      const { startTurn, store } = await boot({
+        hostDriver: fakeDriver,
+        cuaDriver: () => Promise.reject(new Error("no cua-driver.exe")),
+      });
+      const { bot, turn } = await startTurn();
+      store.policy.setBotControl(bot.id, "host", new Date().toISOString());
+      const names = await toolNames(turn.permissions);
+      expect(names).toContain("computer_click");
+      expect(names).not.toContain("computer_look");
     },
   );
 });

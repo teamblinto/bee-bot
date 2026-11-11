@@ -17,6 +17,7 @@ import { z } from "zod";
 import { type Decide, decide as policyDecide, type PolicyDecision } from "./broker.ts";
 import { browserToolNames } from "./browser.ts";
 import { computerToolNames } from "./computer.ts";
+import { cuaToolNames } from "./cuaScreen.ts";
 import { waitingMessage } from "./continuations.ts";
 import { workingFolder } from "./engine.ts";
 import { pathPolicy } from "./pathPolicy.ts";
@@ -298,6 +299,8 @@ type Options = {
   continuationTtlMs?: number | undefined;
   // A continuation reached its outcome, which goes back to the bot.
   onSettled?: (() => void) | undefined;
+  // Plain words for an action on the screen, in place of its JSON.
+  describe?: ((tool: string, input: Record<string, unknown>) => string | undefined) | undefined;
 };
 
 export function createApprovals({
@@ -311,6 +314,7 @@ export function createApprovals({
   hasSurface = () => false,
   continuationTtlMs = defaultContinuationTtlMs,
   onSettled = () => {},
+  describe = () => undefined,
 }: Options) {
   const runs = new Map<string, Run>();
   const held = new Map<string, HeldCall>();
@@ -349,17 +353,23 @@ export function createApprovals({
     return sealed(JSON.stringify(stable({ tool, input, target })), shown);
   }
 
-  // A browser or computer action is shown as exactly what the bot sent.
+  // A browser or computer action is shown as exactly what the bot sent, or in words that name it
+  // exactly. Those words come from what the screen showed then, so only the payload is sealed:
+  // run later, after a restart even, it is checked against that alone.
   function resolveAny(botId: string, tool: string, input: Record<string, unknown>) {
     const native = ApprovalTool.safeParse(tool);
     if (native.success) {
       return resolveCall(botId, native.data, input);
     }
-    if (!browserToolNames.has(tool) && !computerToolNames.has(tool)) {
+    if (!browserToolNames.has(tool) && !computerToolNames.has(tool) && !cuaToolNames.has(tool)) {
       return undefined;
     }
-    const exact = JSON.stringify(stable(input));
-    return sealed(JSON.stringify(stable({ tool, input })), `${tool}: ${exact}`);
+    const payload = JSON.stringify(stable({ tool, input }));
+    return {
+      payload,
+      shown: describe(tool, input) ?? `${tool}: ${JSON.stringify(stable(input))}`,
+      digest: sha256(payload).digest("hex"),
+    };
   }
 
   // What the bot is told: the call waits, or it can't be asked for.

@@ -221,24 +221,27 @@ export type HostScreenDeps = {
   start: () => Promise<HostDriver>;
   // Whether the bot has a run going, so a finished bot's hold on the screen lapses.
   busy: (botId: string) => boolean;
+  // Whether some Bee Bot window can be seen right now.
+  watched: () => boolean;
+  // Whether the owner agreed to let this bot use their computer.
+  consented: (botId: string) => boolean;
   idleMs?: number;
 };
 
-const ownWindow =
-  "That is Bee Bot's own window, which you may not use. Ask the owner to move it aside or " +
-  "minimize it if it is in your way.";
+export const ownWindow =
+  "That is Bee Bot's own window, which you may not use. Ask the owner to move it aside if it " +
+  "is in your way.";
 
-// The owner's own desktop. One run drives it at a time, only while the owner watches, and never
-// while the owner holds it.
-export function createHostScreen(deps: HostScreenDeps) {
-  let driver: Promise<HostDriver> | undefined;
-  let physical: ScreenSize | undefined;
-  let holder: { botId: string } | undefined;
-  let ownerHold = false;
-  // Where the driving bot last left the pointer, so the owner's move between its calls counts too.
-  let left: Point | undefined;
+export const driverIdleMs = 5 * 60_000;
+
+// A driver process started on first use, closed after `idleMs` unused, and replaced after a
+// request to it throws, since it may have died or hung.
+export function keepDriver<D extends { close: () => void }>(
+  start: () => Promise<D>,
+  idleMs = driverIdleMs,
+) {
+  let driver: Promise<D> | undefined;
   let idle: NodeJS.Timeout | undefined;
-  const idleMs = deps.idleMs ?? 5 * 60_000;
 
   function shutDown() {
     const closing = driver;
@@ -249,34 +252,52 @@ export function createHostScreen(deps: HostScreenDeps) {
     );
   }
 
-  async function request(body: DriverRequest) {
-    clearTimeout(idle);
-    idle = setTimeout(shutDown, idleMs);
-    idle.unref?.();
-    if (!driver) {
-      const starting = deps.start();
-      driver = starting;
-      starting.catch(() => {
-        if (driver === starting) {
-          driver = undefined;
-        }
-      });
-    }
-    const open = driver;
-    try {
-      return await (await open).request(body);
-    } catch (error) {
-      // A driver that died or hung is replaced on the next request.
-      if (driver === open) {
-        driver = undefined;
-        void open.then(
-          (dead) => dead.close(),
-          () => {},
-        );
+  return {
+    use: async <R>(act: (open: D) => Promise<R>) => {
+      clearTimeout(idle);
+      idle = setTimeout(shutDown, idleMs);
+      idle.unref?.();
+      if (!driver) {
+        const starting = start();
+        driver = starting;
+        starting.catch(() => {
+          if (driver === starting) {
+            driver = undefined;
+          }
+        });
       }
-      throw error;
-    }
-  }
+      const open = driver;
+      try {
+        return await act(await open);
+      } catch (error) {
+        if (driver === open) {
+          driver = undefined;
+          void open.then(
+            (dead) => dead.close(),
+            () => {},
+          );
+        }
+        throw error;
+      }
+    },
+    close: () => {
+      clearTimeout(idle);
+      shutDown();
+    },
+  };
+}
+
+// The owner's own desktop. One run drives it at a time, only while the owner watches, and never
+// while the owner holds it.
+export function createHostScreen(deps: HostScreenDeps) {
+  const driver = keepDriver(deps.start, deps.idleMs);
+  let physical: ScreenSize | undefined;
+  let holder: { botId: string } | undefined;
+  let ownerHold = false;
+  // Where the driving bot last left the pointer, so the owner's move between its calls counts too.
+  let left: Point | undefined;
+
+  const request = (body: DriverRequest) => driver.use((open) => open.request(body));
 
   async function measure() {
     const { width, height } = await request({ op: "size" });
@@ -379,8 +400,20 @@ export function createHostScreen(deps: HostScreenDeps) {
     screenshot: () => shot(size().width, size().height, "png", 0),
     input,
     refuse: (run: BrowserRun) => {
+      if (!deps.consented(run.botId)) {
+        return (
+          "The owner hasn't agreed to let you use their computer. Ask them to choose This PC " +
+          "for you again."
+        );
+      }
       if (!run.attended) {
         return "The owner's computer is used only while the owner is watching.";
+      }
+      if (!deps.watched()) {
+        return (
+          "The owner's computer is used only while the owner is watching, and Bee Bot's window " +
+          "is hidden. Stop and wait for the owner to come back."
+        );
       }
       if (ownerHold) {
         return "The owner has taken control of their computer. Wait for them to hand it back.";
@@ -407,7 +440,8 @@ export function createHostScreen(deps: HostScreenDeps) {
       const shown = size();
       const width = Math.min(960, shown.width);
       const height = Math.round((shown.height * width) / shown.width);
-      return { data: (await shot(width, height, "jpeg", 60)).toString("base64"), width, height };
+      const data = (await shot(width, height, "jpeg", 60)).toString("base64");
+      return { data, width, height, mime: "image/jpeg" as const };
     },
     // The owner takes their computer back: the bot's input stops and its calls are refused.
     hold: (held: boolean) => {
@@ -418,10 +452,7 @@ export function createHostScreen(deps: HostScreenDeps) {
     held: () => ownerHold,
     // The bot driving it now, if its run still goes on.
     driving: () => (holder && deps.busy(holder.botId) ? holder.botId : undefined),
-    close: () => {
-      clearTimeout(idle);
-      shutDown();
-    },
+    close: driver.close,
   };
 }
 

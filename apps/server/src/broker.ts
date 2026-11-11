@@ -100,6 +100,16 @@ const computerRules: Record<string, ToolRule> = {
   computer_key: { labels: consequential, grant: computerGrant },
   computer_scroll: { labels: consequential, grant: computerGrant },
   computer_drag: { labels: consequential, grant: computerGrant },
+  // This PC through cua-driver, which reads windows and acts on them in the background.
+  computer_windows: { labels: legs("readsUntrusted"), grant: computerGrant },
+  computer_open: { labels: consequential, grant: computerGrant },
+  computer_look: { labels: legs("readsUntrusted"), grant: computerGrant },
+  computer_desktop: { labels: legs("readsUntrusted"), grant: computerGrant },
+  computer_window_click: { labels: consequential, grant: computerGrant },
+  computer_window_type: { labels: consequential, grant: computerGrant, typed: true },
+  computer_window_key: { labels: consequential, grant: computerGrant },
+  computer_window_scroll: { labels: consequential, grant: computerGrant },
+  computer_window_drag: { labels: consequential, grant: computerGrant },
 };
 
 export const toolRules: Record<string, ToolRule> = {

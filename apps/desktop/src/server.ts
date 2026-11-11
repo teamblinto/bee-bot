@@ -6,6 +6,7 @@ import * as NodeTimers from "node:timers/promises";
 
 import {
   type Bootstrap,
+  type IdleSignal,
   noRestartExitCodes,
   type PowerSignal,
   ProtocolNotice,
@@ -20,7 +21,7 @@ const stableUptimeMs = 60_000;
 
 type Options = Pick<
   Bootstrap,
-  "dataDir" | "allowedOrigins" | "fakeEngine" | "vault" | "hostControl"
+  "dataDir" | "allowedOrigins" | "fakeEngine" | "vault" | "hostControl" | "cuaDriver"
 > & {
   entry: string;
 };
@@ -120,6 +121,12 @@ export function sendPower(power: PowerSignal["power"]) {
   if (child?.stdin.writable) {
     child.stdin.write(`${JSON.stringify({ power } satisfies PowerSignal)}
 `);
+  }
+}
+
+export function sendIdle(idleSeconds: IdleSignal["idleSeconds"]) {
+  if (child?.stdin.writable) {
+    child.stdin.write(`${JSON.stringify({ idleSeconds } satisfies IdleSignal)}\n`);
   }
 }
 

@@ -308,6 +308,8 @@ export function notificationBodies(state: ConnectionState, message: ServerMessag
 const params = new URLSearchParams(window.location.search);
 const serverUrl = params.get("serverUrl");
 const token = params.get("token");
+// The desktop app's global shortcut for taking the owner's computer back from a bot.
+export const stopShortcut = params.get("stopShortcut");
 
 function readLastSeen(): Record<string, string> {
   try {
@@ -441,6 +443,16 @@ export function watchWall() {
   };
 }
 
+function sendVisibility() {
+  if (live?.readyState === WebSocket.OPEN) {
+    const message: ClientMessage = {
+      type: "visibility",
+      visible: document.visibilityState === "visible",
+    };
+    live.send(JSON.stringify(message));
+  }
+}
+
 function reconnect() {
   const delay = Math.min(firstReconnectDelayMs * 2 ** failedAttempts, maxReconnectDelayMs);
   failedAttempts += 1;
@@ -531,6 +543,8 @@ export async function connect() {
   if (!serverUrl || !token) {
     return;
   }
+  // The same listener again on a reconnect is ignored.
+  document.addEventListener("visibilitychange", sendVisibility);
 
   let health: Response;
   try {
@@ -553,6 +567,7 @@ export async function connect() {
   socket.onopen = () => {
     const subscribe: ClientMessage = { type: "subscribe", afterSeq: state.seq };
     socket.send(JSON.stringify(subscribe));
+    sendVisibility();
     if (wallWatchers > 0) {
       sendWall();
     }
@@ -579,6 +594,7 @@ const errorSentences: Record<string, string> = {
   boxes_unavailable: "Boxes aren't available. Set them up on the Usage page first.",
   boxes_unsupported: "This server can't run boxes.",
   host_control_unavailable: "Bots can't use this computer right now.",
+  host_consent_required: "Agree to let this bot use your PC first.",
   no_setup_command: "There's no install command for this computer. Get Podman from podman.io.",
   no_terminal: "Bee Bot couldn't open a terminal. Copy the command and run it in your terminal.",
   terminal_failed: "The terminal didn't open. Copy the command and run it in your terminal.",

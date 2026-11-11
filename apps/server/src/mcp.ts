@@ -13,6 +13,7 @@ import {
   type ScreenSize,
   type ToolContent,
 } from "./computer.ts";
+import { cuaToolNames, cuaTools } from "./cuaScreen.ts";
 import { memoryTools } from "./memory.ts";
 
 const defaultKeepaliveMs = 15_000;
@@ -34,8 +35,9 @@ const approveTool = {
 };
 
 // The tools a bot sees follow its control mode, so it never reaches for a screen it lacks. Each
-// call is still checked against the mode by the broker.
-export function toolsFor(control: BotControl, screen: ScreenSize | undefined): Tool[] {
+// call is still checked against the mode by the broker. A host bot gets the cua tools when
+// cua-driver runs, and the pointer-moving ones sized to the display otherwise.
+export function toolsFor(control: BotControl, screen: ScreenSize | "cua" | undefined): Tool[] {
   const browsing = control === "browser" || control === "computer";
   return [
     approveTool,
@@ -43,7 +45,8 @@ export function toolsFor(control: BotControl, screen: ScreenSize | undefined): T
     ...botTools,
     ...(browsing ? [...browserTools, takeoverTool] : []),
     ...(control === "computer" ? computerTools(boxScreen, "box") : []),
-    ...(control === "host" && screen ? computerTools(screen, "host") : []),
+    ...(control === "host" && screen === "cua" ? cuaTools : []),
+    ...(control === "host" && typeof screen === "object" ? computerTools(screen, "host") : []),
   ];
 }
 
@@ -173,7 +176,10 @@ export async function answerMcp(
         answer({ content: [{ type: "text", text }] });
         return;
       }
-      if (typeof params?.name === "string" && computerToolNames.has(params.name)) {
+      if (
+        typeof params?.name === "string" &&
+        (computerToolNames.has(params.name) || cuaToolNames.has(params.name))
+      ) {
         let content: ToolContent[];
         try {
           content = await computer(params.name, params.arguments);

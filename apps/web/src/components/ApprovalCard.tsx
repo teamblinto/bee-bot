@@ -199,29 +199,45 @@ export function ContinuationCard({
   }
 
   const handOff = continuation.kind === "hand_off";
+  // An action on this PC comes in words, with the exact element or window under them. Anything
+  // else is the tool's name and its input.
+  const [said = "", ...exact] = continuation.shown.split("\n");
+  const worded = !handOff && !continuation.shown.startsWith(`${continuation.tool}: `);
   const title = handOff
     ? `${name} needs you to do this`
-    : `${name} wants to run ${continuation.tool}`;
+    : worded
+      ? visibleDetail(said)
+      : `${name} wants to run ${continuation.tool}`;
   const disabled = busy || !connected;
   return (
     <article
       ref={card}
-      aria-label={title}
+      aria-label={worded ? `${name}: ${title}` : title}
       className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-name font-medium">{title}</h3>
+        <h3 className="max-h-[40dvh] overflow-y-auto text-name font-medium wrap-anywhere">
+          {title}
+        </h3>
         <TimeLeft expiresAt={continuation.expiresAt} />
       </div>
-      <pre
-        role="region"
-        tabIndex={0}
-        aria-label="Exact request"
-        className="max-h-[40dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
-        onWheel={(event) => event.stopPropagation()}
-      >
-        {visibleDetail(continuation.shown)}
-      </pre>
+      {worded ? (
+        exact.length > 0 && (
+          <p className="font-mono text-label wrap-anywhere whitespace-pre-wrap text-ink-faint">
+            {visibleDetail(exact.join("\n"))}
+          </p>
+        )
+      ) : (
+        <pre
+          role="region"
+          tabIndex={0}
+          aria-label="Exact request"
+          className="max-h-[40dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
+          onWheel={(event) => event.stopPropagation()}
+        >
+          {visibleDetail(continuation.shown)}
+        </pre>
+      )}
       <p className="text-small text-ink-secondary">
         {handOff
           ? `Bee never does this itself. If you want it done, do it yourself, then tell ${name}.`

@@ -180,6 +180,21 @@ it("answers a Box bot's action bound to the digest of exactly what it shows", as
   });
 });
 
+it("heads an action on this PC with its words, invisible characters shown", () => {
+  const shown = 'Type "hi‮" into "Untitled - Notepad"\n(element s00000003:0)';
+  act(() =>
+    root.render(
+      <ContinuationCard
+        name="Ada"
+        continuation={{ ...continuation, tool: "computer_window_type", shown }}
+        connected
+      />,
+    ),
+  );
+  expect(host.querySelector("h3")?.textContent).toBe('Type "hi[U+202E]" into "Untitled - Notepad"');
+  expect(host.textContent).toContain("(element s00000003:0)");
+});
+
 it("asks the owner to do a hand_off themselves, and never offers to run it", () => {
   act(() =>
     root.render(

@@ -67,6 +67,7 @@ function fakeDisplay(width = 1920, height = 1080) {
   return { state, start };
 }
 
+const watching = { watched: () => true, consented: () => true };
 const run = (botId: string, attended = true) => ({ id: `run-${botId}`, botId, attended });
 const signal = () => new AbortController().signal;
 
@@ -98,7 +99,7 @@ describe("fitScreen", () => {
 describe("the host screen", () => {
   it("moves the pointer to physical pixels, scaled from the bot's fitted screen", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     await host.measure();
     expect(host.screen.size).toEqual({ width: 1280, height: 720 });
     await host.screen.input(
@@ -118,7 +119,11 @@ describe("the host screen", () => {
 
   it("serves one watched bot at a time, until its run ends", () => {
     const busy = new Set(["bot-1"]);
-    const host = createHostScreen({ start: fakeDisplay().start, busy: (id) => busy.has(id) });
+    const host = createHostScreen({
+      start: fakeDisplay().start,
+      busy: (id) => busy.has(id),
+      ...watching,
+    });
     expect(host.screen.refuse?.(run("bot-1", false))).toContain("watching");
     expect(host.screen.refuse?.(run("bot-1"))).toBeUndefined();
     expect(host.driving()).toBe("bot-1");
@@ -128,9 +133,24 @@ describe("the host screen", () => {
     host.close();
   });
 
+  it("refuses a bot the owner didn't agree to, and every bot while no window can be seen", () => {
+    let visible = true;
+    const host = createHostScreen({
+      start: fakeDisplay().start,
+      busy: () => true,
+      watched: () => visible,
+      consented: (id) => id === "bot-1",
+    });
+    expect(host.screen.refuse?.(run("bot-2"))).toContain("hasn't agreed");
+    expect(host.screen.refuse?.(run("bot-1"))).toBeUndefined();
+    visible = false;
+    expect(host.screen.refuse?.(run("bot-1"))).toContain("window is hidden");
+    host.close();
+  });
+
   it("refuses everything while the owner holds it, and names the bot it took it from", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     expect(host.screen.refuse?.(run("bot-1"))).toBeUndefined();
     expect(host.hold(true)).toBe("bot-1");
     expect(host.held()).toBe(true);
@@ -152,7 +172,7 @@ describe("the host screen", () => {
       }
       return undefined;
     };
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     await host.measure();
     const moved = host.screen.input(
       [
@@ -171,7 +191,7 @@ describe("the host screen", () => {
 
   it("stops when the owner moved the mouse between the bot's calls, then lets it go on", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     await host.measure();
     expect(host.screen.refuse?.(run("bot-1"))).toBeUndefined();
     await host.screen.input([{ type: "move", x: 100, y: 100 }], signal());
@@ -186,7 +206,7 @@ describe("the host screen", () => {
 
   it("refuses a key this computer has no key for, without sending anything", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     await expect(
       host.screen.input([{ type: "key", keys: "XF86AudioPlay" }], signal()),
     ).rejects.toThrow(ScreenRefusal);
@@ -197,7 +217,7 @@ describe("the host screen", () => {
   it("refuses Bee Bot's own window", async () => {
     const { state, start } = fakeDisplay();
     state.answer = (request) => (request.op === "keys" ? { refused: "own_window" } : undefined);
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     await expect(host.screen.input([{ type: "key", keys: "ctrl+w" }], signal())).rejects.toThrow(
       /Bee Bot's own window/,
     );
@@ -206,7 +226,7 @@ describe("the host screen", () => {
 
   it("replaces a driver that died with a fresh one on the next request", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     expect(String(await host.screen.screenshot())).toBe("shot 1");
     state.fail = true;
     await expect(host.screen.screenshot()).rejects.toThrow("driver 1 died");
@@ -226,6 +246,7 @@ describe("the host screen", () => {
         return attempts === 1 ? Promise.reject(new Error("no powershell")) : start();
       },
       busy: () => true,
+      ...watching,
     });
     await expect(host.measure()).rejects.toThrow("no powershell");
     expect(await host.measure()).toEqual({ width: 1920, height: 1080 });
@@ -235,7 +256,7 @@ describe("the host screen", () => {
 
   it("closes an idle driver", async () => {
     const { state, start } = fakeDisplay();
-    const host = createHostScreen({ start, busy: () => true, idleMs: 10 });
+    const host = createHostScreen({ start, busy: () => true, ...watching, idleMs: 10 });
     await host.measure();
     await expect.poll(() => state.closed).toBe(1);
     await host.measure();
@@ -245,11 +266,12 @@ describe("the host screen", () => {
 
   it("gives the owner's live view a small JPEG of the display's own shape, even first", async () => {
     const { state, start } = fakeDisplay(2000, 1000);
-    const host = createHostScreen({ start, busy: () => true });
+    const host = createHostScreen({ start, busy: () => true, ...watching });
     expect(await host.frame()).toEqual({
       data: Buffer.from("shot 1").toString("base64"),
       width: 960,
       height: 480,
+      mime: "image/jpeg",
     });
     expect(state.requests.at(-1)).toEqual({
       op: "shot",

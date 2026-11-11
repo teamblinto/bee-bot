@@ -16,7 +16,7 @@ export const controlOptions: Record<
   host: {
     name: "This PC",
     help: "Your screen and apps, only while you watch",
-    line: "Your own screen and apps, only while you watch. Moving your mouse stops it.",
+    line: "Your own screen and apps, only while you watch. Take control stops it.",
     Icon: Monitor,
   },
   browser: {

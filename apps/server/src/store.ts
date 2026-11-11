@@ -679,6 +679,13 @@ export const migrations: Array<{
     UPDATE bots SET access = 'supervised' WHERE profile IN ('reader', 'researcher');
     ALTER TABLE bots DROP COLUMN profile;`,
   },
+  {
+    name: "host_consent",
+    // When the owner agreed to let the bot use this PC. A bot already on it never agreed with the
+    // server, so it moves off and the owner is asked again.
+    sql: `ALTER TABLE bots ADD COLUMN host_consent_at TEXT;
+    UPDATE bots SET control = 'none' WHERE control = 'host';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });

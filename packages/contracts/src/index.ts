@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 31;
+export const protocolVersion = 32;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -44,12 +44,20 @@ export const Bootstrap = z.object({
   // Sent only by the desktop app: its server runs in the owner's session, so bots set to `host`
   // control may drive this desktop.
   hostControl: z.boolean().optional(),
+  // Sent only by the desktop app when it ships trycua's cua-driver: host control then acts in
+  // the background through it, with its own cursor, instead of moving the owner's pointer.
+  cuaDriver: z.string().min(1).optional(),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
 // Each later stdin line from the desktop: the OS is about to sleep, or just woke.
 export const PowerSignal = z.object({ power: z.enum(["suspend", "resume"]) });
 export type PowerSignal = z.infer<typeof PowerSignal>;
+
+// Also from the desktop, about once a second while it runs: seconds since the owner last used
+// the mouse or keyboard (Electron's powerMonitor), so foreground input can wait for a pause.
+export const IdleSignal = z.object({ idleSeconds: z.number().int().min(0) });
+export type IdleSignal = z.infer<typeof IdleSignal>;
 
 // Served at `GET /.well-known/bee-bot` without auth, so a client can identify a server before it connects.
 export const ServerInfo = z.object({
@@ -500,8 +508,14 @@ export const HandoffServerMessage = z.discriminatedUnion("type", [
 ]);
 export type HandoffServerMessage = z.infer<typeof HandoffServerMessage>;
 
-// A JPEG, base64, of the owner's display, `width` by `height` pixels.
-export const HostFrame = z.object({ data: z.string(), width: z.number(), height: z.number() });
+// An image, base64, of the owner's display, `width` by `height` pixels. A PNG when cua-driver
+// takes it, since it gives no JPEG.
+export const HostFrame = z.object({
+  data: z.string(),
+  width: z.number(),
+  height: z.number(),
+  mime: z.enum(["image/jpeg", "image/png"]),
+});
 export type HostFrame = z.infer<typeof HostFrame>;
 
 // Opens one `/display` socket, once, for a short while. `expiresAt` is epoch milliseconds.
@@ -775,6 +789,8 @@ export const ClientMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("subscribe"), afterSeq: z.number().int().nonnegative() }),
   // The monitor wall is open in this client. Thumbnails are taken only while one is.
   z.object({ type: z.literal("wall"), watching: z.boolean() }),
+  // Whether this client's window can be seen. Bots use the owner's computer only while one can.
+  z.object({ type: z.literal("visibility"), visible: z.boolean() }),
 ]);
 export type ClientMessage = z.infer<typeof ClientMessage>;
 
@@ -959,7 +975,13 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("acknowledge-automated-access") }),
   z.object({ type: z.literal("set-bot-manifest"), botId: z.uuid(), manifest: Manifest }),
   z.object({ type: z.literal("set-bot-boundary"), botId: z.uuid(), boundary: BotBoundary }),
-  z.object({ type: z.literal("set-bot-control"), botId: z.uuid(), control: BotControl }),
+  // `host` needs `hostConsent`: the owner agreeing, just now, to let the bot use this PC.
+  z.object({
+    type: z.literal("set-bot-control"),
+    botId: z.uuid(),
+    control: BotControl,
+    hostConsent: z.literal(true).optional(),
+  }),
   // The owner's live view of their own display, while a host bot works.
   z.object({ type: z.literal("host-frame") }),
   z.object({ type: z.literal("host-hold"), held: z.boolean() }),

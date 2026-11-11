@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node scripts/start-electron.mjs",
     "test": "vp test run",
-    "dist:win": "electron-builder --win nsis",
+    "dist:win": "node ../../scripts/prepare-cua-driver.ts && electron-builder --win nsis",
     "dist:mac": "electron-builder --mac dmg",
     "dist:linux": "electron-builder --linux AppImage"
   },

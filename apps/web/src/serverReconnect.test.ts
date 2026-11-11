@@ -21,6 +21,7 @@ async function load() {
   vi.resetModules();
   vi.stubGlobal("window", { location: { search: "?serverUrl=http://127.0.0.1:1&token=t" } });
   vi.stubGlobal("localStorage", { getItem: () => null });
+  vi.stubGlobal("document", { addEventListener: () => {}, visibilityState: "visible" });
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("fetch", async (url: URL) => {
     if (url.pathname !== "/health") {

@@ -309,6 +309,7 @@ it("switches where a bot works from its panel, and asks consent there before thi
     type: "set-bot-control",
     botId: bot.id,
     control: "host",
+    hostConsent: true,
   });
   expect(host.textContent).not.toContain("Let Ada use this PC?");
 
@@ -443,11 +444,14 @@ const frameCalls = () =>
 it("polls the owner's screen, faster while the bot works, and stops when closed", async () => {
   vi.useFakeTimers();
   try {
-    postCommand.mockResolvedValue({ ok: true, body: { data: "BBBB", width: 1920, height: 1080 } });
+    postCommand.mockResolvedValue({
+      ok: true,
+      body: { data: "BBBB", width: 1920, height: 1080, mime: "image/png" },
+    });
     const available = { available: true, problem: null, held: false };
     await showHost(available);
     expect(frameCalls()).toBe(1);
-    expect(query("img")?.getAttribute("src")).toBe("data:image/jpeg;base64,BBBB");
+    expect(query("img")?.getAttribute("src")).toBe("data:image/png;base64,BBBB");
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(frameCalls()).toBe(1);
     await act(async () => vi.advanceTimersByTimeAsync(4000));

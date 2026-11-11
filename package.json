@@ -5,6 +5,7 @@
   "scripts": {
     "prepare": "vp config --no-agent",
     "dev:desktop": "node scripts/dev-runner.ts",
+    "prepare:cua": "node scripts/prepare-cua-driver.ts",
     "start:desktop": "vp run --filter @beebot/desktop start",
     "build": "vp run --filter \"./apps/*\" --filter ./apps/boxd/egress build",
     "typecheck": "vp run -r --cache --concurrency-limit 4 typecheck",

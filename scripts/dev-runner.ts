@@ -9,6 +9,13 @@ if (NodeFS.existsSync(envFile)) {
   process.loadEnvFile(envFile);
 }
 
+if (
+  process.platform === "win32" &&
+  !NodeFS.existsSync(NodePath.join(repoRoot, "apps/desktop/vendor/cua-driver/cua-driver.exe"))
+) {
+  console.log("This PC uses the PowerShell driver; run `pnpm prepare:cua` for cua-driver.");
+}
+
 // `localhost` can resolve to ::1 on Windows and hang the TCP wait in dev-electron.
 const host = "127.0.0.1";
 const port = process.env.PORT ?? "5833";

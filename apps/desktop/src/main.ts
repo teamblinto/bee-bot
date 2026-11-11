@@ -1,9 +1,12 @@
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { type Command, protocolVersion } from "@beebot/contracts";
 import {
   app,
   BrowserWindow,
+  globalShortcut,
   Menu,
   nativeImage,
   Notification,
@@ -14,7 +17,7 @@ import {
 } from "electron";
 
 import { watchNotices } from "./notices.ts";
-import { sendPower, startServer, stopServer } from "./server.ts";
+import { sendIdle, sendPower, startServer, stopServer } from "./server.ts";
 import { loadVaultKey } from "./vault.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
@@ -27,7 +30,14 @@ if (app.isPackaged) {
 // Windows drops notifications from an app whose ID doesn't match its Start Menu shortcut.
 if (process.platform === "win32") {
   app.setAppUserModelId("com.teamblinto.beebot");
+  // A bot uses this PC only while Bee Bot's window can be seen. Without this, Chromium calls a
+  // window covered by the apps the bot opens hidden, and the bot would stop itself.
+  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 }
+
+// Takes this PC back from whatever bot is using it, like the panel's Take control. Three modifiers
+// and a letter: on every keyboard, reserved by nothing in Windows, and unlikely to clash with apps.
+const stopShortcut = "Ctrl+Alt+Shift+X";
 
 let connection: Awaited<ReturnType<typeof startServer>>;
 let serverStopped = false;
@@ -35,6 +45,7 @@ let quitting = false;
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let stopNotices: (() => void) | undefined;
+let idleTimer: NodeJS.Timeout | undefined;
 // Electron drops a notification's click handler once nothing holds the notification.
 const shownNotifications = new Set<Notification>();
 
@@ -71,7 +82,11 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  const query = { serverUrl: connection.url, token: connection.token };
+  const query = {
+    serverUrl: connection.url,
+    token: connection.token,
+    ...(globalShortcut.isRegistered(stopShortcut) && { stopShortcut }),
+  };
   const webIndex = NodePath.join(
     __dirname,
     app.isPackaged ? "../web/index.html" : "../../web/dist/index.html",
@@ -139,6 +154,18 @@ app.on("window-all-closed", () => {});
 
 app.on("activate", openWindow);
 
+function takeHostBack() {
+  const url = new URL("/commands", connection.url);
+  url.searchParams.set("protocolVersion", String(protocolVersion));
+  void fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${connection.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "host-hold", held: true } satisfies Command),
+  }).catch(() => {});
+}
+
+app.on("will-quit", () => globalShortcut.unregisterAll());
+
 app.on("before-quit", (event) => {
   quitting = true;
   if (serverStopped) {
@@ -146,6 +173,7 @@ app.on("before-quit", (event) => {
   }
   event.preventDefault();
   stopNotices?.();
+  clearInterval(idleTimer);
   void stopServer().finally(() => {
     serverStopped = true;
     app.quit();
@@ -153,6 +181,14 @@ app.on("before-quit", (event) => {
 });
 
 async function start() {
+  // The server runs in the owner's session, so it can drive this desktop for `host` bots.
+  const hostControl = true;
+  const cuaDriver = NodePath.join(
+    app.isPackaged ? process.resourcesPath : NodePath.join(__dirname, "../vendor"),
+    "cua-driver",
+    "cua-driver.exe",
+  );
+  const hasCuaDriver = process.platform === "win32" && NodeFS.existsSync(cuaDriver);
   try {
     connection = await startServer({
       entry: NodePath.join(
@@ -163,8 +199,8 @@ async function start() {
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
       fakeEngine: Boolean(devServerUrl),
       vault: await loadVaultKey(safeStorage, NodePath.join(app.getPath("userData"), "vault-key")),
-      // The server runs in the owner's session, so it can drive this desktop for `host` bots.
-      hostControl: true,
+      hostControl,
+      ...(hasCuaDriver && { cuaDriver }),
     });
   } catch {
     app.quit();
@@ -172,6 +208,12 @@ async function start() {
   }
   powerMonitor.on("suspend", () => sendPower("suspend"));
   powerMonitor.on("resume", () => sendPower("resume"));
+  if (process.platform === "win32") {
+    globalShortcut.register(stopShortcut, takeHostBack);
+  }
+  if (process.platform === "win32" && hostControl) {
+    idleTimer = setInterval(() => sendIdle(powerMonitor.getSystemIdleTime()), 1000);
+  }
   createTray();
   createWindow();
   stopNotices = watchNotices(connection.url, connection.token, ({ title, body }) => {

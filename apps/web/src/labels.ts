@@ -277,6 +277,21 @@ const toolVerbs = new Map([
     "mcp__bee__memory_forget",
     { running: "Forgetting a memory", done: "", bare: "Forgot a memory" },
   ],
+  ["mcp__bee__computer_windows", { running: "Listing windows", done: "", bare: "Listed windows" }],
+  ["mcp__bee__computer_open", { running: "Opening an app", done: "", bare: "Opened an app" }],
+  [
+    "mcp__bee__computer_look",
+    { running: "Looking at a window", done: "", bare: "Looked at a window" },
+  ],
+  [
+    "mcp__bee__computer_desktop",
+    { running: "Looking at the screen", done: "", bare: "Looked at the screen" },
+  ],
+  ["mcp__bee__computer_window_click", { running: "Clicking", done: "", bare: "Clicked" }],
+  ["mcp__bee__computer_window_type", { running: "Typing", done: "", bare: "Typed" }],
+  ["mcp__bee__computer_window_key", { running: "Pressing keys", done: "", bare: "Pressed keys" }],
+  ["mcp__bee__computer_window_scroll", { running: "Scrolling", done: "", bare: "Scrolled" }],
+  ["mcp__bee__computer_window_drag", { running: "Dragging", done: "", bare: "Dragged" }],
 ]);
 
 export function toolRowLabel({ name, detail, status }: Omit<LiveTool, "id">) {

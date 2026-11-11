@@ -19,6 +19,7 @@ const { postCommand, models, chat, server } = vi.hoisted(() => ({
 }));
 vi.mock("../serverConnection", () => ({
   postCommand,
+  stopShortcut: null,
   subscribeToConnection: () => () => undefined,
   getConnectionState: () => ({ models, chat, hostControl: server.hostControl }),
 }));
@@ -194,6 +195,7 @@ it("moves a bot onto this computer only after the owner consents", async () => {
       type: "set-bot-control",
       botId: ada.id,
       control: "host",
+      hostConsent: true,
     });
   } finally {
     server.hostControl = undefined;

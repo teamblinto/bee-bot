@@ -3,7 +3,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import { Bootstrap, type EngineLane, noRestartExitCodes, PowerSignal } from "@beebot/contracts";
+import {
+  Bootstrap,
+  type EngineLane,
+  IdleSignal,
+  noRestartExitCodes,
+  PowerSignal,
+} from "@beebot/contracts";
 
 import { boxLayout } from "./boxEngine.ts";
 import { startBoxHost, windowsPodman } from "./boxHost.ts";
@@ -11,6 +17,7 @@ import { createBoxService, defaultBoxMachine, podmanMachine } from "./boxSetup.t
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
+import { spawnCuaDriver } from "./cuaScreen.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { spawnHostDriver } from "./hostScreen.ts";
 import { setupPath } from "./hostSetup.ts";
@@ -43,6 +50,14 @@ function parseBootstrap(line: string) {
 function parsePower(line: string) {
   try {
     return PowerSignal.safeParse(JSON.parse(line)).data;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseIdle(line: string) {
+  try {
+    return IdleSignal.safeParse(JSON.parse(line)).data;
   } catch {
     return undefined;
   }
@@ -142,6 +157,11 @@ async function boot(bootstrap: Bootstrap) {
     return turn.launch.engineAccountId === "codex" ? host.codex(turn) : host.claude(turn);
   };
   const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
+  const hostControl = bootstrap.hostControl === true && process.platform === "win32";
+  const { cuaDriver } = bootstrap;
+  if (hostControl && !cuaDriver) {
+    console.error("beebotd: no cua-driver, so bots on This PC move the owner's own pointer");
+  }
   const server = await startServer({
     ...bootstrap,
     store,
@@ -161,10 +181,10 @@ async function boot(bootstrap: Bootstrap) {
     boxes,
     browserRuntime: createCdpBrowserRuntime(boxes.sidecar),
     // This executable is the desktop app's own (ELECTRON_RUN_AS_NODE), so its windows are Bee Bot's.
-    hostDriver:
-      bootstrap.hostControl && process.platform === "win32"
-        ? () => spawnHostDriver(NodePath.join(dataDir, "runtime"), process.execPath)
-        : undefined,
+    hostDriver: hostControl
+      ? () => spawnHostDriver(NodePath.join(dataDir, "runtime"), process.execPath)
+      : undefined,
+    cuaDriver: hostControl && cuaDriver ? () => spawnCuaDriver(cuaDriver) : undefined,
   });
   port = server.port;
   void boxes.refresh();
@@ -185,6 +205,7 @@ async function boot(bootstrap: Bootstrap) {
   }, pruneEveryMs);
   return {
     power: server.power,
+    idle: server.idle,
     stop: async () => {
       clearInterval(pruning);
       await server.close();
@@ -230,6 +251,10 @@ if (fileFlag === -1) {
       const signal = parsePower(line);
       if (signal) {
         void running.then(({ power }) => power(signal.power));
+      }
+      const idle = parseIdle(line);
+      if (idle) {
+        void running.then((server) => server.idle(idle.idleSeconds));
       }
       return;
     }

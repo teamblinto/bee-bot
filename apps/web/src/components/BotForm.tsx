@@ -17,7 +17,12 @@ import {
 } from "react";
 
 import { codexRulesWarning, laneLabels, projectPathValue } from "../labels";
-import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
+import {
+  getConnectionState,
+  postCommand,
+  stopShortcut,
+  subscribeToConnection,
+} from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { controlOptions, controlOrder } from "./controlOptions";
 import { ModelPicker } from "./ModelPicker";
@@ -167,7 +172,12 @@ export function BotForm({
     const created = result.ok ? Bot.safeParse(result.body).data : undefined;
     const controlResult =
       created && created.control !== control
-        ? await postCommand({ type: "set-bot-control", botId: created.id, control })
+        ? await postCommand({
+            type: "set-bot-control",
+            botId: created.id,
+            control,
+            ...(control === "host" && hostConsent && { hostConsent: true }),
+          })
         : undefined;
     const boundary = inBox ? "box" : "host";
     const boundaryResult =
@@ -333,8 +343,10 @@ export function BotForm({
             />
             <span>
               I understand {name.trim() || "this bot"} will see screenshots of my screen, which go
-              to its model provider, and will move my mouse and type. It can reach my apps and the
-              accounts I'm signed in to. It works only while I watch, and moving my mouse stops it.
+              to its model provider, and will click and type in my apps. Where it can, it works
+              behind my windows with a pointer of its own; otherwise it briefly uses my mouse and
+              keyboard. It can reach my apps and the accounts I'm signed in to. It works only while
+              I watch, and Take control{stopShortcut && ` (${stopShortcut})`} stops it.
             </span>
           </label>
         )}

@@ -11,3 +11,4 @@ release/
 .env*
 !.env.example
 .claude/worktrees/
+apps/desktop/vendor/

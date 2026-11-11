@@ -75,6 +75,15 @@ const beeTools = [
   "computer_key",
   "computer_scroll",
   "computer_drag",
+  "computer_windows",
+  "computer_open",
+  "computer_look",
+  "computer_desktop",
+  "computer_window_click",
+  "computer_window_type",
+  "computer_window_key",
+  "computer_window_scroll",
+  "computer_window_drag",
 ].map((name) => `mcp__bee__${name}`);
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
