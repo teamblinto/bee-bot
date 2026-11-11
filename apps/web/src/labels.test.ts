@@ -166,6 +166,9 @@ it("lets onboarding through on any version or an unknown login, but not a real p
   expect(fixFor({ cliFound: false, pauseReason: "cli_missing" })).toBe(
     "Claude Code isn't installed",
   );
+  const missing = { ...ready, cliFound: false };
+  expect(engineFix(missing)?.command).toBeUndefined();
+  expect(engineFix(missing, { os: "macos", linuxFamily: null })?.command).toContain("install.sh");
   expect(fixFor({ pauseReason: "cli_failed" })).toBe("Claude Code didn't start");
   expect(fixFor({ auth: "unauthenticated", pauseReason: "auth_failed" })).toBe(
     "Claude isn't logged in",

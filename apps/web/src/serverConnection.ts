@@ -7,6 +7,7 @@ import {
   type Command,
   EngineStatus,
   type HostControlAvailability,
+  HostPlatform,
   type ModelCatalog,
   type PendingApproval,
   protocolVersion,
@@ -458,6 +459,17 @@ async function fetchEngine() {
   }
 }
 
+export async function fetchHost() {
+  try {
+    const response = await fetch(endpoint("/host"), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return response.ok ? HostPlatform.safeParse(await response.json()).data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function fetchUsage(days: number): Promise<UsageSummary> {
   try {
     const url = endpoint("/usage");
@@ -567,6 +579,9 @@ const errorSentences: Record<string, string> = {
   boxes_unavailable: "Boxes aren't available. Set them up on the Usage page first.",
   boxes_unsupported: "This server can't run boxes.",
   host_control_unavailable: "Bots can't use this computer right now.",
+  no_setup_command: "There's no install command for this computer. Get Podman from podman.io.",
+  no_terminal: "Bee Bot couldn't open a terminal. Copy the command and run it in your terminal.",
+  terminal_failed: "The terminal didn't open. Copy the command and run it in your terminal.",
   host_screen_failed: "Bee Bot couldn't show your screen. Try again in a moment.",
   bad_egress_host:
     "Enter site names only, like pypi.org: no https://, path, port, wildcard, IP address or local name.",

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { BoxAvailability, EngineStatus } from "@beebot/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -16,6 +17,7 @@ vi.mock("../serverConnection", async (importOriginal) => {
     postCommand,
     requestNotifications: vi.fn(),
     checkEngine: vi.fn(),
+    fetchHost: vi.fn(async () => ({ os: "windows", linuxFamily: null })),
     subscribeToConnection: () => () => undefined,
     getConnectionState: () => current.state ?? actual.getConnectionState(),
   };
@@ -43,55 +45,97 @@ afterEach(() => {
   host.remove();
 });
 
-const notice = "consumer terms don't allow automated access";
+const healthy: EngineStatus = {
+  cliFound: true,
+  version: "2.1.0",
+  auth: "authenticated",
+  email: "owner@example.com",
+  pauseReason: null,
+};
 
-function show(automatedAccessAcknowledgedAt: string | null) {
+const ready: BoxAvailability = {
+  machine: "beebot",
+  podmanFound: true,
+  machineFound: true,
+  boxdInstalled: true,
+  imageBuilt: true,
+  available: true,
+  settingUp: false,
+  progress: null,
+  problem: null,
+};
+
+async function show(engine: EngineStatus, boxAvailability: BoxAvailability = ready) {
   const initial = getConnectionState();
   const state: ConnectionState = {
     ...initial,
-    boxAvailability: {
-      machine: "beebot",
-      machineFound: true,
-      boxdInstalled: true,
-      imageBuilt: true,
-      available: true,
-      settingUp: false,
-      progress: null,
-      problem: null,
-    },
-    chat: {
-      ...initial.chat,
-      noticeAcknowledgedAt: "2026-11-08T00:00:00.000Z",
-      automatedAccessAcknowledgedAt,
-      vault: { apiKeys: ["claude"] },
-    },
+    status: "connected",
+    engine,
+    boxAvailability,
+    chat: { ...initial.chat, vault: { apiKeys: ["claude"] } },
   };
   current.state = state;
-  act(() => root.render(<Onboarding connection={state} onCreated={vi.fn()} onNotNow={vi.fn()} />));
+  await act(async () =>
+    root.render(<Onboarding connection={state} onCreated={vi.fn()} onNotNow={vi.fn()} />),
+  );
 }
 
-it("stops at the automated-access notice until the owner has read it", async () => {
-  show(null);
-  expect(host.textContent).toContain(notice);
-  expect(host.textContent).not.toContain("Create your first bot");
-  const button = [...host.querySelectorAll("button")].find(
-    ({ textContent }) => textContent === "I understand",
-  );
-  await act(async () => button?.click());
-  expect(postCommand).toHaveBeenCalledWith({ type: "acknowledge-automated-access" });
+const button = (label: string) =>
+  [...host.querySelectorAll("button")].find(({ textContent }) => textContent === label);
+
+it("installs a missing Claude Code from a terminal window, showing the command too", async () => {
+  await show({
+    ...healthy,
+    cliFound: false,
+    version: null,
+    email: null,
+    pauseReason: "cli_missing",
+  });
+  expect(button("Continue")?.disabled).toBe(true);
+  expect(host.textContent).toContain("irm https://claude.ai/install.ps1 | iex");
+  await act(async () => button("Install")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "open-setup-terminal", step: "claude-install" });
+  expect(host.textContent).toContain("Finish in the terminal window");
 });
 
-it("shows the notice again on a new bot put in a box, which runs on the API key by default", () => {
-  show("2026-11-08T00:00:00.000Z");
+it("shows a refused terminal window, keeping the command to copy", async () => {
+  postCommand.mockResolvedValue({ ok: false, message: "No terminal found." });
+  await show({ ...healthy, auth: "unauthenticated", email: null, pauseReason: "auth_failed" });
+  await act(async () => button("Sign in")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "open-setup-terminal", step: "claude-login" });
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe("No terminal found.");
+  expect(host.textContent).toContain("claude auth login");
+});
+
+it("offers to install Podman when it's missing", async () => {
+  await show(healthy, { ...ready, podmanFound: false, machineFound: false, available: false });
+  await act(async () => button("Install Podman")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "open-setup-terminal", step: "podman-install" });
+  expect(host.textContent).toContain("winget install");
+});
+
+it("looks for Podman again when the owner comes back from installing it", async () => {
+  await show(healthy, { ...ready, podmanFound: false, machineFound: false, available: false });
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(postCommand).toHaveBeenCalledWith({ type: "set-up-boxes" });
+});
+
+it("doesn't start setup on focus when Podman is already there", async () => {
+  await show(healthy, { ...ready, available: false, problem: "Not set up yet" });
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(postCommand).not.toHaveBeenCalled();
+});
+
+it("lets the owner skip computers once Claude works, and continue only with both", async () => {
+  await show(healthy, { ...ready, available: false, problem: "The box image isn't built." });
+  expect(button("Continue")?.disabled).toBe(true);
+  expect(button("Skip for now")?.disabled).toBe(false);
+  act(() => button("Skip for now")?.click());
   expect(host.textContent).toContain("Create your first bot");
-  expect(host.textContent).not.toContain(notice);
-  const box = [...host.querySelectorAll("label")]
-    .find(({ textContent }) => textContent === "Run in a box")
-    ?.querySelector("input");
-  act(() => box?.click());
-  expect(host.textContent).toContain(notice);
-  const lane = [...host.querySelectorAll("label")]
-    .find(({ textContent }) => textContent?.startsWith("On its own, it uses"))
-    ?.querySelector("select");
-  expect(lane?.value).toBe("api_key");
+
+  act(() => root.render(null));
+  await show(healthy);
+  expect(button("Skip for now")).toBeUndefined();
+  act(() => button("Continue")?.click());
+  expect(host.textContent).toContain("Create your first bot");
 });

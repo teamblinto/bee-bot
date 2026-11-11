@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 30;
+export const protocolVersion = 31;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -294,9 +294,50 @@ export const HostControlAvailability = z.object({
 });
 export type HostControlAvailability = z.infer<typeof HostControlAvailability>;
 
+// The computer the server runs on, so setup can name commands that work there.
+export const HostPlatform = z.object({
+  os: z.enum(["windows", "macos", "linux"]),
+  // Which package manager installs Podman. Null off Linux, or on a distro Bee Bot doesn't know.
+  linuxFamily: z.enum(["debian", "fedora", "arch", "suse"]).nullable(),
+});
+export type HostPlatform = z.infer<typeof HostPlatform>;
+
+export const SetupStep = z.enum(["claude-install", "claude-login", "podman-install"]);
+export type SetupStep = z.infer<typeof SetupStep>;
+
+// One place for the commands, so the screen shows exactly what the terminal will run. Null when
+// there is no command for this computer.
+export function setupCommand({ os, linuxFamily }: HostPlatform, step: SetupStep) {
+  switch (step) {
+    case "claude-install":
+      return os === "windows"
+        ? "irm https://claude.ai/install.ps1 | iex"
+        : "curl -fsSL https://claude.ai/install.sh | bash";
+    case "claude-login":
+      return "claude auth login";
+    case "podman-install":
+      if (os === "windows") {
+        // Podman machines run on WSL 2; `wsl --install` is a no-op where it already is.
+        return "winget install --exact --id RedHat.Podman --accept-source-agreements --accept-package-agreements; wsl --install --no-distribution";
+      }
+      if (os === "macos") {
+        return "brew install podman";
+      }
+      return linuxFamily && linuxPodman[linuxFamily];
+  }
+}
+
+const linuxPodman = {
+  debian: "sudo apt-get update && sudo apt-get install -y podman",
+  fedora: "sudo dnf install -y podman",
+  arch: "sudo pacman -S --needed --noconfirm podman",
+  suse: "sudo zypper install -y podman",
+};
+
 // Whether box bots can run on this computer, and what is missing if not. Never persisted.
 export const BoxAvailability = z.object({
   machine: z.string(),
+  podmanFound: z.boolean(),
   machineFound: z.boolean(),
   boxdInstalled: z.boolean(),
   imageBuilt: z.boolean(),
@@ -924,6 +965,8 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("host-hold"), held: z.boolean() }),
   z.object({ type: z.literal("set-box-machine"), machine: BoxMachineName }),
   z.object({ type: z.literal("set-up-boxes") }),
+  // Opens a terminal on this computer with the step's command typed out, run only on Enter.
+  z.object({ type: z.literal("open-setup-terminal"), step: SetupStep }),
   // Control (input) is issued only for the lease the asker holds.
   z.object({
     type: z.literal("display-ticket"),

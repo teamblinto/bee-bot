@@ -220,6 +220,8 @@ export function createBoxService({
   let host: { machine: string; host: BoxHost } | undefined;
   let status: BoxAvailability = {
     machine: machine(),
+    // Until the first probe, so a check doesn't flash an install step at someone who has Podman.
+    podmanFound: true,
     machineFound: false,
     boxdInstalled: false,
     imageBuilt: false,
@@ -320,6 +322,7 @@ ${started.stderr()}`);
       problem = error instanceof Error ? error.message : String(error);
     }
     set({
+      podmanFound: !found.podmanProblem,
       machineFound: found.found,
       boxdInstalled: found.boxdInstalled,
       imageBuilt: found.imageBuilt,

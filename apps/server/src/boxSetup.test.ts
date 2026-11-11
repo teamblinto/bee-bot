@@ -144,13 +144,18 @@ it("never starts a machine on boot that boxes never came up in", async () => {
   expect(service.availability().problem).toContain("Setting up starts it");
 });
 
-it("installs nothing when Podman is missing", async () => {
-  const { service, calls } = setup({
+it("installs nothing when Podman is missing, and sees it once it is installed", async () => {
+  const machines: Record<string, MachineProbe> = {
     beebot: { ...absent, podmanProblem: "Podman isn't installed." },
-  });
+  };
+  const { service, calls } = setup(machines);
   await service.setUp();
   expect(calls).toEqual([]);
+  expect(service.availability()).toMatchObject({ podmanFound: false });
   expect(service.availability().problem).toContain("podman.io");
+  machines.beebot = absent;
+  await service.refresh();
+  expect(service.availability()).toMatchObject({ podmanFound: true, machineFound: false });
 });
 
 it("starts on its own once set up, and moves to a newly chosen machine", async () => {

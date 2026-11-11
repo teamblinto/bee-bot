@@ -88,6 +88,7 @@ const lease = (fields: object) =>
 
 const ready: BoxAvailability = {
   machine: "beebot",
+  podmanFound: true,
   machineFound: true,
   boxdInstalled: true,
   imageBuilt: true,

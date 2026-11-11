@@ -40,6 +40,38 @@ function boxUnavailableReason(boxes: BoxAvailability | undefined) {
     : "Boxes aren't set up. Set them up on the Usage page.";
 }
 
+function AcknowledgeRisk() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function acknowledge() {
+    setBusy(true);
+    setError(undefined);
+    const result = await postCommand({ type: "acknowledge-automated-access" });
+    // On success this unmounts when the acknowledged event arrives.
+    if (!result.ok) {
+      setBusy(false);
+      setError(result.message);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div>
+        <button
+          type="button"
+          className="button button-outline"
+          disabled={busy}
+          onClick={() => void acknowledge()}
+        >
+          I understand the risk
+        </button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+
 export function BotForm({
   bot,
   submitLabel,
@@ -347,6 +379,7 @@ export function BotForm({
               </p>
             )}
             <AutomatedAccessNotice />
+            {!automatedAccessRead && <AcknowledgeRisk />}
           </>
         )}
       </div>

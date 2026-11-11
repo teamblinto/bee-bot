@@ -1,4 +1,5 @@
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
@@ -12,11 +13,15 @@ import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } f
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { spawnHostDriver } from "./hostScreen.ts";
+import { setupPath } from "./hostSetup.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
 import { openVault, readVaultKeyFile } from "./vaultStore.ts";
 import { createAwakeClock } from "./watchdog.ts";
+
+// Setup's installers can finish while Bee Bot runs; this lets it find what they installed.
+process.env.PATH = setupPath(process.env.PATH, process.platform, NodeOS.homedir());
 
 const bootstrapTimeoutMs = 5000;
 const pruneEveryMs = 24 * 60 * 60_000;

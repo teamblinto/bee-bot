@@ -6,6 +6,7 @@ import {
   type EngineAccount,
   type EngineLane,
   type EngineStatus,
+  type HostPlatform,
   type MemoryItem,
   memoryRequest,
   type MemoryType,
@@ -13,6 +14,7 @@ import {
   type RoutineFiring,
   type Run,
   type RunReason,
+  setupCommand,
   type UsageLimits,
   type UsageRow,
 } from "@beebot/contracts";
@@ -77,15 +79,12 @@ export const connectionLines = {
 };
 
 // Only the first failing item: each check depends on the one before it.
-export function engineFix(engine: EngineStatus) {
+export function engineFix(engine: EngineStatus, host?: HostPlatform) {
   if (!engine.cliFound) {
     return {
       label: "Claude Code isn't installed",
       text: "Install Claude Code from a terminal, then check again.",
-      // The only install command confirmed so far.
-      command: navigator.userAgent.includes("Windows")
-        ? "irm https://claude.ai/install.ps1 | iex"
-        : undefined,
+      command: host && setupCommand(host, "claude-install"),
     };
   }
   if (engine.pauseReason === "cli_failed") {

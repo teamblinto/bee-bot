@@ -50,11 +50,7 @@ function Home() {
     );
   }
 
-  if (
-    !chat.noticeAcknowledgedAt ||
-    !chat.automatedAccessAcknowledgedAt ||
-    (chat.bots.length === 0 && !notNow)
-  ) {
+  if (chat.bots.length === 0 && !notNow) {
     return (
       <Onboarding
         connection={connection}

@@ -332,7 +332,7 @@ it("narrows a bot with a browser but no box from any site to its own list", asyn
   ]);
 });
 
-it("offers the subscription only after the automated-access notice was read", () => {
+it("offers the subscription only after the automated-access notice was read", async () => {
   chat.vault.apiKeys = ["claude"];
   chat.automatedAccessAcknowledgedAt = null;
   try {
@@ -362,6 +362,14 @@ it("offers the subscription only after the automated-access notice was read", ()
       .find(({ textContent }) => textContent?.startsWith("On its own, it uses"))
       ?.querySelector<HTMLOptionElement>('option[value="subscription"]');
     expect(lane?.disabled).toBe(true);
+    postCommand.mockResolvedValue({ ok: false, message: "no" });
+    await act(async () =>
+      [...host.querySelectorAll("button")]
+        .find(({ textContent }) => textContent === "I understand the risk")
+        ?.click(),
+    );
+    expect(postCommand).toHaveBeenCalledWith({ type: "acknowledge-automated-access" });
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("no");
   } finally {
     chat.vault.apiKeys = [];
     chat.automatedAccessAcknowledgedAt = "2026-11-08T00:00:00.000Z";

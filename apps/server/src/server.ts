@@ -20,6 +20,7 @@ import {
   protocolVersion,
   type ServerInfo,
   type ServerMessage,
+  setupCommand,
   usageDays,
   type UsageRefreshResult,
 } from "@beebot/contracts";
@@ -50,6 +51,7 @@ import {
   type Screen,
 } from "./computer.ts";
 import { createHostScreen, type HostDriver, hostAvailability } from "./hostScreen.ts";
+import { hostPlatform, openSetupTerminal } from "./hostSetup.ts";
 import {
   createDesktopControl,
   createDisplayTickets,
@@ -816,6 +818,15 @@ export async function startServer({
         // Building the image takes minutes: progress arrives as box-availability.
         void boxes.setUp();
         return ok;
+      case "open-setup-terminal": {
+        const setup = setupCommand(hostPlatform(), command.step);
+        if (!setup) {
+          return { status: 409, body: { code: "no_setup_command" } };
+        }
+        return openSetupTerminal(setup).then((opened) =>
+          opened === "opened" ? ok : { status: 409, body: { code: opened } },
+        );
+      }
     }
   }
 
@@ -1036,6 +1047,8 @@ export async function startServer({
       }
     } else if (request.method === "GET" && url.pathname === "/engine") {
       void handleEngine(response);
+    } else if (request.method === "GET" && url.pathname === "/host") {
+      sendJson(response, 200, hostPlatform());
     } else if (request.method === "GET" && url.pathname === "/audit") {
       const query = auditQuery(url);
       sendJson(
