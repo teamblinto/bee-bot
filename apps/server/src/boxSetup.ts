@@ -3,6 +3,7 @@ import * as NodeFs from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers/promises";
 
+import { missingSources } from "@beebot/box/containerfile";
 import type { BoxAvailability, BoxState } from "@beebot/contracts";
 import { z } from "zod";
 
@@ -28,7 +29,7 @@ const machineMemoryMiB = 4096;
 // boxd that ran this long and then went away is brought back once by itself.
 const reconnectAfterMs = 60_000;
 
-const imageDir = NodePath.join(boxRoot, "images/box");
+const defaultImageDir = NodePath.join(boxRoot, "images/box");
 
 export type MachineProbe = {
   found: boolean;
@@ -68,7 +69,7 @@ function podman(bin: string, args: string[], onLine?: (line: string) => void) {
   });
 }
 
-const boxImage = () =>
+const boxImage = (imageDir: string) =>
   z
     .object({ image: z.string() })
     .parse(JSON.parse(NodeFs.readFileSync(NodePath.join(imageDir, "runSpec.json"), "utf8"))).image;
@@ -87,7 +88,7 @@ async function machineCommand(
 
 // Never removes a machine, and stops one only to restart it. Rootless: boxd runs as the machine's
 // own user either way (see machineSsh).
-export function podmanMachine(bin: string, installDir: string) {
+export function podmanMachine(bin: string, installDir: string, imageDir = defaultImageDir) {
   return {
     init: (machine: string, onProgress: (progress: SetupProgress) => void) => {
       const follow = initProgress();
@@ -127,7 +128,7 @@ export function podmanMachine(bin: string, installDir: string) {
         return { ...none, found: true };
       }
       const [image, boxd] = await Promise.all([
-        podman(bin, ["--connection", machine, "image", "exists", boxImage()]),
+        podman(bin, ["--connection", machine, "image", "exists", boxImage(imageDir)]),
         podman(bin, [
           ...machineSsh(inspect.stdout, machine),
           `test -x "$HOME/${installDir}/node/bin/node" && test -f "$HOME/${installDir}/main.ts"`,
@@ -146,10 +147,16 @@ export function podmanMachine(bin: string, installDir: string) {
       };
     },
     buildImage: async (machine: string, onProgress: (progress: SetupProgress) => void) => {
+      const missing = missingSources(imageDir);
+      if (missing.length > 0) {
+        throw new Error(
+          `Bee Bot's installation is missing files the computer needs (${missing.join(", ")}). Reinstall Bee Bot.`,
+        );
+      }
       const follow = buildProgress();
       const result = await podman(
         bin,
-        ["--connection", machine, "build", "-t", boxImage(), imageDir],
+        ["--connection", machine, "build", "-t", boxImage(imageDir), imageDir],
         (line) => {
           const next = follow(line);
           if (next) {

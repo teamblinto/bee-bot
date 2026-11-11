@@ -263,6 +263,9 @@ importers:
 
   apps/server:
     devDependencies:
+      '@beebot/box':
+        specifier: workspace:*
+        version: link:../../images/box
       '@beebot/boxd':
         specifier: workspace:*
         version: link:../boxd

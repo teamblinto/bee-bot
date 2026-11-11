@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
-    "./runSpec.json": "./runSpec.json"
+    "./runSpec.json": "./runSpec.json",
+    "./containerfile": "./containerfile.ts"
   },
   "scripts": {
     "build:image": "node build.ts",

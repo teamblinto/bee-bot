@@ -21,7 +21,7 @@ it("puts the installers' folders on PATH once", () => {
     "/home/me/.local/bin:/usr/bin",
   );
   expect(setupPath("C:\\Windows", "win32", "C:\\Users\\me")).toBe(
-    "C:\\Users\\me\\.local\\bin;C:\\Program Files\\RedHat\\Podman;C:\\Windows",
+    "C:\\Users\\me\\.local\\bin;C:\\Program Files\\RedHat\\Podman;C:\\Users\\me\\AppData\\Local\\Programs\\Podman;C:\\Windows",
   );
 });
 

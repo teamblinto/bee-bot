@@ -1,6 +1,10 @@
+import * as NodeFs from "node:fs";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
+
 import { afterEach, expect, it, vi } from "vite-plus/test";
 
-import { type BoxHost, createBoxService, type MachineProbe } from "./boxSetup.ts";
+import { type BoxHost, createBoxService, type MachineProbe, podmanMachine } from "./boxSetup.ts";
 import { MachineRestartNeeded } from "./boxdRuntime.ts";
 import { createFakeBoxRuntime } from "./boxRuntime.ts";
 
@@ -248,4 +252,23 @@ it("leaves computers down when boxd dies right after starting", async () => {
   await vi.waitFor(() => expect(service.availability().available).toBe(false));
   expect(calls.filter((call) => call === "start beebot-dev")).toHaveLength(1);
   expect(service.availability().problem).toContain("Set them up again");
+});
+
+it("names what an installation is missing instead of running a build that can't succeed", async () => {
+  const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "beebot-image-"));
+  NodeFs.writeFileSync(
+    NodePath.join(dir, "Containerfile"),
+    "FROM x\nCOPY a.sh /a\nCOPY xfce/ /etc/xfce/\n",
+  );
+  NodeFs.writeFileSync(NodePath.join(dir, "a.sh"), "");
+  try {
+    // The bin doesn't exist: reaching Podman would fail with its error, not this one.
+    await expect(
+      podmanMachine(NodePath.join(dir, "no-podman"), "beebot", dir).buildImage("m", () => {}),
+    ).rejects.toThrow(
+      "Bee Bot's installation is missing files the computer needs (xfce/). Reinstall Bee Bot.",
+    );
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
 });

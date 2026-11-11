@@ -51,7 +51,11 @@ export function setupPath(path: string | undefined, platform: NodeJS.Platform, h
   const paths = platform === "win32" ? NodePath.win32 : NodePath.posix;
   const dirs = [paths.join(home, ".local", "bin")];
   if (platform === "win32") {
-    dirs.push(NodePath.win32.dirname(windowsPodman));
+    // Podman's installer puts it under Program Files for all users, or LocalAppData for one.
+    dirs.push(
+      NodePath.win32.dirname(windowsPodman),
+      NodePath.win32.join(home, "AppData", "Local", "Programs", "Podman"),
+    );
   }
   if (platform === "darwin") {
     dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/opt/podman/bin");

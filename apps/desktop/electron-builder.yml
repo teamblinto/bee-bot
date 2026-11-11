@@ -4,6 +4,7 @@ extraMetadata:
   name: bee-bot
 artifactName: Bee-Bot-${version}-${arch}.${ext}
 npmRebuild: false
+afterPack: scripts/check-box-image.mjs
 directories:
   output: release
 files:
@@ -23,12 +24,17 @@ extraResources:
     to: box/apps/boxd/egress/dist/egress.mjs
   - from: ../../images/box
     to: box/images/box
+    # The Containerfile's build context (what .containerignore lets in), plus what the server reads.
     filter:
       - Containerfile
       - .containerignore
-      - "*.sh"
-      - "*.json"
-      - "*.conf"
-      - "*.xml"
+      - runSpec.json
+      - seccomp-chromium.json
+      - engine.sh
+      - browser.sh
+      - tmux.conf
+      - chromium-policy.json
+      - chromium.flags
+      - "xfce/**/*"
 win:
   target: nsis
