@@ -376,6 +376,17 @@ export async function connectBoxd(
     collect: async (botId, file, name) => {
       await request("collect", botId, { collect: { file, name } });
     },
+    inbox: async (botId, name, data) => {
+      const { stream, exited } = await attach((channel) =>
+        request("inbox", botId, { channel, inbox: { name } }),
+      );
+      data.on("error", (error) => stream.destroy(error));
+      stream.resume();
+      data.pipe(stream);
+      if ((await exited) !== 0) {
+        throw new Error("inbox copy failed");
+      }
+    },
     start: async (botId) => {
       await request("start", botId);
     },

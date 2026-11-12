@@ -1,4 +1,5 @@
 import {
+  AttachmentRef,
   AuditPage,
   type Bot,
   type BoxAvailability,
@@ -653,6 +654,9 @@ const errorSentences: Record<string, string> = {
   no_bot_addressed: "Which bot should answer? Mention one with @, or set a room default.",
   not_member: "That bot isn't in this room.",
   bot_archived: "That bot is archived. Restore it first.",
+  attachment_not_found: "A file wasn't uploaded, or was already sent. Attach it again.",
+  attachment_too_large: "A file can be at most 50 MB.",
+  attachment_type: "Bee Bot doesn't accept programs as attachments.",
   engine_not_allowed: "The test engine isn't available here.",
   folder_bee_data: "That folder holds Bee Bot's own data, so bots can't work there.",
   folder_home: "Bots can't work in your whole home folder. Choose a project folder inside it.",
@@ -720,6 +724,41 @@ export async function postCommand(command: Command): Promise<CommandResult> {
   } catch {
     return { ok: false, message: "Can't reach the Bee Bot server. Try again in a moment." };
   }
+}
+
+// XMLHttpRequest, not fetch: only it reports how much of the upload has gone.
+export function uploadAttachment(
+  roomId: string,
+  file: File,
+  onProgress: (fraction: number) => void,
+): Promise<{ ok: true; attachment: AttachmentRef } | { ok: false; message: string }> {
+  const url = endpoint("/attachments");
+  url.searchParams.set("room", roomId);
+  url.searchParams.set("name", file.name);
+  return new Promise((resolve) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    request.upload.onprogress = ({ loaded, total }) => onProgress(total > 0 ? loaded / total : 0);
+    request.onload = () => {
+      let body: unknown;
+      try {
+        body = JSON.parse(request.responseText);
+      } catch {
+        body = undefined;
+      }
+      const parsed = AttachmentRef.safeParse(body);
+      resolve(
+        request.status === 200 && parsed.success
+          ? { ok: true, attachment: parsed.data }
+          : { ok: false, message: errorSentence(body) },
+      );
+    };
+    request.onerror = () =>
+      resolve({ ok: false, message: "Can't reach the Bee Bot server. Try again in a moment." });
+    request.send(file);
+  });
 }
 
 // For quick actions with no place of their own: a failure shows above the composer.

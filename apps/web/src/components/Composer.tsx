@@ -3,6 +3,7 @@ import { ArrowUp, Square } from "lucide-react";
 import { type KeyboardEvent, useRef, useState } from "react";
 
 import { postCommand, requestNotifications, sendCommand } from "../serverConnection";
+import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { ComposerControls, type EngineChange, FullAccessDialog } from "./ComposerControls";
 import { iconProps } from "./ui";
 
@@ -34,6 +35,8 @@ export function Composer({
   const [confirmingFull, setConfirmingFull] = useState(false);
   const [changedDuring, setChangedDuring] = useState<string>();
   const nextTurnOnly = runId !== undefined && changedDuring === runId;
+  const files = useAttachments(bot.roomId);
+  const ready = (value.trim() !== "" || files.ids.length > 0) && !files.uploading;
 
   function changeEngine(change: EngineChange) {
     if (change.access === undefined) {
@@ -53,7 +56,7 @@ export function Composer({
   // Enter never reaches the button, so its disabled state can't be the gate.
   async function send() {
     const body = value;
-    if (sending.current || !canSend || !body.trim()) {
+    if (sending.current || !canSend || !ready) {
       return;
     }
     sending.current = true;
@@ -66,9 +69,11 @@ export function Composer({
       messageId,
       roomId: bot.roomId,
       body,
+      ...(files.ids.length > 0 && { attachmentIds: files.ids }),
     });
     sending.current = false;
     if (result.ok) {
+      files.clear();
       setMessageId(crypto.randomUUID());
     } else {
       onChange((current) => current || body);
@@ -103,7 +108,10 @@ export function Composer({
           event.preventDefault();
           void send();
         }}
+        onDrop={files.onDrop}
+        onDragOver={files.onDragOver}
       >
+        <UploadChips uploads={files.uploads} onRemove={files.remove} />
         <textarea
           ref={box}
           data-composer
@@ -122,8 +130,10 @@ export function Composer({
             setMessageId(crypto.randomUUID());
           }}
           onKeyDown={onKeyDown}
+          onPaste={files.onPaste}
         />
         <div className="flex items-center gap-2">
+          <AttachButton disabled={!canSend} onFiles={files.add} />
           <ComposerControls
             bot={bot}
             catalog={catalog}
@@ -147,7 +157,7 @@ export function Composer({
               type="submit"
               aria-label="Send"
               className="icon-send"
-              disabled={!canSend || !value.trim()}
+              disabled={!canSend || !ready}
             >
               <ArrowUp {...iconProps} />
             </button>

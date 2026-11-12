@@ -391,6 +391,7 @@ ${started.stderr()}`);
     display: async (botId, lease) => current().runtime.display(botId, lease),
     control: async (botId, lease) => current().runtime.control(botId, lease),
     collect: async (botId, file, name) => current().runtime.collect(botId, file, name),
+    inbox: async (botId, name, data) => current().runtime.inbox(botId, name, data),
     start: async (botId) => current().runtime.start(botId),
     stop: async (botId) => current().runtime.stop(botId),
     snapshot: async (botId): Promise<BoxState> => current().runtime.snapshot(botId),

@@ -1,4 +1,4 @@
-import type { Bot, Room } from "@beebot/contracts";
+import type { Bot, ChatMessage, Room } from "@beebot/contracts";
 import { Gauge, Hexagon, Monitor, Plus, ScrollText, ShieldOff, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -23,6 +23,10 @@ function statusLine({ status, engine }: ConnectionState) {
   return engineFix(engine)?.label ?? "Claude ready";
 }
 
+const previewLine = (message: ChatMessage | undefined) =>
+  message?.body.replace(/[`*_~]|^[#>\s]+/gm, "").trim() ||
+  (message?.attachments.length ? "Sent a file" : "");
+
 function BotRow({
   bot,
   connection,
@@ -42,7 +46,7 @@ function BotRow({
   const unread = !selected && lastBotMessage && lastBotMessage.id !== lastSeen[bot.id];
   const working = isActive(chat.runs.find(({ botId }) => botId === bot.id));
 
-  let line = last?.body.replace(/[`*_~]|^[#>\s]+/gm, "").trim() || "No messages yet";
+  let line = previewLine(last) || "No messages yet";
   if (waiting) {
     line = "Waiting on you";
   } else if (bot.status === "paused") {
@@ -157,7 +161,7 @@ function RoomRow({
   onSelect: () => void;
 }) {
   const last = connection.chat.messages.findLast(({ roomId }) => roomId === room.id);
-  const line = last?.body.replace(/[`*_~]|^[#>\s]+/gm, "").trim() || `${room.members.length} bots`;
+  const line = previewLine(last) || `${room.members.length} bots`;
   return (
     <button type="button" aria-current={selected} className={rowClass} onClick={onSelect}>
       <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary">

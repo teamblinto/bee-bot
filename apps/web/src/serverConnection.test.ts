@@ -50,6 +50,7 @@ const message = (id: string): ChatMessage => ({
   replyToId: null,
   chainId: null,
   hop: 0,
+  attachments: [],
   createdAt: "now",
 });
 const run = (status: Run["status"]): Run => ({

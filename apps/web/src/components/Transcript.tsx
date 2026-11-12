@@ -7,6 +7,7 @@ import type { LiveTool } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
 import { isOpenItem, isOutcomeMessage, itemKey, type TranscriptItem } from "../transcript";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
+import { MessageAttachments } from "./Attachments";
 import { Markdown } from "./Markdown";
 import { RoutineCard } from "./RoutineCard";
 import { TimelineMinimap } from "./TimelineMinimap";
@@ -64,9 +65,14 @@ function Item({
   }
   if (message.author === "human") {
     return (
-      <p className="ml-auto w-fit max-w-[80%] rounded-bubble bg-message px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">
-        {message.body}
-      </p>
+      <div className="ml-auto flex max-w-[80%] flex-col items-end gap-1">
+        {message.body && (
+          <p className="w-fit rounded-bubble bg-message px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">
+            {message.body}
+          </p>
+        )}
+        {message.attachments.length > 0 && <MessageAttachments attachments={message.attachments} />}
+      </div>
     );
   }
   // Only rooms name authors. A bot that was deleted left its messages behind with no bot.

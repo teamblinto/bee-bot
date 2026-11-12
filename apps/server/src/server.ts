@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import { createReadStream } from "node:fs";
 import * as NodeFS from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
@@ -29,6 +30,15 @@ import { type WebSocket, WebSocketServer } from "ws";
 
 import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals, type Execute } from "./approvals.ts";
+import {
+  attachmentMime,
+  attachmentName,
+  attachmentPath,
+  attachmentsDir,
+  maxAttachmentBytes,
+  receiveAttachment,
+  unclaimedAttachmentMs,
+} from "./attachments.ts";
 import type { BoxOptions } from "./boxEngine.ts";
 import { preToolUsePath, staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
@@ -453,6 +463,22 @@ export async function startServer({
     clock,
     boxesReady,
     onStopBot: (botId) => void browser.stop(botId),
+    copyInbox: async (botId, files) => {
+      const bot = store.getBot(botId);
+      const folder = bot && NodePath.join(workingFolder(dataDir, botId, bot.projectPath), "inbox");
+      for (const { id, roomId, file } of files) {
+        const source = attachmentPath(dataDir, roomId, id);
+        if (bot?.boundary === "box") {
+          if (!boxes) {
+            throw new Error("boxes are unavailable");
+          }
+          await boxes.runtime.inbox(botId, file, createReadStream(source));
+        } else if (folder) {
+          await NodeFS.mkdir(folder, { recursive: true });
+          await NodeFS.copyFile(source, NodePath.join(folder, file));
+        }
+      }
+    },
     onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
     onToolStart: (runId, { id, name, detail }) =>
       broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
@@ -543,7 +569,7 @@ export async function startServer({
   }
 
   // After the rows are gone, so a failure here leaves files behind, never a half-deleted bot.
-  async function removeBotFiles(botId: string) {
+  async function removeBotFiles(botId: string, dmRoomId: string) {
     const log = (what: string) => (error: unknown) =>
       console.error(
         `beebotd: ${what} of deleted bot ${botId} stayed: ${(error as Error)?.message}`,
@@ -554,6 +580,10 @@ export async function startServer({
     await NodeFS.rm(NodePath.join(dataDir, "bots", botId), { recursive: true, force: true }).catch(
       log("folder"),
     );
+    await NodeFS.rm(NodePath.dirname(attachmentsDir(dataDir, dmRoomId)), {
+      recursive: true,
+      force: true,
+    }).catch(log("attachments"));
     for (const { id } of readTeamMemoryFiles(dataDir).filter((item) => item.botId === botId)) {
       await NodeFS.rm(NodePath.join(teamMemoryDir(dataDir), `${id}.md`), { force: true }).catch(
         log("team memory"),
@@ -636,13 +666,14 @@ export async function startServer({
         return bot ? { status: 200, body: bot } : notFound;
       }
       case "send-message": {
-        const { messageId: id, roomId, body, replyToId } = command;
+        const { messageId: id, roomId, body, replyToId, attachmentIds } = command;
         const result = store.sendMessage({
           id,
           roomId,
           body,
           attended,
           ...(replyToId && { replyToId }),
+          ...(attachmentIds && { attachmentIds }),
         });
         if (result === "sent" || result === "duplicate") {
           return ok;
@@ -711,6 +742,7 @@ export async function startServer({
         return { status: 200, body: bot };
       }
       case "delete-bot": {
+        const dmRoomId = store.getBot(command.botId)?.roomId ?? "";
         const result = store.deleteBot(command.botId);
         if (result === "not_found") {
           return notFound;
@@ -718,7 +750,7 @@ export async function startServer({
         if (result === "bot_busy") {
           return { status: 409, body: { code: result } };
         }
-        void removeBotFiles(command.botId);
+        void removeBotFiles(command.botId, dmRoomId);
         return ok;
       }
       case "restore-bot": {
@@ -974,6 +1006,50 @@ export async function startServer({
     }
   }
 
+  // Raw bytes, so a file never passes through the 1 MB command body. The name and room ride in the
+  // query, the type in Content-Type.
+  async function handleUpload(
+    url: URL,
+    request: NodeHttp.IncomingMessage,
+    response: NodeHttp.ServerResponse,
+  ) {
+    const refuse = (status: number, code: string) => {
+      request.resume();
+      sendJson(response, status, { code });
+    };
+    const room = store.rooms.getRoom(url.searchParams.get("room") ?? "");
+    const mime = attachmentMime(request.headers["content-type"]);
+    if (!room) {
+      refuse(404, "not_found");
+      return;
+    }
+    if (!mime) {
+      refuse(415, "attachment_type");
+      return;
+    }
+    if (Number(request.headers["content-length"] ?? 0) > maxAttachmentBytes) {
+      refuse(413, "attachment_too_large");
+      return;
+    }
+    const id = NodeCrypto.randomUUID();
+    const name = attachmentName(url.searchParams.get("name"));
+    const received = await receiveAttachment(request, dataDir, room.id, id);
+    if (received === "too_large") {
+      sendJson(response, 413, { code: "attachment_too_large" });
+      return;
+    }
+    store.addAttachment({ id, roomId: room.id, name, mime, ...received });
+    sendJson(response, 200, { id, name, mime, size: received.size });
+  }
+
+  // Uploads never sent are dropped after a day, rows first.
+  async function sweepAttachments() {
+    const cutoff = new Date(Date.now() - unclaimedAttachmentMs).toISOString();
+    for (const { id, roomId } of store.sweepAttachments(cutoff)) {
+      await NodeFS.rm(attachmentPath(dataDir, roomId, id), { force: true }).catch(() => {});
+    }
+  }
+
   async function handleCommand(
     request: NodeHttp.IncomingMessage,
     response: NodeHttp.ServerResponse,
@@ -1213,6 +1289,13 @@ export async function startServer({
         logUsageFailure(error);
         sendJson(response, 500, { code: "storage_failed" });
       });
+    } else if (request.method === "POST" && url.pathname === "/attachments") {
+      handleUpload(url, request, response).catch((error: unknown) => {
+        console.error(`beebotd: upload failed: ${(error as Error)?.message}`);
+        if (!response.headersSent) {
+          sendJson(response, 500, { code: "storage_failed" });
+        }
+      });
     } else if (request.method === "POST" && url.pathname === "/commands") {
       handleCommand(request, response).catch(() => response.destroy());
     } else {
@@ -1339,6 +1422,11 @@ export async function startServer({
     heartbeat = awakeTimeout(clock, heartbeatMs, beat);
   };
   let heartbeat = awakeTimeout(clock, heartbeatMs, beat);
+  const logSweep = (error: unknown) =>
+    console.error(`beebotd: attachment sweep failed: ${(error as Error)?.message}`);
+  void sweepAttachments().catch(logSweep);
+  const sweeper = setInterval(() => void sweepAttachments().catch(logSweep), 60 * 60_000);
+  sweeper.unref();
   supervisor.pump();
   // Bots from before summaries, or whose summary a stop cut off.
   for (const { id } of store.botsWithoutSummary()) {
@@ -1359,6 +1447,7 @@ export async function startServer({
       stopSummaries.abort();
       await summaries;
       heartbeat.cancel();
+      clearInterval(sweeper);
       terminals?.close();
       thumbnails.close();
       approvals.close();

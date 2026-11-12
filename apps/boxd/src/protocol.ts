@@ -65,7 +65,8 @@ export type Bootstrap = {
 // to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
 // the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
 // read-only directory, and `collect` copies a download into the workspace. `destroy` removes the
-// box with its volumes and the bot's directories, for a bot that is gone for good. `skills` keeps only the
+// box with its volumes and the bot's directories, for a bot that is gone for good. `inbox` streams a
+// file the owner attached into the engine's workspace inbox. `skills` keeps only the
 // listed skills in the bot's read-only skills directory and answers which it lacks, which `skill`
 // then writes, one per request.
 export type Verb =
@@ -81,6 +82,7 @@ export type Verb =
   | "egress"
   | "put"
   | "collect"
+  | "inbox"
   | "control"
   | "input"
   | "skills"
@@ -109,6 +111,7 @@ export type Request = {
   keep?: { name: string; sha256: string }[];
   skill?: SkillCopy;
   collect?: { file: string; name: string };
+  inbox?: { name: string };
   input?: InputAction[];
   full?: boolean;
 };
@@ -145,6 +148,9 @@ export type Response =
 
 // `restartMachine`: boxd can't run until its Podman machine starts again.
 export type Hello = { ready: true } | { fatal: string; restartMachine?: true };
+
+// Where the inbox verb puts files in the engine container: the workspace volume's `inbox`.
+export const inboxTarget = "/work/inbox";
 
 export const botIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const accountPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;

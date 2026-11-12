@@ -75,6 +75,7 @@ const message = (id: string, author: ChatMessage["author"], body: string): Trans
     replyToId: null,
     chainId: null,
     hop: 0,
+    attachments: [],
     createdAt: "2026-11-06T00:00:00.000Z",
   },
 });

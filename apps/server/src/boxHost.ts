@@ -105,6 +105,10 @@ export function readyBoxRuntime(
       await ready(botId);
       return runtime.cdp(botId);
     },
+    inbox: async (botId, name, data) => {
+      await ready(botId);
+      return runtime.inbox(botId, name, data);
+    },
     display: async (botId, lease) => {
       await ready(botId);
       return runtime.display(botId, lease);

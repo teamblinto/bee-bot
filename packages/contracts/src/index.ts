@@ -168,6 +168,15 @@ export const Bot = z.object({
 });
 export type Bot = z.infer<typeof Bot>;
 
+// A file the owner attached to a message. Bots find it in their inbox folder.
+export const AttachmentRef = z.object({
+  id: z.string(),
+  name: z.string(),
+  mime: z.string(),
+  size: z.number(),
+});
+export type AttachmentRef = z.infer<typeof AttachmentRef>;
+
 export const ChatMessage = z.object({
   id: z.string(),
   roomId: z.string(),
@@ -182,6 +191,7 @@ export const ChatMessage = z.object({
   replyToId: z.string().nullable(),
   chainId: z.string().nullable(),
   hop: z.number(),
+  attachments: z.array(AttachmentRef),
   createdAt: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -676,6 +686,7 @@ export const skillUsable = ({ sha256, reviewedSha256 }: Pick<Skill, "sha256" | "
   sha256 !== null && sha256 === reviewedSha256;
 
 const MessageBody = z.string().trim().min(1).max(32_000);
+export const maxAttachments = 10;
 const RoutineName = z.string().trim().min(1).max(80);
 const RoomName = z.string().trim().min(1).max(80);
 const maxRoomMembers = 12;
@@ -957,13 +968,18 @@ export const Command = z.discriminatedUnion("type", [
     access: BotAccess.optional(),
   }),
   z.object({ type: z.literal("set-bot-paused"), botId: z.uuid(), paused: z.boolean() }),
-  z.object({
-    type: z.literal("send-message"),
-    messageId: z.uuid(),
-    roomId: z.uuid(),
-    body: MessageBody,
-    replyToId: z.uuid().optional(),
-  }),
+  z
+    .object({
+      type: z.literal("send-message"),
+      messageId: z.uuid(),
+      roomId: z.uuid(),
+      // Empty only when it carries files.
+      body: z.string().trim().max(32_000),
+      replyToId: z.uuid().optional(),
+      // Uploaded first, through POST /attachments.
+      attachmentIds: z.array(z.uuid()).max(maxAttachments).optional(),
+    })
+    .refine(({ body, attachmentIds }) => body !== "" || (attachmentIds?.length ?? 0) > 0),
   z.object({
     type: z.literal("create-room"),
     name: RoomName,

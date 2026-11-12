@@ -13,6 +13,7 @@ import {
   sendCommand,
 } from "../serverConnection";
 import { buildTranscript } from "../transcript";
+import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { Avatar } from "./Avatar";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
@@ -131,6 +132,8 @@ function RoomComposer({
     mention && mention.start !== dismissed ? mentionMatches(members, mention.query) : [];
   const highlighted = matches[Math.min(highlight, matches.length - 1)];
   const name = room.name ?? "the room";
+  const files = useAttachments(room.id);
+  const ready = (text.trim() !== "" || files.ids.length > 0) && !files.uploading;
 
   function pick(bot: Bot) {
     if (!mention) {
@@ -148,16 +151,23 @@ function RoomComposer({
 
   async function send() {
     const body = text;
-    if (sending.current || !canSend || !body.trim()) {
+    if (sending.current || !canSend || !ready) {
       return;
     }
     sending.current = true;
     requestNotifications();
     setError(undefined);
     setText("");
-    const result = await postCommand({ type: "send-message", messageId, roomId: room.id, body });
+    const result = await postCommand({
+      type: "send-message",
+      messageId,
+      roomId: room.id,
+      body,
+      ...(files.ids.length > 0 && { attachmentIds: files.ids }),
+    });
     sending.current = false;
     if (result.ok) {
+      files.clear();
       setMessageId(crypto.randomUUID());
     } else {
       setText((current) => current || body);
@@ -202,12 +212,15 @@ function RoomComposer({
         </p>
       )}
       <form
-        className="relative flex items-end gap-1 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
+        className="relative flex flex-col gap-1 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
         onSubmit={(event) => {
           event.preventDefault();
           void send();
         }}
+        onDrop={files.onDrop}
+        onDragOver={files.onDragOver}
       >
+        <UploadChips uploads={files.uploads} onRemove={files.remove} />
         {highlighted && (
           <ul
             id="mention-list"
@@ -231,35 +244,39 @@ function RoomComposer({
             ))}
           </ul>
         )}
-        <textarea
-          ref={box}
-          data-composer
-          autoFocus
-          className="max-h-40 min-h-8 flex-1 resize-none bg-transparent px-2.5 py-1 field-sizing-content outline-none"
-          aria-label={`Message ${name}`}
-          aria-autocomplete="list"
-          aria-controls={highlighted ? "mention-list" : undefined}
-          aria-activedescendant={highlighted ? `mention-${highlighted.id}` : undefined}
-          placeholder="Message the room, @ to mention a bot"
-          rows={1}
-          value={text}
-          onChange={({ target }) => {
-            setText(target.value);
-            setCaret(target.selectionStart);
-            setHighlight(0);
-            setMessageId(crypto.randomUUID());
-          }}
-          onSelect={({ currentTarget }) => setCaret(currentTarget.selectionStart)}
-          onKeyDown={onKeyDown}
-        />
-        <button
-          type="submit"
-          aria-label="Send"
-          className="icon-send"
-          disabled={!canSend || !text.trim()}
-        >
-          <ArrowUp {...iconProps} />
-        </button>
+        <div className="flex items-end gap-1">
+          <AttachButton disabled={!canSend} onFiles={files.add} />
+          <textarea
+            ref={box}
+            data-composer
+            autoFocus
+            className="max-h-40 min-h-8 flex-1 resize-none bg-transparent px-2.5 py-1 field-sizing-content outline-none"
+            aria-label={`Message ${name}`}
+            aria-autocomplete="list"
+            aria-controls={highlighted ? "mention-list" : undefined}
+            aria-activedescendant={highlighted ? `mention-${highlighted.id}` : undefined}
+            placeholder="Message the room, @ to mention a bot"
+            rows={1}
+            value={text}
+            onChange={({ target }) => {
+              setText(target.value);
+              setCaret(target.selectionStart);
+              setHighlight(0);
+              setMessageId(crypto.randomUUID());
+            }}
+            onSelect={({ currentTarget }) => setCaret(currentTarget.selectionStart)}
+            onKeyDown={onKeyDown}
+            onPaste={files.onPaste}
+          />
+          <button
+            type="submit"
+            aria-label="Send"
+            className="icon-send"
+            disabled={!canSend || !ready}
+          >
+            <ArrowUp {...iconProps} />
+          </button>
+        </div>
       </form>
     </div>
   );

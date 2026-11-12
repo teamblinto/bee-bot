@@ -89,6 +89,7 @@ const verbs = new Set<string>([
   "egress",
   "put",
   "collect",
+  "inbox",
   "skills",
   "skill",
 ]);
@@ -254,6 +255,16 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
         downloadName.test(name)
         ? { ...base, collect: { file, name } }
         : { id, error: "bad download" };
+    }
+    case "inbox": {
+      const channel = get("channel");
+      const name = field(get("inbox"), "name");
+      if (!isChannel(channel)) {
+        return { id, error: "bad channel" };
+      }
+      return typeof name === "string" && downloadName.test(name)
+        ? { ...base, channel, inbox: { name } }
+        : { id, error: "bad file" };
     }
     case "exec":
       break;
@@ -696,6 +707,20 @@ export function createBoxd(options: BoxdOptions) {
     }
   }
 
+  // The file's bytes arrive on the channel, into a part file renamed once whole.
+  async function inbox(box: Box, name: string, channel: number) {
+    if (attached.has(channel)) {
+      throw new Error(`channel ${channel} in use`);
+    }
+    await requireRunning(box);
+    const workspace = runSpec.engine.volumes.workspace ?? runSpec.engine.home;
+    const child = podman.spawn(
+      copyInArgs(boxNames(box).container.engine, `${workspace}/inbox`, name),
+      {},
+    );
+    attach(channel, box.botId, child, async () => {});
+  }
+
   async function handle(request: Request): Promise<Response> {
     const { id, verb, botId, token } = request;
     if (verb === "egress") {
@@ -789,6 +814,12 @@ export function createBoxd(options: BoxdOptions) {
             return { id, ok: false, error: "bad skill" };
           }
           await writeSkill(box, request.skill);
+          return { id, ok: true };
+        case "inbox":
+          if (request.inbox === undefined) {
+            return { id, ok: false, error: "bad file" };
+          }
+          await inbox(box, request.inbox.name, request.channel ?? 0);
           return { id, ok: true };
         case "collect":
           if (request.collect === undefined) {

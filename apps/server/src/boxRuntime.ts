@@ -1,6 +1,6 @@
 import * as NodeChildProcess from "node:child_process";
 import { once } from "node:events";
-import { Duplex, finished } from "node:stream";
+import { Duplex, finished, type Readable } from "node:stream";
 
 import type { InputAction, SkillCopy } from "@beebot/boxd/protocol";
 import type { BoxState } from "@beebot/contracts";
@@ -21,6 +21,7 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 // runs mouse and keyboard actions on it until done or aborted, and `collect` copies a finished download into the
 // workspace. `keepSkills` keeps only those skills in the box and names the ones it lacks, which
 // `writeSkill` copies in. `destroy` removes the box, its volumes and the bot's directories in it.
+// `inbox` streams a file into the workspace's inbox folder.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
   destroy: (botId: string) => Promise<void>;
@@ -34,6 +35,7 @@ export type BoxRuntime = {
   display: (botId: string, lease?: string) => Promise<BoxAttach>;
   control: (botId: string, lease: string) => Promise<BoxAttach>;
   collect: (botId: string, file: string, name: string) => Promise<void>;
+  inbox: (botId: string, name: string, data: Readable) => Promise<void>;
   start: (botId: string) => Promise<void>;
   stop: (botId: string) => Promise<void>;
   snapshot: (botId: string) => Promise<BoxState>;
@@ -94,6 +96,11 @@ export function createFakeBoxRuntime(): BoxRuntime {
       throw new Error("no display in the fake box runtime");
     },
     collect: async (botId) => expect(botId, ["running"]),
+    inbox: async (botId, _name, data) => {
+      expect(botId, ["running"]);
+      data.resume();
+      await once(data, "end");
+    },
     execAttach: async (botId, { argv: [command = "", ...args], env, cwd }) => {
       expect(botId, ["running"]);
       const child = NodeChildProcess.spawn(command, args, {

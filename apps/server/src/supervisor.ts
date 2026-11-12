@@ -8,6 +8,7 @@ import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./en
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
+import type { InboxFile } from "./attachments.ts";
 import type { WindowUpdate } from "./usage.ts";
 import { type AwakeClock, createAwakeClock, createWatchdog } from "./watchdog.ts";
 
@@ -39,6 +40,8 @@ type Options = {
   boxesReady?: (() => boolean) | undefined;
   // Whatever else a stopped bot leaves waiting, such as a takeover.
   onStopBot?: ((botId: string) => void) | undefined;
+  // Puts the files a turn's input names into the bot's inbox, before the turn starts.
+  copyInbox?: ((botId: string, files: InboxFile[]) => Promise<void>) | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -126,6 +129,7 @@ export function createSupervisor({
   clock = createAwakeClock(),
   boxesReady = () => false,
   onStopBot = () => {},
+  copyInbox = async () => {},
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
@@ -350,6 +354,12 @@ export function createSupervisor({
             : Promise.resolve({ behavior: "deny", message: "Refused: this run has ended." }),
       });
     const turn = (async () => {
+      if (run.inbox.length > 0) {
+        // The turn still runs: a missing file is something the bot can report.
+        await copyInbox(launch.botId, run.inbox).catch((error: unknown) => {
+          console.error(`beebotd: inbox of run ${run.id} not copied: ${(error as Error)?.message}`);
+        });
+      }
       const outcome = await attempt(run.prompt, run.sessionId, run.resume);
       if (outcome.kind !== "session_lost" || controller.signal.aborted) {
         return outcome;
