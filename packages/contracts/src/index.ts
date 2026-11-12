@@ -810,6 +810,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bot.changed"), bot: Bot }),
   z.object({ type: z.literal("bot.archived"), bot: Bot }),
   z.object({ type: z.literal("bot.restored"), bot: Bot }),
+  // Its DM and everything it owned went with it. Its messages in other rooms stay, with no bot.
+  z.object({ type: z.literal("bot.deleted"), botId: z.string() }),
   z.object({ type: z.literal("account.changed"), account: EngineAccount }),
   z.object({ type: z.literal("message.created"), message: ChatMessage }),
   z.object({ type: z.literal("run.changed"), run: Run }),
@@ -980,6 +982,7 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("archive-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("restore-bot"), botId: z.uuid() }),
+  z.object({ type: z.literal("delete-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
   z.object({
     type: z.literal("set-account-lane"),

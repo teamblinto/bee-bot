@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
 import * as NodeOS from "node:os";
@@ -69,7 +70,7 @@ import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerMcp, toolsFor, sendJson } from "./mcp.ts";
-import { callMemoryTool } from "./memory.ts";
+import { callMemoryTool, readTeamMemoryFiles, teamMemoryDir } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
 import { scheduleProblem } from "./routines.ts";
@@ -541,6 +542,25 @@ export async function startServer({
     return { status: 200, body: bot };
   }
 
+  // After the rows are gone, so a failure here leaves files behind, never a half-deleted bot.
+  async function removeBotFiles(botId: string) {
+    const log = (what: string) => (error: unknown) =>
+      console.error(
+        `beebotd: ${what} of deleted bot ${botId} stayed: ${(error as Error)?.message}`,
+      );
+    if (boxes?.ready()) {
+      await boxes.runtime.destroy(botId).catch(log("box"));
+    }
+    await NodeFS.rm(NodePath.join(dataDir, "bots", botId), { recursive: true, force: true }).catch(
+      log("folder"),
+    );
+    for (const { id } of readTeamMemoryFiles(dataDir).filter((item) => item.botId === botId)) {
+      await NodeFS.rm(NodePath.join(teamMemoryDir(dataDir), `${id}.md`), { force: true }).catch(
+        log("team memory"),
+      );
+    }
+  }
+
   function runCommand(command: Command) {
     const notFound = { status: 404, body: { code: "not_found" } };
     const ok = { status: 200, body: { ok: true } };
@@ -689,6 +709,17 @@ export async function startServer({
           });
         }
         return { status: 200, body: bot };
+      }
+      case "delete-bot": {
+        const result = store.deleteBot(command.botId);
+        if (result === "not_found") {
+          return notFound;
+        }
+        if (result === "bot_busy") {
+          return { status: 409, body: { code: result } };
+        }
+        void removeBotFiles(command.botId);
+        return ok;
       }
       case "restore-bot": {
         const bot = store.restoreBot(command.botId);

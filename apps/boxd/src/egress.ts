@@ -5,12 +5,14 @@ import type { EgressAttachment, Role } from "./policy.ts";
 // `start` runs once after setup, before boxd serves. `attach` runs when `create` has made a box
 // network: the proxy joins that network and says how containers on it reach it. Box networks are
 // internal, so whatever the proxy does not provide does not exist. `bind` ties a box address to its
-// bot while the box runs; `control` opens a fresh control connection for the server's policies.
+// bot while the box runs; `detach` takes the proxy off a box network before the network goes;
+// `control` opens a fresh control connection for the server's policies.
 export type Egress = {
   start: () => Promise<void>;
   attach: (network: { botId: string; role: Role; name: string }) => Promise<EgressAttachment>;
   bind: (address: string, botId: string) => Promise<void>;
   unbind: (address: string) => Promise<void>;
+  detach: (network: string) => Promise<void>;
   control: () => Child | null;
 };
 
@@ -20,6 +22,7 @@ export const noEgress: Egress = {
   attach: async () => ({ dns: null, env: {} }),
   bind: async () => {},
   unbind: async () => {},
+  detach: async () => {},
   control: () => null,
 };
 
@@ -238,6 +241,13 @@ export function createPodmanEgress(options: PodmanEgressOptions): Egress {
     },
     bind: async (address, botId) => {
       await link?.send({ type: "bind", address, botId });
+    },
+    // Only the proxy is disconnected: a forced `network rm` would remove the proxy itself.
+    detach: async (network) => {
+      const result = await podman.run(["network", "disconnect", "-f", network, container]);
+      if (result.code !== 0 && !/not connected|no such/i.test(result.stderr)) {
+        throw new Error(result.stderr.trim() || "podman network disconnect failed");
+      }
     },
     unbind: async (address) => {
       await link?.send({ type: "unbind", address });

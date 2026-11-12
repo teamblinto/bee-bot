@@ -181,6 +181,31 @@ describe("boxd", () => {
     expect(await call("create")).toMatchObject({ ok: true });
   });
 
+  it("destroys only its own box, volumes and directories, taking the proxy off first", async () => {
+    const detached: string[] = [];
+    const egress: Egress = {
+      ...noEgress,
+      detach: async (network) => {
+        detached.push(network);
+      },
+    };
+    const { call, fake, stateDir } = harness(createFakePodman(), egress);
+    await call("create", { account: "claude" });
+    await call("start");
+    const foreign = names.volume("browser", "profile");
+    fake.resources.volume.set(foreign, { labels: {}, args: [], running: false });
+
+    expect(await call("destroy")).toMatchObject({ ok: true });
+
+    expect(fake.resources.container.size).toBe(0);
+    expect(fake.resources.network.size).toBe(0);
+    expect([...fake.resources.volume.keys()]).toEqual([foreign]);
+    expect(detached).toEqual([names.network.engine, names.network.browser]);
+    expect(NodeFs.existsSync(NodePath.join(stateDir, "bots", box.botId))).toBe(false);
+    expect(NodeFs.existsSync(NodePath.join(stateDir, "credentials", "claude"))).toBe(true);
+    expect(await call("destroy")).toMatchObject({ ok: true });
+  });
+
   it("rolls back a half-made box", async () => {
     const { call, fake } = harness(
       createFakePodman({ failCreate: (name) => name.endsWith("-browser") }),

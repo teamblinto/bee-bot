@@ -69,7 +69,10 @@ function Item({
       </p>
     );
   }
-  const author = message.botId === null ? undefined : authorName?.(message.botId);
+  // Only rooms name authors. A bot that was deleted left its messages behind with no bot.
+  const author =
+    authorName &&
+    ((message.botId === null ? undefined : authorName(message.botId)) ?? "Deleted bot");
   return (
     <div className="flex flex-col gap-2">
       {author && <p className="text-label font-medium text-ink-secondary">{author}</p>}

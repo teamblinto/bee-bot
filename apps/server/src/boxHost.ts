@@ -96,6 +96,7 @@ export function readyBoxRuntime(
     ...runtime,
     // In the same queue, so a use right after an idle stop starts the box again.
     stop: (botId) => serially(botId, () => runtime.stop(botId)),
+    destroy: (botId) => serially(botId, () => runtime.destroy(botId)),
     execAttach: async (botId, exec) => {
       await ready(botId);
       return runtime.execAttach(botId, exec);

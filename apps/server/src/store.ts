@@ -1019,6 +1019,58 @@ export function openEventStore(dataDir: string) {
   const restoreRow = db.prepare(
     "UPDATE bots SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL",
   );
+  const selectOpenWork = db.prepare(
+    `SELECT 1 FROM runs WHERE bot_id = $bot AND status IN ('Queued', 'Running')
+     UNION ALL SELECT 1 FROM approvals WHERE bot_id = $bot AND status = 'pending'
+     UNION ALL SELECT 1 FROM continuations WHERE bot_id = $bot
+       AND status IN ('waiting', 'approved', 'claimed')
+     LIMIT 1`,
+  );
+  const selectBotRooms = db.prepare(
+    `SELECT room_id AS id FROM scopes WHERE bot_id = $bot AND room_id <> $dm
+     UNION SELECT id FROM rooms WHERE default_bot_id = $bot AND kind = 'group'`,
+  );
+  // Children before parents, since foreign keys are on. Its messages in other rooms and the audit
+  // log stay: the audit log is hash-chained.
+  const botRuns = "(SELECT id FROM runs WHERE bot_id = $bot)";
+  const doomedTasks = `requester_bot_id = $bot OR owner_bot_id = $bot OR room_id = $dm
+    OR parent_run_id IN ${botRuns}`;
+  const deleteBotRows = [
+    `DELETE FROM outbox WHERE run_id IN ${botRuns}`,
+    `DELETE FROM external_effects WHERE run_id IN ${botRuns}`,
+    `DELETE FROM approvals WHERE bot_id = $bot OR run_id IN ${botRuns}`,
+    `DELETE FROM continuations WHERE bot_id = $bot OR run_id IN ${botRuns}
+       OR resume_run_id IN ${botRuns}`,
+    `DELETE FROM turn_summaries WHERE bot_id = $bot OR run_id IN ${botRuns} OR room_id = $dm`,
+    `DELETE FROM routine_firings WHERE routine_id IN
+       (SELECT id FROM routines WHERE bot_id = $bot OR created_by_run_id IN ${botRuns})`,
+    `DELETE FROM routines WHERE bot_id = $bot OR created_by_run_id IN ${botRuns}`,
+    `UPDATE runs SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
+    `UPDATE tasks SET result_message_id = NULL
+       WHERE result_message_id IN (SELECT id FROM messages WHERE room_id = $dm)`,
+    `DELETE FROM tasks WHERE ${doomedTasks}`,
+    "DELETE FROM runs WHERE bot_id = $bot",
+    "DELETE FROM wakes WHERE bot_id = $bot",
+    "DELETE FROM bot_tool_grants WHERE bot_id = $bot",
+    "DELETE FROM memory_fts WHERE rowid IN (SELECT rowid FROM memory_items WHERE bot_id = $bot)",
+    "DELETE FROM memory_items WHERE bot_id = $bot",
+    "DELETE FROM bot_egress_hosts WHERE bot_id = $bot",
+    "DELETE FROM boxes WHERE bot_id = $bot",
+    "DELETE FROM takeovers WHERE bot_id = $bot",
+    "DELETE FROM bot_skills WHERE bot_id = $bot",
+    "DELETE FROM room_rounds WHERE room_id = $dm",
+    "DELETE FROM messages WHERE room_id = $dm",
+    "UPDATE messages SET bot_id = NULL WHERE bot_id = $bot",
+    "UPDATE rooms SET default_bot_id = NULL WHERE default_bot_id = $bot AND kind = 'group'",
+    "DELETE FROM scopes WHERE bot_id = $bot",
+    "DELETE FROM rooms WHERE id = $dm",
+    "DELETE FROM bots WHERE id = $bot",
+  ].map((sql) => {
+    // Each statement is run with both IDs, and not every one names both.
+    const statement = db.prepare(sql);
+    statement.setAllowUnknownNamedParameters(true);
+    return statement;
+  });
   const selectArchived = db.prepare("SELECT 1 FROM bots WHERE id = ? AND archived_at IS NOT NULL");
 
   const accountColumns = "id, label, lane, blocked_until AS blockedUntil";
@@ -2256,6 +2308,29 @@ export function openEventStore(dataDir: string) {
           emit({ type: "bot.restored", bot: BotRow.parse(selectBot.get(id)) });
         }
         return getBot(id);
+      }),
+    deleteBot: (id: string) =>
+      transaction(() => {
+        const bot = getBot(id);
+        if (!bot) {
+          return "not_found";
+        }
+        const ids = { bot: id, dm: bot.roomId };
+        if (selectOpenWork.get({ bot: id })) {
+          return "bot_busy";
+        }
+        const touched = z.array(IdRow).parse(selectBotRooms.all(ids));
+        for (const statement of deleteBotRows) {
+          statement.run(ids);
+        }
+        emit({ type: "bot.deleted", botId: id });
+        for (const { id: roomId } of touched) {
+          const room = rooms.getRoom(roomId);
+          if (room) {
+            emit({ type: "room.changed", room });
+          }
+        }
+        return "deleted";
       }),
     botAccess: (id: string) => getBot(id)?.access,
     botBusy: (id: string) => selectActiveRun.get(id) !== undefined,

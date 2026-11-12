@@ -20,9 +20,10 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 // `capture` takes a small JPEG of a running box's desktop, `screenshot` a full-size PNG of it, `input`
 // runs mouse and keyboard actions on it until done or aborted, and `collect` copies a finished download into the
 // workspace. `keepSkills` keeps only those skills in the box and names the ones it lacks, which
-// `writeSkill` copies in.
+// `writeSkill` copies in. `destroy` removes the box, its volumes and the bot's directories in it.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
+  destroy: (botId: string) => Promise<void>;
   writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
   keepSkills: (botId: string, keep: { name: string; sha256: string }[]) => Promise<string[]>;
   writeSkill: (botId: string, skill: SkillCopy) => Promise<void>;
@@ -54,6 +55,9 @@ export function createFakeBoxRuntime(): BoxRuntime {
     create: async (botId) => {
       expect(botId, ["absent"]);
       states.set(botId, "stopped");
+    },
+    destroy: async (botId) => {
+      states.delete(botId);
     },
     start: async (botId) => {
       expect(botId, ["stopped", "running"]);

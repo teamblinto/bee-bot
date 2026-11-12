@@ -342,6 +342,9 @@ export async function connectBoxd(
     create: async (botId, account) => {
       await request("create", botId, account === undefined ? {} : { account });
     },
+    destroy: async (botId) => {
+      await request("destroy", botId);
+    },
     writeBotFile: async (botId, name, content) => {
       await request("put", botId, { put: { name, content } });
     },

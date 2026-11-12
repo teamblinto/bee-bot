@@ -64,11 +64,13 @@ export type Bootstrap = {
 // `display` to its view-only VNC socket (or, with a lease,
 // to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
 // the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
-// read-only directory, and `collect` copies a download into the workspace. `skills` keeps only the
+// read-only directory, and `collect` copies a download into the workspace. `destroy` removes the
+// box with its volumes and the bot's directories, for a bot that is gone for good. `skills` keeps only the
 // listed skills in the bot's read-only skills directory and answers which it lacks, which `skill`
 // then writes, one per request.
 export type Verb =
   | "create"
+  | "destroy"
   | "start"
   | "stop"
   | "snapshot"

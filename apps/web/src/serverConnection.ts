@@ -108,6 +108,35 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     case "bot.archived":
     case "bot.restored":
       return { ...state, chat: { ...chat, bots: upsert(chat.bots, event.bot) } };
+    case "bot.deleted": {
+      const { botId } = event;
+      const dm = chat.bots.find(({ id }) => id === botId)?.roomId;
+      const mine = (item: { botId: string }) => item.botId !== botId;
+      const routines = chat.routines.filter(mine);
+      return {
+        ...state,
+        chat: {
+          ...chat,
+          bots: chat.bots.filter(({ id }) => id !== botId),
+          rooms: chat.rooms.filter(({ id }) => id !== dm),
+          messages: chat.messages
+            .filter(({ roomId }) => roomId !== dm)
+            .map((message) => (message.botId === botId ? { ...message, botId: null } : message)),
+          runs: chat.runs.filter(mine),
+          approvals: chat.approvals.filter(mine),
+          memories: chat.memories.filter(mine),
+          routines,
+          firings: chat.firings.filter(({ routineId }) =>
+            routines.some(({ id }) => id === routineId),
+          ),
+          tasks: chat.tasks.filter(
+            ({ requesterBotId, ownerBotId }) => requesterBotId !== botId && ownerBotId !== botId,
+          ),
+          boxes: chat.boxes.filter(mine),
+          continuations: chat.continuations.filter(mine),
+        },
+      };
+    }
     case "account.changed":
       return { ...state, chat: { ...chat, accounts: upsert(chat.accounts, event.account) } };
     case "message.created": {

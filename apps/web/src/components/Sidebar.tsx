@@ -1,9 +1,15 @@
 import type { Bot, Room } from "@beebot/contracts";
 import { Gauge, Hexagon, Monitor, Plus, ScrollText, ShieldOff, Users } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
-import { type ConnectionState, isActive, sendCommand, waitingOnOwner } from "../serverConnection";
+import {
+  type ConnectionState,
+  isActive,
+  postCommand,
+  sendCommand,
+  waitingOnOwner,
+} from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { iconProps } from "./ui";
 
@@ -83,6 +89,59 @@ function BotRow({
   );
 }
 
+function DeleteBotDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
+  const [error, setError] = useState<string>();
+  const [deleting, setDeleting] = useState(false);
+
+  async function remove() {
+    setDeleting(true);
+    const result = await postCommand({ type: "delete-bot", botId: bot.id });
+    setDeleting(false);
+    if (result.ok) {
+      onClose();
+    } else {
+      setError(result.message);
+    }
+  }
+
+  return (
+    <dialog
+      ref={(node) => {
+        if (node && !node.open) {
+          node.showModal?.();
+        }
+      }}
+      aria-label={`Delete ${bot.name}`}
+      className="dialog m-auto w-[min(420px,calc(100vw-32px))] p-5 backdrop:bg-scrim"
+      onCancel={onClose}
+    >
+      <h2 className="mb-2 text-title font-semibold">Delete {bot.name} for good?</h2>
+      <p className="mb-4 text-small text-ink-secondary">
+        Its chat, memory, routines, files and computer are removed and can't be brought back. What
+        it said in rooms stays, marked as from a deleted bot.
+      </p>
+      {error && (
+        <p role="alert" className="mb-4 text-small text-danger">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-1">
+        <button type="button" className="button" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button button-primary bg-danger"
+          disabled={deleting}
+          onClick={() => void remove()}
+        >
+          Delete
+        </button>
+      </div>
+    </dialog>
+  );
+}
+
 const rowClass =
   "flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised";
 
@@ -149,6 +208,7 @@ export function Sidebar({
   const bots = connection.chat.bots.filter(({ archivedAt }) => !archivedAt);
   const archived = connection.chat.bots.filter(({ archivedAt }) => archivedAt);
   const connected = connection.status === "connected";
+  const [deleting, setDeleting] = useState<Bot>();
   const drawer = useRef<HTMLElement>(null);
 
   // The drawer sits outside the page's tab order until it opens, so focus has to move into it.
@@ -249,6 +309,14 @@ export function Sidebar({
                     >
                       Restore
                     </button>
+                    <button
+                      type="button"
+                      className="button !min-h-7 !px-2 text-small text-danger"
+                      disabled={!connected}
+                      onClick={() => setDeleting(bot)}
+                    >
+                      Delete
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -290,6 +358,7 @@ export function Sidebar({
           {statusLine(connection)}
         </p>
       </aside>
+      {deleting && <DeleteBotDialog bot={deleting} onClose={() => setDeleting(undefined)} />}
     </>
   );
 }

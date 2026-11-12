@@ -76,6 +76,7 @@ type Attached = { child: Child; botId: string; stop: () => Promise<void> };
 
 const verbs = new Set<string>([
   "create",
+  "destroy",
   "start",
   "stop",
   "snapshot",
@@ -542,6 +543,50 @@ export function createBoxd(options: BoxdOptions) {
     ]);
   }
 
+  // Only what this boxd owns is removed, and a part already gone is skipped.
+  async function destroy(box: Box) {
+    await Promise.all(
+      [...attached.values()].filter((entry) => entry.botId === box.botId).map(stopAttached),
+    );
+    for (const address of await addresses(box)) {
+      await egress.unbind(address);
+    }
+    const names = boxNames(box);
+    const owned = async (kind: "container" | "network" | "volume", name: string) => {
+      const item = await inspect(kind, name);
+      return item !== null && ownedBy(secret, box, name, labelsOf(item)) ? [name] : [];
+    };
+    const ownedAll = async (kind: "container" | "network" | "volume", list: string[]) =>
+      (await Promise.all(list.map((name) => owned(kind, name)))).flat();
+    const containers = await ownedAll(
+      "container",
+      roles.map((role) => names.container[role]),
+    );
+    if (containers.length > 0) {
+      await podmanOk(["rm", "-f", "-t", "5", ...containers]);
+    }
+    const networks = await ownedAll(
+      "network",
+      roles.map((role) => names.network[role]),
+    );
+    for (const network of networks) {
+      await egress.detach(network);
+    }
+    if (networks.length > 0) {
+      await podmanOk(["network", "rm", ...networks]);
+    }
+    const volumes = await ownedAll(
+      "volume",
+      roles.flatMap((role) =>
+        Object.keys(runSpec[role].volumes).map((key) => names.volume(role, key)),
+      ),
+    );
+    if (volumes.length > 0) {
+      await podmanOk(["volume", "rm", ...volumes]);
+    }
+    await NodeFs.rm(NodePath.join(stateDir, "bots", box.botId), { recursive: true, force: true });
+  }
+
   async function stopAttached(entry: Attached) {
     await entry.stop();
     entry.child.kill();
@@ -676,6 +721,9 @@ export function createBoxd(options: BoxdOptions) {
           return { id, ok: true };
         case "start":
           await serially(botId, () => start(box));
+          return { id, ok: true };
+        case "destroy":
+          await serially(botId, () => destroy(box));
           return { id, ok: true };
         case "stop":
           await serially(botId, () => stop(box));

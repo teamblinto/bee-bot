@@ -378,6 +378,7 @@ ${started.stderr()}`);
 
   const runtime: BoxRuntime = {
     create: async (botId, account) => current().runtime.create(botId, account),
+    destroy: async (botId) => current().runtime.destroy(botId),
     writeBotFile: async (botId, name, content) =>
       current().runtime.writeBotFile(botId, name, content),
     keepSkills: async (botId, keep) => current().runtime.keepSkills(botId, keep),

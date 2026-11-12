@@ -142,6 +142,12 @@ export function createFakePodman({ failCreate }: { failCreate?: (name: string) =
       if ((verb === "container" || verb === "network" || verb === "volume") && sub === "inspect") {
         return inspect(verb, rest[0] ?? "");
       }
+      if ((verb === "network" || verb === "volume") && sub === "rm") {
+        for (const name of rest) {
+          resources[verb].delete(name);
+        }
+        return ok();
+      }
       if ((verb === "network" || verb === "volume") && sub === "create") {
         const name = args.at(-1) ?? "";
         resources[verb].set(name, { labels: labelsOf(args), args, running: false });
