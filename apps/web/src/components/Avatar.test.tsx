@@ -89,6 +89,7 @@ const bot = {
   unattendedLane: "api_key",
   avatarSeed: 5,
   projectPath: null,
+  archivedAt: null,
 } as const;
 
 const preview = () => host.querySelector("svg.size-20")?.outerHTML;

@@ -1,7 +1,7 @@
 import type { Bot } from "@beebot/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 import { PanelLeft } from "lucide-react";
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { AuditPage } from "../components/AuditPage";
 import { BotDialog } from "../components/BotForm";
@@ -14,7 +14,9 @@ import { iconProps } from "../components/ui";
 import { UsagePage } from "../components/UsagePage";
 import { WallPage } from "../components/WallPage";
 import { connectionLines } from "../labels";
-import { getConnectionState, subscribeToConnection } from "../serverConnection";
+import { getConnectionState, sendCommand, subscribeToConnection } from "../serverConnection";
+
+const undoMs = 8000;
 
 function Home() {
   const connection = useSyncExternalStore(subscribeToConnection, getConnectionState);
@@ -26,10 +28,20 @@ function Home() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [page, setPage] = useState<"usage" | "audit" | "wall">();
   const [computerFor, setComputerFor] = useState<string>();
+  const [archived, setArchived] = useState<Bot>();
   // Per bot and in memory only. Lives here so a failed send can restore into a reopened chat.
   const [composerTexts, setComposerTexts] = useState<Record<string, string>>({});
-  const selected = chat.bots.find(({ id }) => id === selectedId) ?? chat.bots[0];
+  const activeBots = chat.bots.filter(({ archivedAt }) => !archivedAt);
+  const selected = activeBots.find(({ id }) => id === selectedId) ?? activeBots[0];
   const room = chat.rooms.find(({ id, kind }) => id === roomId && kind === "group");
+
+  useEffect(() => {
+    if (!archived) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setArchived(undefined), undoMs);
+    return () => clearTimeout(timer);
+  }, [archived]);
 
   function updateComposerText(botId: string, update: (current: string) => string) {
     setComposerTexts((texts) => ({ ...texts, [botId]: update(texts[botId] ?? "") }));
@@ -140,6 +152,7 @@ function Home() {
             openComputer={computerFor === selected.id}
             onEdit={() => setDialog(selected)}
             onOpenDrawer={() => setDrawerOpen(true)}
+            onArchived={() => setArchived(selected)}
           />
         ) : (
           <div className="relative flex flex-1 flex-col items-center justify-center gap-4 p-6">
@@ -162,9 +175,28 @@ function Home() {
           </div>
         )}
       </main>
+      {archived && (
+        <div
+          role="status"
+          className="menu fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 px-3 py-2 text-small"
+        >
+          {archived.name} archived.
+          <button
+            type="button"
+            className="button !min-h-7 !px-2"
+            onClick={() => {
+              void sendCommand({ type: "restore-bot", botId: archived.id });
+              setSelectedId(archived.id);
+              setArchived(undefined);
+            }}
+          >
+            Undo
+          </button>
+        </div>
+      )}
       {dialog === "room" && (
         <RoomDialog
-          bots={chat.bots}
+          bots={activeBots}
           onSaved={(saved) => {
             setRoomId(saved.id);
             setPage(undefined);

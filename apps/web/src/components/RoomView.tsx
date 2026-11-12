@@ -277,7 +277,9 @@ export function RoomView({
   const { chat, status, finishedTools, commandError } = connection;
   const connected = status === "connected";
   const members = room.members.flatMap((id) => chat.bots.filter((bot) => bot.id === id));
-  const others = chat.bots.filter(({ id }) => !room.members.includes(id));
+  const others = chat.bots.filter(
+    ({ id, archivedAt }) => !archivedAt && !room.members.includes(id),
+  );
   const messages = chat.messages.filter(({ roomId }) => roomId === room.id);
   const items = buildTranscript(messages, [], [], []);
   const busy = members.filter(({ id }) => isActive(chat.runs.find(({ botId }) => botId === id)));
@@ -339,7 +341,7 @@ export function RoomView({
         <RoomComposer
           key={room.id}
           room={room}
-          members={members}
+          members={members.filter(({ archivedAt }) => !archivedAt)}
           canSend={connected && members.length > 0}
         />
       </div>

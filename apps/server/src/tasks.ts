@@ -130,7 +130,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `SELECT DISTINCT b.id, b.name FROM scopes mine
        JOIN scopes other ON other.room_id = mine.room_id AND other.bot_id <> mine.bot_id
          AND other.left_at IS NULL
-       JOIN bots b ON b.id = other.bot_id
+       JOIN bots b ON b.id = other.bot_id AND b.archived_at IS NULL
      WHERE mine.bot_id = ? AND mine.left_at IS NULL ORDER BY b.rowid`,
   );
 

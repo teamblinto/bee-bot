@@ -3,7 +3,7 @@ import { Gauge, Hexagon, Monitor, Plus, ScrollText, ShieldOff, Users } from "luc
 import { useEffect, useRef } from "react";
 
 import { connectionLines, engineFix, shortTime } from "../labels";
-import { type ConnectionState, isActive, waitingOnOwner } from "../serverConnection";
+import { type ConnectionState, isActive, sendCommand, waitingOnOwner } from "../serverConnection";
 import { Avatar } from "./Avatar";
 import { iconProps } from "./ui";
 
@@ -146,6 +146,9 @@ export function Sidebar({
   onClose: () => void;
 }) {
   const rooms = connection.chat.rooms.filter(({ kind }) => kind === "group");
+  const bots = connection.chat.bots.filter(({ archivedAt }) => !archivedAt);
+  const archived = connection.chat.bots.filter(({ archivedAt }) => archivedAt);
+  const connected = connection.status === "connected";
   const drawer = useRef<HTMLElement>(null);
 
   // The drawer sits outside the page's tab order until it opens, so focus has to move into it.
@@ -191,7 +194,7 @@ export function Sidebar({
         </div>
         <nav aria-label="Bots" className="min-h-0 flex-1 overflow-y-auto">
           <ul className="flex flex-col gap-0.5">
-            {connection.chat.bots.map((bot) => (
+            {bots.map((bot) => (
               <li key={bot.id}>
                 <BotRow
                   bot={bot}
@@ -208,7 +211,7 @@ export function Sidebar({
               type="button"
               aria-label="New room"
               className="button !px-2"
-              disabled={connection.chat.bots.length === 0}
+              disabled={bots.length === 0}
               onClick={onNewRoom}
             >
               <Plus {...iconProps} />
@@ -226,6 +229,31 @@ export function Sidebar({
               </li>
             ))}
           </ul>
+          {archived.length > 0 && (
+            <details className="mt-4">
+              <summary className="cursor-default pl-2 text-label text-ink-faint">
+                Archived ({archived.length})
+              </summary>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {archived.map((bot) => (
+                  <li key={bot.id} className="flex items-center gap-2 px-2 py-1">
+                    <Avatar seed={bot.avatarSeed} className="size-6 opacity-60" />
+                    <span className="min-w-0 flex-1 truncate text-small text-ink-secondary">
+                      {bot.name}
+                    </span>
+                    <button
+                      type="button"
+                      className="button !min-h-7 !px-2 text-small"
+                      disabled={!connected}
+                      onClick={() => void sendCommand({ type: "restore-bot", botId: bot.id })}
+                    >
+                      Restore
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </nav>
         <button
           type="button"

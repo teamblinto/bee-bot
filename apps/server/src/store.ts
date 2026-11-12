@@ -706,6 +706,12 @@ export const migrations: Array<{
       PRIMARY KEY (bot_id, name)
     );`,
   },
+  {
+    name: "bot_archive",
+    // Stored events lack the new required field, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN archived_at TEXT;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -968,6 +974,7 @@ export function openEventStore(dataDir: string) {
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
     b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
     b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
+    b.archived_at AS archivedAt,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
   const selectBots = db.prepare(
@@ -1006,6 +1013,13 @@ export function openEventStore(dataDir: string) {
     "UPDATE bots SET model = ?, effort = ?, mode = ?, access = ? WHERE id = ?",
   );
   const updateBotStatus = db.prepare("UPDATE bots SET status = ?, pause_reason = ? WHERE id = ?");
+  const archiveRow = db.prepare(
+    "UPDATE bots SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
+  );
+  const restoreRow = db.prepare(
+    "UPDATE bots SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL",
+  );
+  const selectArchived = db.prepare("SELECT 1 FROM bots WHERE id = ? AND archived_at IS NOT NULL");
 
   const accountColumns = "id, label, lane, blocked_until AS blockedUntil";
   const selectAccounts = db.prepare(`SELECT ${accountColumns} FROM engine_accounts ORDER BY id`);
@@ -1305,7 +1319,8 @@ export function openEventStore(dataDir: string) {
   const selectRoutine = db.prepare(`SELECT ${routineColumns} FROM routines WHERE id = ?`);
   const selectDueRoutines = db.prepare(
     `SELECT ${routineColumns} FROM routines
-     WHERE enabled = 1 AND next_fire_at <= ? ORDER BY rowid`,
+     WHERE enabled = 1 AND next_fire_at <= ?
+       AND bot_id IN (SELECT id FROM bots WHERE archived_at IS NULL) ORDER BY rowid`,
   );
   const insertRoutine = db.prepare(
     `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, skip_if_later_mins,
@@ -1369,7 +1384,8 @@ export function openEventStore(dataDir: string) {
   const selectFiring = db.prepare(`SELECT ${firingColumns} FROM routine_firings WHERE id = ?`);
   const selectReadyFirings = db.prepare(
     `SELECT f.id, r.bot_id AS botId FROM routine_firings f JOIN routines r ON r.id = f.routine_id
-     WHERE f.status = 'ready' ORDER BY f.rowid`,
+     WHERE f.status = 'ready' AND r.bot_id IN (SELECT id FROM bots WHERE archived_at IS NULL)
+     ORDER BY f.rowid`,
   );
   const selectSlot = db.prepare("SELECT 1 FROM routine_firings WHERE routine_id = ? AND slot = ?");
   const selectLatestFirings = db.prepare(
@@ -1456,6 +1472,7 @@ export function openEventStore(dataDir: string) {
   };
   const getScope = (id: string) => Scope.parse(selectScope.get(id));
   const isGroup = (roomId: string) => rooms.getRoom(roomId)?.kind === "group";
+  const isArchived = (botId: string) => selectArchived.get(botId) !== undefined;
   const unackedInput = (scope: Scope) =>
     z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq, scope.botId));
   // Read only when a room needs them, so a DM never depends on them.
@@ -1534,6 +1551,10 @@ export function openEventStore(dataDir: string) {
     source: WakeSource,
     { chainId, hop, depth }: ChainPoint = { chainId: null, hop: 0, depth: 0 },
   ) {
+    // An archived bot never runs, so nothing may queue work for it.
+    if (isArchived(scope.botId)) {
+      return;
+    }
     insertWake.run(
       NodeCrypto.randomUUID(),
       scope.botId,
@@ -1628,7 +1649,8 @@ export function openEventStore(dataDir: string) {
     );
   };
 
-  // A pending wake on a scope already carries new input, so a burst coalesces into it.
+  // A pending wake on a scope already carries new input, so a burst coalesces into it. An archived
+  // bot isn't woken: a notice in the room says why it stays quiet.
   function wakeMembers(
     roomId: string,
     botIds: string[],
@@ -1638,6 +1660,23 @@ export function openEventStore(dataDir: string) {
     chain: ChainPoint,
   ) {
     for (const botId of botIds) {
+      if (isArchived(botId)) {
+        const name = getBot(botId)?.name ?? "This bot";
+        addMessage({
+          id: `notice:${NodeCrypto.randomUUID()}`,
+          roomId,
+          author: "bot",
+          body: `${name} is archived, so it won't answer. Restore it to bring it back.`,
+          tools: [],
+          workedMs: null,
+          botId,
+          replyToId: null,
+          chainId: chain.chainId,
+          hop: chain.hop,
+          createdAt: new Date().toISOString(),
+        });
+        continue;
+      }
       const row = selectScopeForBot.get(roomId, botId);
       const scope = row ? Scope.parse(row) : undefined;
       if (scope && !selectPendingWake.get(scope.id, attended ? 1 : 0)) {
@@ -1684,6 +1723,9 @@ export function openEventStore(dataDir: string) {
     };
     if (room.kind === "dm") {
       const scope = Scope.parse(selectScopeForRoom.get(room.id));
+      if (isArchived(scope.botId)) {
+        return "bot_archived";
+      }
       addMessage(message);
       resumeRoutines();
       if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
@@ -2029,7 +2071,10 @@ export function openEventStore(dataDir: string) {
         endOpenFiring(routine.id, "skipped", "too_late");
         return "too_late";
       }
-      const { id: botId, roomId, status } = BotRow.parse(selectBot.get(routine.botId));
+      const { id: botId, roomId, status, archivedAt } = BotRow.parse(selectBot.get(routine.botId));
+      if (archivedAt) {
+        return "bot_archived";
+      }
       if (status === "paused") {
         return "bot_paused";
       }
@@ -2194,6 +2239,23 @@ export function openEventStore(dataDir: string) {
           emit({ type: "bot.changed", bot });
         }
         return bot;
+      }),
+    // Routines keep their settings: a restored bot picks them up again.
+    archiveBot: (id: string) =>
+      transaction(() => {
+        if (archiveRow.run(new Date().toISOString(), id).changes > 0) {
+          cancelPendingWakes.run(id);
+          const bot = BotRow.parse(selectBot.get(id));
+          emit({ type: "bot.archived", bot });
+        }
+        return getBot(id);
+      }),
+    restoreBot: (id: string) =>
+      transaction(() => {
+        if (restoreRow.run(id).changes > 0) {
+          emit({ type: "bot.restored", bot: BotRow.parse(selectBot.get(id)) });
+        }
+        return getBot(id);
       }),
     botAccess: (id: string) => getBot(id)?.access,
     botBusy: (id: string) => selectActiveRun.get(id) !== undefined,

@@ -84,7 +84,9 @@ export function WallPage({
   onOpenDrawer: () => void;
   onOpen: (botId: string) => void;
 }) {
-  const bots = connection.chat.bots.filter((bot) => hasBoxScreen(bot, connection.boxAvailability));
+  const bots = connection.chat.bots.filter(
+    (bot) => !bot.archivedAt && hasBoxScreen(bot, connection.boxAvailability),
+  );
 
   useEffect(() => watchWall(), []);
 

@@ -105,6 +105,8 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
   const { chat } = state;
   switch (event.type) {
     case "bot.changed":
+    case "bot.archived":
+    case "bot.restored":
       return { ...state, chat: { ...chat, bots: upsert(chat.bots, event.bot) } };
     case "account.changed":
       return { ...state, chat: { ...chat, accounts: upsert(chat.accounts, event.account) } };
@@ -621,6 +623,7 @@ const errorSentences: Record<string, string> = {
   mention_limit: "That names too many bots at once. Mention fewer.",
   no_bot_addressed: "Which bot should answer? Mention one with @, or set a room default.",
   not_member: "That bot isn't in this room.",
+  bot_archived: "That bot is archived. Restore it first.",
   engine_not_allowed: "The test engine isn't available here.",
   folder_bee_data: "That folder holds Bee Bot's own data, so bots can't work there.",
   folder_home: "Bots can't work in your whole home folder. Choose a project folder inside it.",

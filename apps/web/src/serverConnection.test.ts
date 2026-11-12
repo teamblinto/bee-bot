@@ -37,6 +37,7 @@ const bot: Bot = {
   unattendedLane: "api_key",
   avatarSeed: 7,
   projectPath: null,
+  archivedAt: null,
 };
 const message = (id: string): ChatMessage => ({
   id,

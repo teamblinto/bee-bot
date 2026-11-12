@@ -637,8 +637,12 @@ export async function startServer({
       }
       case "create-room": {
         const { name, memberIds, defaultBotId = null } = command;
-        if (!memberIds.every((botId) => store.getBot(botId))) {
+        const members = memberIds.map((botId) => store.getBot(botId));
+        if (!members.every(Boolean)) {
           return notFound;
+        }
+        if (members.some((bot) => bot?.archivedAt)) {
+          return { status: 409, body: { code: "bot_archived" } };
         }
         const room = store.rooms.createGroupRoom({ name, memberIds, defaultBotId });
         return room ? { status: 200, body: room } : { status: 400, body: { code: "not_member" } };
@@ -657,9 +661,11 @@ export async function startServer({
           : { status: 200, body: room };
       }
       case "add-room-member": {
-        const room = store.getBot(command.botId)
-          ? store.rooms.addMember(command.roomId, command.botId)
-          : undefined;
+        const bot = store.getBot(command.botId);
+        if (bot?.archivedAt) {
+          return { status: 409, body: { code: "bot_archived" } };
+        }
+        const room = bot ? store.rooms.addMember(command.roomId, command.botId) : undefined;
         return room ? { status: 200, body: room } : notFound;
       }
       case "remove-room-member": {
@@ -669,6 +675,25 @@ export async function startServer({
       case "stop-bot":
         supervisor.stopBot(command.botId);
         return ok;
+      case "archive-bot": {
+        const { botId } = command;
+        if (!store.getBot(botId)) {
+          return notFound;
+        }
+        supervisor.stopBot(botId);
+        const bot = store.archiveBot(botId);
+        const box = store.boxes.listBoxes().find((row) => row.botId === botId);
+        if (box?.state === "running" || box?.state === "starting") {
+          boxes?.runtime.stop(botId).catch((error: unknown) => {
+            console.error(`beebotd: box for ${botId} didn't stop: ${(error as Error)?.message}`);
+          });
+        }
+        return { status: 200, body: bot };
+      }
+      case "restore-bot": {
+        const bot = store.restoreBot(command.botId);
+        return bot ? { status: 200, body: bot } : notFound;
+      }
       case "stop-all":
         supervisor.stopAll();
         return ok;

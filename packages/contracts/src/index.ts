@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 33;
+export const protocolVersion = 34;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -163,6 +163,8 @@ export const Bot = z.object({
   avatarSeed: AvatarSeed,
   // The real path of the owner's folder. Null keeps the bot in its private workspace.
   projectPath: z.string().nullable(),
+  // Set while archived: the bot keeps its data but never runs, and no one can reach it.
+  archivedAt: z.string().nullable(),
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -806,6 +808,8 @@ export type ChatState = z.infer<typeof ChatState>;
 
 export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bot.changed"), bot: Bot }),
+  z.object({ type: z.literal("bot.archived"), bot: Bot }),
+  z.object({ type: z.literal("bot.restored"), bot: Bot }),
   z.object({ type: z.literal("account.changed"), account: EngineAccount }),
   z.object({ type: z.literal("message.created"), message: ChatMessage }),
   z.object({ type: z.literal("run.changed"), run: Run }),
@@ -974,6 +978,8 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("add-room-member"), roomId: z.uuid(), botId: z.uuid() }),
   z.object({ type: z.literal("remove-room-member"), roomId: z.uuid(), botId: z.uuid() }),
   z.object({ type: z.literal("stop-bot"), botId: z.uuid() }),
+  z.object({ type: z.literal("archive-bot"), botId: z.uuid() }),
+  z.object({ type: z.literal("restore-bot"), botId: z.uuid() }),
   z.object({ type: z.literal("stop-all") }),
   z.object({
     type: z.literal("set-account-lane"),

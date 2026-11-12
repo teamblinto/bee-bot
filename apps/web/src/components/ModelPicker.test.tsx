@@ -253,6 +253,7 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   unattendedLane: "api_key",
   avatarSeed: 7,
   projectPath: null,
+  archivedAt: null,
 });
 
 function renderControls(current: Bot) {

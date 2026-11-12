@@ -8,6 +8,7 @@ import {
   isActive,
   markSeen,
   openCards,
+  postCommand,
   sendCommand,
 } from "../serverConnection";
 import { buildTranscript } from "../transcript";
@@ -33,6 +34,7 @@ function BotMenu({
   onRoutines,
   onSkills,
   onLogin,
+  onArchive,
 }: {
   bot: Bot;
   connected: boolean;
@@ -42,6 +44,7 @@ function BotMenu({
   onRoutines: () => void;
   onSkills: () => void;
   onLogin: () => void;
+  onArchive: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
@@ -103,6 +106,15 @@ function BotMenu({
         <button
           type="button"
           {...hide}
+          className={menuItemClass}
+          disabled={!connected}
+          onClick={onArchive}
+        >
+          Archive
+        </button>
+        <button
+          type="button"
+          {...hide}
           className={`${menuItemClass} text-danger`}
           disabled={!connected}
           onClick={() => void sendCommand({ type: "stop-all" })}
@@ -122,6 +134,7 @@ export function ChatView({
   openComputer,
   onEdit,
   onOpenDrawer,
+  onArchived,
 }: {
   bot: Bot;
   connection: ConnectionState;
@@ -130,6 +143,7 @@ export function ChatView({
   openComputer: boolean;
   onEdit: () => void;
   onOpenDrawer: () => void;
+  onArchived: () => void;
 }) {
   const { chat, drafts, liveTools, thinking, finishedTools } = connection;
   const { pending, status, commandError, lastSeen, models } = connection;
@@ -165,6 +179,7 @@ export function ChatView({
   const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [archiveError, setArchiveError] = useState<string>();
   const workspace = useWorkspace(bot, run, tools, connection.activity[bot.id], openComputer);
 
   useEffect(() => {
@@ -178,6 +193,7 @@ export function ChatView({
     status !== "connected" && connectionLines[status],
     bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane),
     commandError,
+    archiveError,
   ].filter((line) => typeof line === "string");
 
   return (
@@ -246,6 +262,11 @@ export function ChatView({
             onRoutines={() => setRoutinesOpen(true)}
             onSkills={() => setSkillsOpen(true)}
             onLogin={() => setLoginOpen(true)}
+            onArchive={() =>
+              void postCommand({ type: "archive-bot", botId: bot.id }).then((result) =>
+                result.ok ? onArchived() : setArchiveError(result.message),
+              )
+            }
           />
         </header>
         {empty ? (
