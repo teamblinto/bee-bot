@@ -73,6 +73,7 @@ import { callMemoryTool } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
 import { scheduleProblem } from "./routines.ts";
+import { prepareSkill, readSkillFolder } from "./skills.ts";
 import { createThumbnails, type Thumbnail } from "./thumbnails.ts";
 import type { EventStore } from "./store.ts";
 import { fallbackSummary, type Summarize } from "./summary.ts";
@@ -88,7 +89,8 @@ import {
 } from "./usage.ts";
 import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
 
-const maxBodyBytes = 256 * 1024;
+// A pasted SKILL.md may be 256 KB before JSON escapes it.
+const maxBodyBytes = 1024 * 1024;
 const maxBufferedWallBytes = 1_000_000;
 // A `Write` call carries the whole file.
 const maxMcpBodyBytes = 16 * 1024 * 1024;
@@ -716,6 +718,47 @@ export async function startServer({
       }
       case "delete-routine":
         return store.deleteRoutine(command.routineId) ? ok : notFound;
+      case "add-skill": {
+        const { text, folder } = command;
+        if ((text === undefined) === (folder === undefined)) {
+          return { status: 400, body: { code: "bad_request" } };
+        }
+        if (folder !== undefined && !NodePath.isAbsolute(folder)) {
+          return { status: 400, body: { code: "skill_not_folder" } };
+        }
+        const walked =
+          text === undefined
+            ? readSkillFolder(folder ?? "")
+            : { files: [{ path: "SKILL.md", bytes: Buffer.from(text) }] };
+        const prepared = "files" in walked ? prepareSkill(walked.files) : walked;
+        if ("error" in prepared) {
+          return { status: 400, body: { code: prepared.error, path: prepared.path } };
+        }
+        const added = store.addSkill(prepared, text === undefined ? "folder" : "pasted");
+        return typeof added === "string"
+          ? { status: 409, body: { code: added } }
+          : { status: 200, body: added };
+      }
+      case "review-skill": {
+        const reviewed = store.reviewSkill(command.name, command.sha256);
+        if (reviewed === "not_found") {
+          return notFound;
+        }
+        return typeof reviewed === "string"
+          ? { status: 409, body: { code: reviewed } }
+          : { status: 200, body: reviewed };
+      }
+      case "set-bot-skill": {
+        const set = store.setBotSkill(command.botId, command.name, command.on);
+        if (set === "not_found") {
+          return notFound;
+        }
+        return typeof set === "string"
+          ? { status: 409, body: { code: set } }
+          : { status: 200, body: set };
+      }
+      case "delete-skill":
+        return store.deleteSkill(command.name) ? ok : notFound;
       case "start-firing": {
         const result = store.startFiring(command.firingId, attended);
         if (result === "not_found") {

@@ -51,6 +51,8 @@ const launchFor = (botId: string, engineAccountId: string, lane: BotLaunch["lane
   control: "none",
   projectPath: null,
   memory: "",
+  skills: [],
+  skillsDir: "/skills",
 });
 
 // The fake runtime runs the box's command on this machine, so the box's paths are this machine's.

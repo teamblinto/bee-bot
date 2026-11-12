@@ -3,7 +3,14 @@ import * as NodePath from "node:path";
 
 import type { ApprovalTool } from "@beebot/contracts";
 
-type Context = { home: string; dataDir: string; platform: NodeJS.Platform };
+// `skills`: the folders of the bot's skills, which Read, Glob and Grep may look in. Nothing may
+// write there.
+type Context = {
+  home: string;
+  dataDir: string;
+  platform: NodeJS.Platform;
+  skills?: readonly string[];
+};
 
 const refused = {
   allowed: false,
@@ -170,9 +177,11 @@ function check(
   tool: Exclude<ApprovalTool, "Bash">,
   input: Record<string, unknown>,
   workspace: string,
-  { home, dataDir, platform }: Context,
+  { home, dataDir, platform, skills = [] }: Context,
 ) {
   const { win, path, within, walk, roots, isProtected } = pathRules(platform);
+  const realSkills = tool === "Read" || tool === "Glob" || tool === "Grep" ? skills : [];
+  const readable = realSkills.flatMap((folder) => walk(path.resolve(folder))?.real ?? []);
 
   const realWorkspace = walk(path.resolve(workspace))?.real;
   const realHome = walk(path.resolve(home))?.real;
@@ -236,7 +245,12 @@ function check(
       }
       continue;
     }
+    // A skill counts as the bot's own to read: the owner reviewed it, and Always allow may cover it.
+    if (readable.some((folder) => within(real, folder))) {
+      continue;
+    }
     inside = false;
+
     const searchesTooMuch =
       search &&
       (within(realHome, real) ||

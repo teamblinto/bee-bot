@@ -21,6 +21,7 @@ import {
   spawnInBox,
 } from "./boxEngine.ts";
 import type { BoxAttach } from "./boxRuntime.ts";
+import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
   cliVersion,
@@ -839,7 +840,11 @@ export function createCodexRunTurn({
       return refusal(method);
     }
 
+    if (box) {
+      await syncBoxSkills(box.runtime, dataDir, launch.botId, launch.skills);
+    }
     // R5: held until the app-server is gone, which in a box can outlast the turn.
+
     let release: (() => void) | undefined;
     if (box && launch.lane === "subscription") {
       release = await accountGate(launch.engineAccountId, signal);

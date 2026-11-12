@@ -47,6 +47,8 @@ const launch: BotLaunch = {
   control: "none",
   projectPath: null,
   memory: "",
+  skills: [],
+  skillsDir: "/skills",
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };

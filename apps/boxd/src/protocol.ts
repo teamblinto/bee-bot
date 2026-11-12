@@ -10,7 +10,8 @@ export const Kind = { json: 0, data: 1, eof: 2, exit: 3, kill: 4, open: 5 } as c
 export const boxdChannels = 0x80000000;
 export type Kind = (typeof Kind)[keyof typeof Kind];
 
-const maxFrame = 16 * 1024 * 1024;
+// Room for one skill's files, base64, in a single request: up to 16 MB before encoding.
+const maxFrame = 24 * 1024 * 1024;
 
 export function frame(channel: number, kind: Kind, payload: Uint8Array | string = "") {
   const body = typeof payload === "string" ? Buffer.from(payload) : payload;
@@ -63,7 +64,9 @@ export type Bootstrap = {
 // `display` to its view-only VNC socket (or, with a lease,
 // to that lease's input socket), `control` runs a lease's input-capable VNC server for as long as
 // the attach lasts, `egress` to the proxy's control socket, `put` writes a file into the bot's
-// read-only directory, and `collect` copies a download into the workspace.
+// read-only directory, and `collect` copies a download into the workspace. `skills` keeps only the
+// listed skills in the bot's read-only skills directory and answers which it lacks, which `skill`
+// then writes, one per request.
 export type Verb =
   | "create"
   | "start"
@@ -77,7 +80,11 @@ export type Verb =
   | "put"
   | "collect"
   | "control"
-  | "input";
+  | "input"
+  | "skills"
+  | "skill";
+
+export type SkillCopy = { name: string; sha256: string; files: { path: string; data: string }[] };
 
 export type ExecRequest = {
   argv: string[];
@@ -97,6 +104,8 @@ export type Request = {
   mode?: "view" | "control";
   lease?: string;
   put?: { name: string; content: string };
+  keep?: { name: string; sha256: string }[];
+  skill?: SkillCopy;
   collect?: { file: string; name: string };
   input?: InputAction[];
   full?: boolean;
@@ -129,7 +138,7 @@ export function validKeys(keys: string) {
 }
 
 export type Response =
-  | { id: number; ok: true; state?: BoxState }
+  | { id: number; ok: true; state?: BoxState; missing?: string[] }
   | { id: number; ok: false; error: string };
 
 // `restartMachine`: boxd can't run until its Podman machine starts again.
@@ -138,6 +147,15 @@ export type Hello = { ready: true } | { fatal: string; restartMachine?: true };
 export const botIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const accountPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const botFileName = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+export const skillNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const sha256Pattern = /^[0-9a-f]{64}$/;
+// The server checks a skill's paths in full. This is the part that keeps a write in its folder.
+export const skillPathSafe = (path: string) =>
+  path.length <= 1024 &&
+  path.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.includes("\0"));
+// Where a box bot finds its skills, read-only and noexec.
+export const skillsTarget = "/run/bee/skills";
+
 // A takeover lease ID names a socket file, so only a lowercase UUID passes.
 export const leasePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

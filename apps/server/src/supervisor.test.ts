@@ -1203,6 +1203,8 @@ describe("fake engine", () => {
         control: "none",
         projectPath: null,
         memory: "",
+        skills: [],
+        skillsDir: "/skills",
       },
       onDelta: () => {},
       onToolStart: () => {},

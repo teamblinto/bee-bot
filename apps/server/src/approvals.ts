@@ -329,6 +329,7 @@ export function createApprovals({
         home: NodeOS.homedir(),
         dataDir,
         platform: process.platform,
+        skills: store.skillFolders(botId),
       },
     );
 

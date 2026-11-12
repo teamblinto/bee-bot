@@ -345,6 +345,11 @@ export async function connectBoxd(
     writeBotFile: async (botId, name, content) => {
       await request("put", botId, { put: { name, content } });
     },
+    keepSkills: async (botId, keep) => (await request("skills", botId, { keep })).missing ?? [],
+    writeSkill: async (botId, skill) => {
+      await request("skill", botId, { skill });
+    },
+
     cdp: (botId) => attach((channel) => request("cdp", botId, { channel })),
     capture: (botId) => image(botId, false),
     screenshot: (botId) => image(botId, true),

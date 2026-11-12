@@ -163,6 +163,16 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
       const firings = chat.firings.filter(({ routineId }) => routineId !== event.routineId);
       return { ...state, chat: { ...chat, routines, firings } };
     }
+    case "skill.changed": {
+      const { skill } = event;
+      const others = chat.skills.filter(({ name }) => name !== skill.name);
+      const skills = [...others, skill].sort((a, b) => (a.name < b.name ? -1 : 1));
+      return { ...state, chat: { ...chat, skills } };
+    }
+    case "skill.deleted": {
+      const skills = chat.skills.filter(({ name }) => name !== event.name);
+      return { ...state, chat: { ...chat, skills } };
+    }
     case "firing.changed": {
       // Snapshots hold each routine's latest only, and replay must land on the same state.
       const { firing } = event;
@@ -332,8 +342,10 @@ let state: ConnectionState = {
     memories: [],
     usageLimits: [],
     routines: [],
+    skills: [],
     firings: [],
     rooms: [],
+
     tasks: [],
     noticeAcknowledgedAt: null,
     boxes: [],
@@ -636,11 +648,29 @@ const errorSentences: Record<string, string> = {
   vault_wrong_key:
     "The vault key doesn't match the keys already saved. Delete the saved keys, then save them again.",
   vault_corrupt: "A saved key is damaged. Delete it and save it again.",
+  skill_exists: "A skill with that name is already in the library. Delete it first to replace it.",
+  skill_not_folder: "Choose a folder that holds a SKILL.md.",
+  skill_unreadable: "Bee Bot couldn't read that folder.",
+  skill_md_missing: "There's no SKILL.md at the top of that folder.",
+  skill_md_too_large: "SKILL.md is over 256 KB.",
+  skill_too_many_files: "A skill can hold at most 200 files.",
+  skill_too_large: "A skill can hold at most 16 MB.",
+  skill_bad_path:
+    "A skill can't hold hidden files, links, or names Windows refuses. Remove this one and try again:",
+  skill_link: "A skill can't hold links to other places. Copy the file in instead, then try again:",
+  skill_no_front_matter: "SKILL.md must start with a --- block naming the skill and describing it.",
+  skill_bad_name:
+    "The skill's name must be lowercase letters, numbers and single dashes, at most 64 long.",
+  skill_bad_description: "The skill needs a description of at most 1024 characters.",
+  skill_not_reviewed: "Read the skill's SKILL.md and mark it reviewed before turning it on.",
+  skill_changed: "This skill changed since you reviewed it. Review it again first.",
 };
 
 function errorSentence(body: unknown) {
   const code = body && typeof body === "object" && "code" in body ? String(body.code) : "";
-  return errorSentences[code] ?? "That didn't work. Try again.";
+  const path = body && typeof body === "object" && "path" in body ? body.path : undefined;
+  const sentence = errorSentences[code] ?? "That didn't work. Try again.";
+  return typeof path === "string" ? `${sentence} ${path}` : sentence;
 }
 
 type CommandResult = { ok: true; body: unknown } | { ok: false; message: string };

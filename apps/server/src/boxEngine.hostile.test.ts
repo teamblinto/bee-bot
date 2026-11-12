@@ -285,6 +285,8 @@ describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () =>
         control: "none",
         projectPath: null,
         memory: "",
+        skills: [],
+        skillsDir: "/skills",
       },
       signal: AbortSignal.timeout(90_000),
       onDelta: () => {},

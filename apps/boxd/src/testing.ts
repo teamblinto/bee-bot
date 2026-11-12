@@ -125,6 +125,9 @@ export function createFakePodman({ failCreate }: { failCreate?: (name: string) =
               Image: item.args.find((arg) => arg.startsWith("localhost/")),
             },
             State: { Running: item.running, OOMKilled: false },
+            Mounts: item.args.flatMap((arg, index) =>
+              item.args[index - 1] === "-v" ? [{ Destination: /:(\/[^:]*)/.exec(arg)?.[1] }] : [],
+            ),
           }
         : kind === "network"
           ? { labels: item.labels }

@@ -2,7 +2,7 @@ import * as NodeChildProcess from "node:child_process";
 import { once } from "node:events";
 import { Duplex, finished } from "node:stream";
 
-import type { InputAction } from "@beebot/boxd/protocol";
+import type { InputAction, SkillCopy } from "@beebot/boxd/protocol";
 import type { BoxState } from "@beebot/contracts";
 
 import { killTree } from "./engine.ts";
@@ -19,10 +19,13 @@ export type BoxAttach = { stream: Duplex; exited: Promise<number | null> };
 // lease's input server), `control` runs a lease's input server for as long as the attach lasts,
 // `capture` takes a small JPEG of a running box's desktop, `screenshot` a full-size PNG of it, `input`
 // runs mouse and keyboard actions on it until done or aborted, and `collect` copies a finished download into the
-// workspace.
+// workspace. `keepSkills` keeps only those skills in the box and names the ones it lacks, which
+// `writeSkill` copies in.
 export type BoxRuntime = {
   create: (botId: string, account?: string) => Promise<void>;
   writeBotFile: (botId: string, name: string, content: string) => Promise<void>;
+  keepSkills: (botId: string, keep: { name: string; sha256: string }[]) => Promise<string[]>;
+  writeSkill: (botId: string, skill: SkillCopy) => Promise<void>;
   cdp: (botId: string) => Promise<BoxAttach>;
   capture: (botId: string) => Promise<Buffer>;
   screenshot: (botId: string) => Promise<Buffer>;
@@ -62,6 +65,12 @@ export function createFakeBoxRuntime(): BoxRuntime {
     },
     snapshot: async (botId) => states.get(botId) ?? "absent",
     writeBotFile: async (botId) => expect(botId, ["stopped", "running"]),
+    keepSkills: async (botId) => {
+      expect(botId, ["stopped", "running"]);
+      return [];
+    },
+    writeSkill: async (botId) => expect(botId, ["stopped", "running"]),
+
     cdp: async () => {
       throw new Error("no sidecar in the fake box runtime");
     },

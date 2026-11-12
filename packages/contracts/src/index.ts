@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 32;
+export const protocolVersion = 33;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -628,6 +628,51 @@ export const UsageSummary = z.discriminatedUnion("status", [
 ]);
 export type UsageSummary = z.infer<typeof UsageSummary>;
 
+// A skill is a folder holding SKILL.md. The name is also its folder, so it can't name a path.
+export const SkillName = z
+  .string()
+  .max(64)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+export const skillLimits = { skillMdBytes: 256 * 1024, files: 200, bytes: 16 * 1024 * 1024 };
+const unsafeChar = /[\u0000-\u001f\u007f<>:"|?*\\]/;
+// Windows refuses these names in any folder, with or without an extension.
+const deviceName = /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\..*)?$/i;
+// Relative and "/"-separated. No part may be empty, `.`, `..`, hidden, a device name, or end in a
+// dot or space, which Windows drops.
+export const SkillFilePath = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine((path) =>
+    path
+      .split("/")
+      .every(
+        (part) =>
+          part !== "" &&
+          !part.startsWith(".") &&
+          !/[. ]$/.test(part) &&
+          !unsafeChar.test(part) &&
+          !deviceName.test(part),
+      ),
+  );
+
+// `sha256` is of the files now, null when the folder can't be vouched for (a link, a hidden file).
+// `reviewedSha256` is what the owner saw. A skill is on for a bot only while the two match.
+export const Skill = z.object({
+  name: SkillName,
+  description: z.string(),
+  source: z.enum(["pasted", "folder"]),
+  text: z.string(),
+  sha256: z.string().nullable(),
+  reviewedSha256: z.string().nullable(),
+  reviewedAt: z.string().nullable(),
+  botIds: z.array(z.string()),
+});
+export type Skill = z.infer<typeof Skill>;
+
+export const skillUsable = ({ sha256, reviewedSha256 }: Pick<Skill, "sha256" | "reviewedSha256">) =>
+  sha256 !== null && sha256 === reviewedSha256;
+
 const MessageBody = z.string().trim().min(1).max(32_000);
 const RoutineName = z.string().trim().min(1).max(80);
 const RoomName = z.string().trim().min(1).max(80);
@@ -743,6 +788,7 @@ export const ChatState = z.object({
   memories: z.array(MemoryItem),
   usageLimits: z.array(UsageLimits),
   routines: z.array(Routine),
+  skills: z.array(Skill),
   // Only the latest of each routine. An open card always is its routine's latest.
   firings: z.array(RoutineFiring),
   rooms: z.array(Room),
@@ -769,6 +815,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("notice.acknowledged"), acknowledgedAt: z.string() }),
   z.object({ type: z.literal("routine.changed"), routine: Routine }),
   z.object({ type: z.literal("routine.deleted"), routineId: z.string() }),
+  z.object({ type: z.literal("skill.changed"), skill: Skill }),
+  z.object({ type: z.literal("skill.deleted"), name: z.string() }),
   z.object({ type: z.literal("firing.changed"), firing: RoutineFiring }),
   z.object({ type: z.literal("room.changed"), room: Room }),
   z.object({ type: z.literal("task.changed"), task: Task }),
@@ -958,6 +1006,16 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("update-routine"), routineId: z.uuid(), ...routineFields }),
   z.object({ type: z.literal("delete-routine"), routineId: z.uuid() }),
   z.object({ type: z.literal("start-firing"), firingId: z.uuid() }),
+  // Exactly one of the two: SKILL.md pasted, or a folder on this computer to copy in.
+  z.object({
+    type: z.literal("add-skill"),
+    text: z.string().max(skillLimits.skillMdBytes).optional(),
+    folder: z.string().trim().min(1).max(1024).optional(),
+  }),
+  // `sha256` is the one the owner was shown: a skill that changed since can't be marked seen.
+  z.object({ type: z.literal("review-skill"), name: SkillName, sha256: z.string() }),
+  z.object({ type: z.literal("set-bot-skill"), botId: z.uuid(), name: SkillName, on: z.boolean() }),
+  z.object({ type: z.literal("delete-skill"), name: SkillName }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
   // Box mode (R17). On a hand_off, "approve" means the owner did it themselves.
   z.object({

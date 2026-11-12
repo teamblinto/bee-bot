@@ -125,6 +125,33 @@ describe("boxd", () => {
     });
   });
 
+  it("keeps only the listed skills in the bot's read-only skills mount", async () => {
+    const { call, fake, stateDir } = harness();
+    await call("create");
+    const engine = fake.resources.container.get(names.container.engine)!.args.join(" ");
+    const skills = NodePath.join(stateDir, "bots", box.botId, "skills");
+    expect(engine).toContain(`${skills}:/run/bee/skills:ro,nosuid,nodev,noexec`);
+    const sha256 = "a".repeat(64);
+    const data = Buffer.from("x").toString("base64");
+    const skill = (path: string) => ({ skill: { name: "pdf", sha256, files: [{ path, data }] } });
+    for (const path of ["../evil", "a/../../evil", ".hidden", "a//b"]) {
+      expect(await call("skill", skill(path))).toMatchObject({ error: "bad skill" });
+    }
+    expect(await call("skills", { keep: [{ name: "../x", sha256 }] })).toMatchObject({
+      error: "bad skills",
+    });
+    expect(await call("skills", { keep: [{ name: "pdf", sha256 }] })).toMatchObject({
+      missing: ["pdf"],
+    });
+    expect(await call("skill", skill("ref/a.md"))).toMatchObject({ ok: true });
+    expect(NodeFs.readFileSync(NodePath.join(skills, "pdf", "ref", "a.md"), "utf8")).toBe("x");
+    expect(await call("skills", { keep: [{ name: "pdf", sha256 }] })).toMatchObject({
+      missing: [],
+    });
+    expect(await call("skills", { keep: [] })).toMatchObject({ missing: [] });
+    expect(NodeFs.readdirSync(skills)).toEqual([]);
+  });
+
   it("opens the proxy's control socket only with its own token", async () => {
     const { call } = harness();
     const request = (botId: string, token: string) => call("egress", { botId, channel: 5 }, token);

@@ -45,6 +45,11 @@ import {
   botFileName,
   botIdPattern,
   boxToken,
+  type SkillCopy,
+  sha256Pattern,
+  skillNamePattern,
+  skillPathSafe,
+  skillsTarget,
   boxdChannels,
   egressId,
   frame,
@@ -83,7 +88,10 @@ const verbs = new Set<string>([
   "egress",
   "put",
   "collect",
+  "skills",
+  "skill",
 ]);
+const maxSkillFiles = 200;
 
 const maxBotFile = 1024 * 1024;
 
@@ -192,6 +200,49 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
         ? { ...base, put: { name, content } }
         : { id, error: "bad file" };
     }
+    case "skills": {
+      const keep = get("keep");
+      const valid =
+        Array.isArray(keep) &&
+        keep.length <= 1000 &&
+        keep.every((item) => {
+          const name = field(item, "name");
+          const sha256 = field(item, "sha256");
+          return (
+            typeof name === "string" &&
+            name.length <= 64 &&
+            skillNamePattern.test(name) &&
+            typeof sha256 === "string" &&
+            sha256Pattern.test(sha256)
+          );
+        });
+      return valid
+        ? { ...base, keep: keep as { name: string; sha256: string }[] }
+        : { id, error: "bad skills" };
+    }
+    case "skill": {
+      const skill = get("skill");
+      const name = field(skill, "name");
+      const sha256 = field(skill, "sha256");
+      const files = field(skill, "files");
+      const valid =
+        typeof name === "string" &&
+        name.length <= 64 &&
+        skillNamePattern.test(name) &&
+        typeof sha256 === "string" &&
+        sha256Pattern.test(sha256) &&
+        Array.isArray(files) &&
+        files.length <= maxSkillFiles &&
+        files.every((file) => {
+          const path = field(file, "path");
+          return (
+            typeof path === "string" &&
+            skillPathSafe(path) &&
+            typeof field(file, "data") === "string"
+          );
+        });
+      return valid ? { ...base, skill: skill as SkillCopy } : { id, error: "bad skill" };
+    }
     case "collect": {
       const collect = get("collect");
       const file = field(collect, "file");
@@ -284,6 +335,17 @@ export function createBoxd(options: BoxdOptions) {
     return raw && typeof raw === "object" ? (raw as Record<string, string>) : null;
   }
 
+  function lacksSkills(item: object) {
+    const mounts: unknown = Reflect.get(item, "Mounts");
+    return !(
+      Array.isArray(mounts) &&
+      mounts.some(
+        (mount) =>
+          mount && typeof mount === "object" && Reflect.get(mount, "Destination") === skillsTarget,
+      )
+    );
+  }
+
   function imageOf(item: object) {
     const config: unknown = Reflect.get(item, "Config");
     return config && typeof config === "object" ? Reflect.get(config, "Image") : undefined;
@@ -315,6 +377,7 @@ export function createBoxd(options: BoxdOptions) {
 
   // A box made from an older image never picks up the new one, so its containers go and the server
   // makes them again. They hold nothing: the bot's files and browser profile live in its volumes.
+  // An engine made before skills had their mount goes the same way.
   async function retireStale(box: Box) {
     const names = boxNames(box);
     const stale = (
@@ -323,7 +386,7 @@ export function createBoxd(options: BoxdOptions) {
           const item = await inspect("container", names.container[role]);
           return item !== null &&
             ownedBy(secret, box, names.container[role], labelsOf(item)) &&
-            imageOf(item) !== runSpec[role].image
+            (imageOf(item) !== runSpec[role].image || (role === "engine" && lacksSkills(item)))
             ? [names.container[role]]
             : [];
         }),
@@ -368,11 +431,18 @@ export function createBoxd(options: BoxdOptions) {
   }
 
   const botDir = (botId: string) => NodePath.join(stateDir, "bots", botId, "box");
+  const skillsDir = (botId: string) => NodePath.join(stateDir, "bots", botId, "skills");
+  // Outside the bound directory, so the bot never sees them: the hash each skill was written from.
+  const sumsDir = (botId: string) => NodePath.join(stateDir, "bots", botId, "skill-sums");
 
   // The engine user must own its credential directory; boxd's own user is root in the box.
   async function engineBinds(botId: string, account: string | undefined): Promise<Bind[]> {
     await NodeFs.mkdir(botDir(botId), { recursive: true, mode: 0o755 });
-    const binds: Bind[] = [{ source: botDir(botId), target: botDirTarget, readOnly: true }];
+    await NodeFs.mkdir(skillsDir(botId), { recursive: true, mode: 0o755 });
+    const binds: Bind[] = [
+      { source: botDir(botId), target: botDirTarget, readOnly: true },
+      { source: skillsDir(botId), target: skillsTarget, readOnly: true },
+    ];
     if (account !== undefined) {
       const dir = NodePath.join(stateDir, "credentials", account);
       await NodeFs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -522,6 +592,48 @@ export function createBoxd(options: BoxdOptions) {
     await NodeFs.rename(temp, NodePath.join(dir, name));
   }
 
+  // Drops every skill not kept, or kept at another hash, and names the ones still to write.
+  async function keepSkills(box: Box, keep: { name: string; sha256: string }[]) {
+    const dir = skillsDir(box.botId);
+    const sums = sumsDir(box.botId);
+    await NodeFs.mkdir(dir, { recursive: true, mode: 0o755 });
+    await NodeFs.mkdir(sums, { recursive: true, mode: 0o700 });
+    const wanted = new Map(keep.map(({ name, sha256 }) => [name, sha256]));
+    for (const name of await NodeFs.readdir(dir)) {
+      const sum = await NodeFs.readFile(NodePath.join(sums, name), "utf8").catch(() => undefined);
+      if (sum === undefined || wanted.get(name) !== sum) {
+        await NodeFs.rm(NodePath.join(dir, name), { recursive: true, force: true });
+        await NodeFs.rm(NodePath.join(sums, name), { force: true });
+      }
+    }
+    const present = new Set(await NodeFs.readdir(dir));
+    return keep.filter(({ name }) => !present.has(name)).map(({ name }) => name);
+  }
+
+  // Written whole beside the bound directory, then renamed in.
+  async function writeSkill(box: Box, { name, sha256, files }: SkillCopy) {
+    const dir = skillsDir(box.botId);
+    const temp = NodePath.join(stateDir, "bots", box.botId, `skill-${NodeCrypto.randomUUID()}`);
+    await NodeFs.mkdir(dir, { recursive: true, mode: 0o755 });
+    await NodeFs.mkdir(sumsDir(box.botId), { recursive: true, mode: 0o700 });
+    await NodeFs.mkdir(temp, { mode: 0o755 });
+    try {
+      for (const { path, data } of files) {
+        const target = NodePath.resolve(temp, path);
+        if (!skillPathSafe(path) || NodePath.relative(temp, target).startsWith("..")) {
+          throw new Error("bad skill path");
+        }
+        await NodeFs.mkdir(NodePath.dirname(target), { recursive: true, mode: 0o755 });
+        await NodeFs.writeFile(target, Buffer.from(data, "base64"), { mode: 0o644, flag: "wx" });
+      }
+      await NodeFs.rm(NodePath.join(dir, name), { recursive: true, force: true });
+      await NodeFs.rename(temp, NodePath.join(dir, name));
+      await NodeFs.writeFile(NodePath.join(sumsDir(box.botId), name), sha256, { mode: 0o600 });
+    } finally {
+      await NodeFs.rm(temp, { recursive: true, force: true });
+    }
+  }
+
   async function collect(box: Box, file: string, name: string) {
     await requireRunning(box);
     const names = boxNames(box);
@@ -621,6 +733,14 @@ export function createBoxd(options: BoxdOptions) {
             return { id, ok: false, error: "bad file" };
           }
           await put(box, request.put.name, request.put.content);
+          return { id, ok: true };
+        case "skills":
+          return { id, ok: true, missing: await keepSkills(box, request.keep ?? []) };
+        case "skill":
+          if (request.skill === undefined) {
+            return { id, ok: false, error: "bad skill" };
+          }
+          await writeSkill(box, request.skill);
           return { id, ok: true };
         case "collect":
           if (request.collect === undefined) {

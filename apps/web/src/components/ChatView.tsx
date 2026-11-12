@@ -15,6 +15,7 @@ import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
+import { SkillsPanel } from "./SkillsPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
@@ -30,6 +31,7 @@ function BotMenu({
   onEdit,
   onMemory,
   onRoutines,
+  onSkills,
   onLogin,
 }: {
   bot: Bot;
@@ -38,6 +40,7 @@ function BotMenu({
   onEdit: () => void;
   onMemory: () => void;
   onRoutines: () => void;
+  onSkills: () => void;
   onLogin: () => void;
 }) {
   const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
@@ -64,6 +67,9 @@ function BotMenu({
         </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onRoutines}>
           Routines
+        </button>
+        <button type="button" {...hide} className={menuItemClass} onClick={onSkills}>
+          Skills
         </button>
         {bot.boundary === "box" && bot.engineAccountId !== "fake" && (
           <button
@@ -158,6 +164,7 @@ export function ChatView({
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const workspace = useWorkspace(bot, run, tools, connection.activity[bot.id], openComputer);
 
   useEffect(() => {
@@ -237,6 +244,7 @@ export function ChatView({
             onEdit={onEdit}
             onMemory={() => setMemoryOpen(true)}
             onRoutines={() => setRoutinesOpen(true)}
+            onSkills={() => setSkillsOpen(true)}
             onLogin={() => setLoginOpen(true)}
           />
         </header>
@@ -313,6 +321,15 @@ export function ChatView({
         />
       )}
       {loginOpen && <TerminalPanel bot={bot} onClose={() => setLoginOpen(false)} />}
+      {skillsOpen && (
+        <SkillsPanel
+          bot={bot}
+          skills={chat.skills}
+          connected={connected}
+          onClose={() => setSkillsOpen(false)}
+        />
+      )}
+
       {routinesOpen && (
         <RoutinesPanel
           bot={bot}

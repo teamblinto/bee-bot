@@ -23,6 +23,7 @@ import {
   supportsSecureStorageDir,
 } from "./boxEngine.ts";
 import { waitingPattern } from "./continuations.ts";
+import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
   cliVersion,
@@ -826,6 +827,7 @@ export function createClaudeRunTurn({
     const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");
     await NodeFS.mkdir(privateFolder, { recursive: true });
     if (box) {
+      await syncBoxSkills(box.runtime, dataDir, launch.botId, launch.skills);
       await box.runtime.writeBotFile(launch.botId, "persona.md", personaText(launch));
     } else {
       await NodeFS.mkdir(NodePath.dirname(personaPath), { recursive: true });

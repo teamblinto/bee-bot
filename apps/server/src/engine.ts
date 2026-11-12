@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
 import { isWaitingMessage } from "./continuations.ts";
+import { type LaunchSkill, skillsText } from "./skills.ts";
 import type { WindowUpdate } from "./usage.ts";
 
 export type TurnOutcome =
@@ -32,6 +33,9 @@ export type BotLaunch = EngineChoice & {
   engineAccountId: string;
   lane: EngineLane;
   memory: string;
+  skills: LaunchSkill[];
+  // Where the engine finds `<name>/SKILL.md`: on this computer, or in the box.
+  skillsDir: string;
 };
 
 export const workspacePath = (dataDir: string, botId: string) =>
@@ -66,12 +70,15 @@ const controlNotes: Record<BotControl, string> = {
   none: "You have no web browser or computer to use. If a task needs one, tell the owner.",
 };
 
-export function personaText({ name, personality, memory, mode, control }: BotLaunch) {
+export function personaText(launch: BotLaunch) {
+  const { name, personality, memory, mode, control, skills, skillsDir } = launch;
   return [
     `Your name is ${name}.`,
     personality,
     memory,
+    skillsText(skills, skillsDir),
     controlNotes[control],
+
     mode === "plan" ? planNote : "",
   ]
     .filter(Boolean)

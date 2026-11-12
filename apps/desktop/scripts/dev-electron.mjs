@@ -15,7 +15,7 @@ if (!Number.isInteger(port) || port <= 0) {
 
 await waitForResources({
   baseDir: NodePath.resolve(import.meta.dirname, ".."),
-  files: ["dist-electron/main.cjs", "../server/dist/index.cjs"],
+  files: ["dist-electron/main.cjs", "dist-electron/preload.cjs", "../server/dist/index.cjs"],
   tcpHost: devServer.hostname,
   tcpPort: port,
 });

@@ -380,6 +380,9 @@ ${started.stderr()}`);
     create: async (botId, account) => current().runtime.create(botId, account),
     writeBotFile: async (botId, name, content) =>
       current().runtime.writeBotFile(botId, name, content),
+    keepSkills: async (botId, keep) => current().runtime.keepSkills(botId, keep),
+    writeSkill: async (botId, skill) => current().runtime.writeSkill(botId, skill),
+
     cdp: async (botId) => current().runtime.cdp(botId),
     capture: async (botId) => current().runtime.capture(botId),
     screenshot: async (botId) => current().runtime.screenshot(botId),

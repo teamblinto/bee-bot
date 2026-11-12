@@ -6,7 +6,9 @@ import { type Command, protocolVersion } from "@beebot/contracts";
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
+  ipcMain,
   Menu,
   nativeImage,
   Notification,
@@ -59,6 +61,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: NodePath.join(__dirname, "preload.cjs"),
     },
   });
   mainWindow = window;
@@ -227,6 +230,16 @@ async function start() {
     shownNotifications.add(notification);
   });
 }
+
+// For adding a skill from a folder: the server reads the path the owner picked here.
+ipcMain.handle("pick-folder", async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const options = { properties: ["openDirectory" as const] };
+  const picked = await (window
+    ? dialog.showOpenDialog(window, options)
+    : dialog.showOpenDialog(options));
+  return picked.canceled ? null : (picked.filePaths[0] ?? null);
+});
 
 // One server per database: a second one would write events this one never broadcasts.
 if (app.requestSingleInstanceLock()) {

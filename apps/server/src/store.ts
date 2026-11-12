@@ -41,6 +41,8 @@ import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
 import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
+import { skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
+import { openSkills, skillsDir } from "./skills.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
 import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
@@ -685,6 +687,24 @@ export const migrations: Array<{
     // server, so it moves off and the owner is asked again.
     sql: `ALTER TABLE bots ADD COLUMN host_consent_at TEXT;
     UPDATE bots SET control = 'none' WHERE control = 'host';`,
+  },
+  {
+    name: "skills",
+    // Stored events can't carry the new state. Clients get a snapshot. The folders under
+    // dataDir/skills are the truth; `sha256` is the hash the owner reviewed.
+    sql: `DELETE FROM events;
+    CREATE TABLE skills (
+      name TEXT PRIMARY KEY,
+      description TEXT NOT NULL,
+      sha256 TEXT,
+      source TEXT NOT NULL CHECK (source IN ('pasted', 'folder')),
+      reviewed_at TEXT
+    );
+    CREATE TABLE bot_skills (
+      bot_id TEXT NOT NULL REFERENCES bots (id) ON DELETE CASCADE,
+      name TEXT NOT NULL REFERENCES skills (name) ON DELETE CASCADE,
+      PRIMARY KEY (bot_id, name)
+    );`,
   },
 ];
 
@@ -1977,6 +1997,8 @@ export function openEventStore(dataDir: string) {
   });
   const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
   const boxes = openBoxes(db, tx);
+  const skills = openSkills(db, tx, dataDir);
+  skills.rebuildSkills();
   const continuations = openContinuations(db, tx);
   const takeovers = openTakeovers(db, tx);
   const { vaultStatus } = openVaultEntries(db);
@@ -2063,6 +2085,7 @@ export function openEventStore(dataDir: string) {
     },
     rebuildIndex,
     ...ingest,
+    ...skills,
     // shortcut: sends the whole history, page it once rooms get long.
     state: (): ChatState => ({
       bots: z.array(BotRow).parse(selectBots.all()),
@@ -2076,6 +2099,7 @@ export function openEventStore(dataDir: string) {
         .parse(selectUsageChecks.all())
         .map(({ accountId }) => usageLimits(accountId)),
       routines: z.array(RoutineRow).parse(selectRoutines.all()),
+      skills: skills.listSkills(),
       firings: z.array(RoutineFiring).parse(selectLatestFirings.all()),
       rooms: rooms.listRooms(),
       tasks: tasks.openTasks(),
@@ -2403,9 +2427,8 @@ export function openEventStore(dataDir: string) {
           return undefined;
         }
         const run = RunRow.parse(row);
-        const { name, personality, model, effort, mode, projectPath, control } = BotRow.parse(
-          selectBot.get(run.botId),
-        );
+        const { name, personality, model, effort, mode, projectPath, control, boundary } =
+          BotRow.parse(selectBot.get(run.botId));
         const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
         let scope = getScope(run.scopeId);
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
@@ -2444,6 +2467,8 @@ export function openEventStore(dataDir: string) {
             control,
             projectPath,
             memory,
+            skills: skills.launchSkills(run.botId),
+            skillsDir: boundary === "box" ? boxSkillsDir : skillsDir(dataDir),
           },
         };
       }),

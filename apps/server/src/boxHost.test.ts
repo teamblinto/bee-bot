@@ -379,6 +379,28 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
     expect(result.output).toBe("You are Bee.\nro\nrw");
   }, 120_000);
 
+  it("gives the engine only its kept skills, read-only and noexec", async () => {
+    const { runtime } = started();
+    const sha256 = "a".repeat(64);
+    const file = (path: string, text: string) => ({
+      path,
+      data: Buffer.from(text).toString("base64"),
+    });
+    const files = [
+      file("SKILL.md", "---\nname: demo\n---\n"),
+      file("run.sh", "#!/bin/sh\necho ran\n"),
+    ];
+    expect(await runtime.keepSkills(botId, [{ name: "demo", sha256 }])).toEqual(["demo"]);
+    await runtime.writeSkill(botId, { name: "demo", sha256, files });
+    expect(await runtime.keepSkills(botId, [{ name: "demo", sha256 }])).toEqual([]);
+    const result = await inBox(
+      "head -1 /run/bee/skills/demo/SKILL.md; touch /run/bee/skills/demo/x 2>/dev/null || echo ro; /run/bee/skills/demo/run.sh 2>/dev/null || echo noexec",
+    );
+    expect(result.output).toBe("---\nro\nnoexec");
+    await runtime.keepSkills(botId, []);
+    expect((await inBox("ls /run/bee/skills | wc -l")).output).toBe("0");
+  }, 120_000);
+
   it("reaches the vendor only through the proxy, which adds the key", async () => {
     const result = await inBox(
       "curl -s -H 'x-api-key: box-placeholder' -d '{}' http://proxy.beebot:8080/anthropic/v1/messages",
@@ -581,6 +603,8 @@ describe.skipIf(!available || !keyFile)(
           name: "Bee",
           personality: "",
           memory: "",
+          skills: [],
+          skillsDir: "/skills",
           projectPath: null,
           engineAccountId: "claude",
           lane: "api_key",
