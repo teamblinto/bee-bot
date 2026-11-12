@@ -378,6 +378,7 @@ describe("a turn", () => {
           "mcp__bee__notify",
           "mcp__bee__delegate",
           "mcp__bee__handoff",
+          "mcp__bee__read_bot_activity",
           "mcp__bee__ask_user",
           "mcp__bee__create_routine",
           "mcp__bee__browser_navigate",
@@ -587,7 +588,7 @@ describe("the credential gate", () => {
 
   it("fails closed when the gate times out, and kills the child", async () => {
     const { outcome, delivered } = turn("gate-silent");
-    expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "auth_failed" });
+    expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "cli_failed" });
     expect(delivered()).toBe(0);
     await vi.waitFor(() => expect(isAlive(spawns()[0]?.pid ?? 0)).toBe(false));
   }, 15_000);
@@ -619,6 +620,15 @@ describe("the credential gate", () => {
     },
     15_000,
   );
+
+  it("pauses a CLI that exits before the handshake as not started, not logged out", async () => {
+    const said = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { outcome, delivered } = turn("unknown-flag");
+    expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "cli_failed" });
+    expect(delivered()).toBe(0);
+    expect(said).toHaveBeenCalledWith(expect.stringContaining("unknown option"));
+    said.mockRestore();
+  }, 15_000);
 
   it("pauses on a missing CLI", async () => {
     const outcome = await createClaudeRunTurn({ command: ["beebot-no-such-cli"], dataDir })({

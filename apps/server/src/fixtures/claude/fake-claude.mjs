@@ -218,6 +218,8 @@ const scenarios = {
     onStart: () => (args.includes("--session-id") ? "in_use" : undefined),
   },
   "always-in-use": { onStart: () => "in_use" },
+  // What a real 2.1.322 prints for a flag it doesn't know, before it reads any input.
+  "unknown-flag": { onStart: () => "unknown_flag" },
   "no-conversation": { onStart: () => "no_conversation" },
   "logged-out-status": { auth: { loggedIn: false }, authExit: 1 },
   "api-key-status": { auth: { ...loggedIn, apiKeySource: "ANTHROPIC_API_KEY" } },
@@ -297,6 +299,10 @@ if (scenario.loadsRepo) {
 const early = scenario.onStart?.();
 if (early === "in_use") {
   console.error("Error: Session ID 00000000-0000-4000-8000-000000000001 is already in use.");
+  process.exit(1);
+}
+if (early === "unknown_flag") {
+  console.error("error: unknown option '--system-prompt-snapshot'");
   process.exit(1);
 }
 if (early === "no_conversation") {

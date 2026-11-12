@@ -500,7 +500,7 @@ function runProcess({
       waiting: false,
     };
     const timers = new Set<() => void>();
-    let gate: "pending" | "open" | PauseReason = "pending";
+    let gate: "pending" | "open" | "silent" | PauseReason = "pending";
     let spawnFailed = false;
     let sessionMissing = false;
     let apiRetries = 0;
@@ -547,10 +547,14 @@ function runProcess({
       if (gate === "pending" && signal.aborted) {
         return { kind: "failed" } satisfies TurnOutcome;
       }
-      return {
-        kind: "auth_failed",
-        pauseReason: gate === "pending" ? authPause() : gate,
-      } satisfies TurnOutcome;
+      // A logged-out CLI still answers `initialize`, so one that never did failed to start: an
+      // older CLI exits on a flag it doesn't know. Before the gate no prompt is out, so stderr is safe.
+      if (gate === "pending" || gate === "silent") {
+        const said = stderr.trim().split(/\r?\n/).pop()?.slice(0, 300) || "nothing";
+        console.error(`beebotd: Claude Code didn't start. It said: ${said}`);
+        return { kind: "auth_failed", pauseReason: "cli_failed" } satisfies TurnOutcome;
+      }
+      return { kind: "auth_failed", pauseReason: gate } satisfies TurnOutcome;
     }
 
     function finish() {
@@ -688,7 +692,7 @@ function runProcess({
     timers.add(
       awakeTimeout(clock, gateTimeoutMs, () => {
         if (gate === "pending") {
-          gate = authPause();
+          gate = "silent";
           child.stdin.end();
           stop();
         }

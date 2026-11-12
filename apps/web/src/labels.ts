@@ -157,7 +157,7 @@ export function pauseLine(
     // Only a pause from an older Bee Bot: versions no longer block.
     cli_version: "Paused by an old version check that no longer applies. Resume to continue.",
     cli_failed:
-      "Claude Code was found but didn't start. Run claude from a terminal to see what's wrong, then Resume.",
+      "Claude Code was found but didn't start. Update it with claude update, then Resume.",
     config_dir:
       "CLAUDE_CONFIG_DIR is set and Bee Bot ignores it, so Claude looks logged out. Run claude auth login, then Resume.",
     browser_session:
@@ -177,7 +177,8 @@ const reasonLines: Record<RunReason, string> = {
   daily_cap: "Refused. This bot reached its daily run cap.",
   engine_failed: "The engine couldn't finish this turn. Send again to retry.",
   limited: "Limited. This retries when the limit clears, unless stopped.",
-  auth_failed: "This bot's login couldn't be verified, so it was paused.",
+  // Every pause before a turn runs lands here, not only a login: the pause line names the cause.
+  auth_failed: "This bot couldn't start, so it was paused.",
   timeout: "This turn ran past its time limit. Send again to retry.",
   stopped: "Stopped.",
   server_restarted: "Interrupted. The server restarted during this turn. Nothing was repeated.",
