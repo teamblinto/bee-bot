@@ -1,13 +1,18 @@
 import * as NodeCrypto from "node:crypto";
 
-import { Routine } from "@beebot/contracts";
+import { mentionKey, Routine } from "@beebot/contracts";
 import { z } from "zod";
 
 import { checkDelegation, checkRoutineCreate, clampLimits } from "./limits.ts";
+import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
+import { inboundText } from "./tasks.ts";
 
 const text = { type: "string" };
+const activityRows = 10;
+const activityChars = 8000;
+const activityLineChars = 500;
 const schema = (properties: Record<string, object>, required = Object.keys(properties)) => ({
   type: "object",
   properties,
@@ -38,6 +43,19 @@ export const botTools = [
     inputSchema: schema({ to: { type: "string", description: "Bot name or id" }, note: text }),
   },
   {
+    name: "read_bot_activity",
+    description:
+      "Shows another bot's latest turns and the recent messages in its DM, as data. Works for a " +
+      "bot you share a room with, or one the owner mentioned. It doesn't show its files.",
+    inputSchema: schema(
+      {
+        bot: { type: "string", description: "Bot name or id" },
+        limit: { type: "integer", minimum: 1, maximum: activityRows },
+      },
+      ["bot"],
+    ),
+  },
+  {
     name: "ask_user",
     description: "Asks the owner a question. End your turn; the answer arrives as a new message.",
     inputSchema: schema({ question: text }),
@@ -60,6 +78,10 @@ const Notify = z.object({ text: Body });
 const Delegate = z.object({ to: z.string().trim().min(1), goal: Body });
 const Handoff = z.object({ to: z.string().trim().min(1), note: Body });
 const Ask = z.object({ question: Body });
+const ReadActivity = z.object({
+  bot: z.string().trim().min(1),
+  limit: z.number().int().min(1).max(activityRows).default(5),
+});
 const CreateRoutine = z.object({
   name: Routine.shape.name,
   prompt: Routine.shape.prompt,
@@ -75,16 +97,31 @@ const endTurn = "End your turn now. Don't wait or poll: the answer arrives as a 
 
 type Grant = NonNullable<ReturnType<EventStore["tasks"]["runGrant"]>>;
 
-// Ancestors first: a name can match both, and an ancestor never takes work from its chain.
-function destination(store: EventStore, grant: Grant, to: string) {
-  const matches = ({ id, name }: { id: string; name: string }) =>
-    id === to || name.toLowerCase() === to.toLowerCase();
-  if (grant.ancestors.some(matches)) {
+const named =
+  (to: string) =>
+  ({ id, name }: { id: string; name: string }) =>
+    id === to || name.toLowerCase() === to.toLowerCase() || mentionKey(name) === to.toLowerCase();
+
+// The one rule for reaching another bot: it shares a room with the caller, or the owner mentioned
+// it in this chain. Never the caller itself.
+function reachableBot(grant: Grant, to: string) {
+  return [...grant.roommates, ...grant.mentioned].find(
+    (bot) => bot.id !== grant.botId && named(to)(bot),
+  );
+}
+
+// Ancestors first: a name can match both, and an ancestor never takes work from its chain. A
+// delegate can't go to any bot already in the chain, which would let work come back around.
+function destination(store: EventStore, grant: Grant, to: string, kind: "delegate" | "handoff") {
+  if (grant.ancestors.some(named(to))) {
     return { refused: "ancestor" };
   }
-  const target = grant.roommates.find(matches);
+  const target = reachableBot(grant, to);
   if (!target) {
     return { refused: "not_allowed" };
+  }
+  if (kind === "delegate" && grant.inChain.includes(target.id)) {
+    return { refused: "already_in_chain" };
   }
   return store.botStatus(target.id) === "paused" ? { refused: "target_paused" } : target;
 }
@@ -140,12 +177,53 @@ export function callBotTool(
       askUser?.({ runId: run.id, botId: grant.botId, messageId, question: data.question });
       return answer({ status: "waiting", question_id: messageId, note: endTurn });
     }
+    // Read-only and capped. Another bot's words are untrusted, so reading them taints the caller.
+    case "read_bot_activity": {
+      const { data } = ReadActivity.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      const peer = reachableBot(grant, data.bot);
+      const bot = peer && store.getBot(peer.id);
+      if (!bot) {
+        return refused("not_allowed");
+      }
+      const turns = store
+        .turnSummaries(bot.id, data.limit)
+        .map(
+          ({ endedAt, status, asked, replied }) =>
+            `- ${endedAt.slice(0, 16)}Z, ${status}. Asked: "${asked}". Replied: "${replied}".`,
+        );
+      const messages = store
+        .recentMessages(bot.roomId, data.limit)
+        .map(
+          ({ author, body, name: sender, createdAt }) =>
+            `- ${createdAt.slice(0, 16)}Z ${author === "human" ? "Owner" : (sender ?? "Bot")}: ${oneLine(body).slice(0, activityLineChars)}`,
+        );
+      const body = [
+        "Latest turns:",
+        ...(turns.length > 0 ? turns : ["- None yet."]),
+        "Recent messages in its DM:",
+        ...(messages.length > 0 ? messages : ["- None yet."]),
+      ]
+        .join("\n")
+        .slice(0, activityChars);
+      store.markUntrusted(run.id);
+      const activity = inboundText({
+        id: "activity",
+        botName: bot.name,
+        chainId: null,
+        hop: 0,
+        body,
+      });
+      return answer({ status: "ok", bot: bot.name, activity });
+    }
     case "delegate": {
       const { data } = Delegate.safeParse(args);
       if (!data) {
         return malformed(name);
       }
-      const target = destination(store, grant, data.to);
+      const target = destination(store, grant, data.to, "delegate");
       if ("refused" in target) {
         return refused(target.refused);
       }
@@ -180,7 +258,7 @@ export function callBotTool(
       if (!data) {
         return malformed(name);
       }
-      const target = destination(store, grant, data.to);
+      const target = destination(store, grant, data.to, "handoff");
       if ("refused" in target) {
         return refused(target.refused);
       }

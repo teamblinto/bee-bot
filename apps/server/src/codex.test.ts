@@ -243,7 +243,7 @@ describe("the launch", () => {
       expect.arrayContaining([
         `mcp_servers.bee.url=${JSON.stringify(permissions.url)}`,
         'mcp_servers.bee.bearer_token_env_var="BEE_MCP_TOKEN"',
-        'mcp_servers.bee.enabled_tools=["memory_search","memory_get","memory_propose","memory_forget","send_message","notify","delegate","handoff","ask_user","create_routine"]',
+        'mcp_servers.bee.enabled_tools=["memory_search","memory_get","memory_propose","memory_forget","send_message","notify","delegate","handoff","read_bot_activity","ask_user","create_routine"]',
         'mcp_servers.bee.default_tools_approval_mode="approve"',
         'shell_environment_policy.exclude=["BEE_MCP_TOKEN"]',
       ]),

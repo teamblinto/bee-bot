@@ -978,6 +978,8 @@ export const Command = z.discriminatedUnion("type", [
       replyToId: z.uuid().optional(),
       // Uploaded first, through POST /attachments.
       attachmentIds: z.array(z.uuid()).max(maxAttachments).optional(),
+      // Bots named with the @ menu. In a DM they aren't woken: the DM's bot is told about them.
+      mentions: z.array(z.uuid()).max(maxRoomMembers).optional(),
     })
     .refine(({ body, attachmentIds }) => body !== "" || (attachmentIds?.length ?? 0) > 0),
   z.object({

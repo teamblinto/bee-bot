@@ -666,7 +666,7 @@ export async function startServer({
         return bot ? { status: 200, body: bot } : notFound;
       }
       case "send-message": {
-        const { messageId: id, roomId, body, replyToId, attachmentIds } = command;
+        const { messageId: id, roomId, body, replyToId, attachmentIds, mentions } = command;
         const result = store.sendMessage({
           id,
           roomId,
@@ -674,6 +674,7 @@ export async function startServer({
           attended,
           ...(replyToId && { replyToId }),
           ...(attachmentIds && { attachmentIds }),
+          ...(mentions && { mentions }),
         });
         if (result === "sent" || result === "duplicate") {
           return ok;

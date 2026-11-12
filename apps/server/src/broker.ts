@@ -40,6 +40,8 @@ const beeRules: Record<string, ToolRule> = {
   request_takeover: { labels: noLegs },
   delegate: { labels: legs("sideEffect") },
   handoff: { labels: legs("sideEffect") },
+  // Another bot's words: the handler marks the session untrusted itself, with no grant needed.
+  read_bot_activity: { labels: legs("readsPrivate") },
   create_routine: { labels: legs("sideEffect") },
 };
 

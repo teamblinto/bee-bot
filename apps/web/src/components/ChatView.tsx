@@ -317,6 +317,7 @@ export function ChatView({
             connected={connected}
             value={composerText}
             onChange={onComposerText}
+            others={chat.bots.filter(({ id, archivedAt }) => id !== bot.id && !archivedAt)}
           />
         </div>
       </div>

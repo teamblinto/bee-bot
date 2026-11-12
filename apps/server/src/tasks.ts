@@ -133,6 +133,13 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
        JOIN bots b ON b.id = other.bot_id AND b.archived_at IS NULL
      WHERE mine.bot_id = ? AND mine.left_at IS NULL ORDER BY b.rowid`,
   );
+  // Bots the owner picked from the @ menu anywhere in this chain.
+  const selectMentioned = db.prepare(
+    `SELECT DISTINCT b.id, b.name FROM messages m JOIN json_each(m.mentions) j
+       JOIN bots b ON b.id = j.value AND b.archived_at IS NULL
+     WHERE m.chain_id = ? AND m.author = 'human'`,
+  );
+  const selectInChain = db.prepare("SELECT DISTINCT bot_id AS id FROM runs WHERE chain_id = ?");
 
   const getTask = (id: string) => {
     const row = selectTask.get(id);
@@ -261,6 +268,11 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         tasksInRun: Count.parse(countForRun.get(runId)).count,
         ancestors,
         roommates: z.array(BotRef).parse(selectRoommates.all(run.botId)),
+        mentioned: z.array(BotRef).parse(selectMentioned.all(chainId)),
+        inChain: z
+          .array(z.object({ id: z.string() }))
+          .parse(selectInChain.all(chainId))
+          .map(({ id }) => id),
         owns: (taskId: string) => getTask(taskId)?.ownerBotId === run.botId,
         inRoom: (roomId: string, botId: string) => selectRoomScope.get(roomId, botId) !== undefined,
       };

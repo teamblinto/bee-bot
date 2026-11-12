@@ -2,9 +2,11 @@ import type { Bot, BotAccess, ModelCatalog } from "@beebot/contracts";
 import { ArrowUp, Square } from "lucide-react";
 import { type KeyboardEvent, useRef, useState } from "react";
 
+import { mentionedIds } from "../mentions";
 import { postCommand, requestNotifications, sendCommand } from "../serverConnection";
 import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { ComposerControls, type EngineChange, FullAccessDialog } from "./ComposerControls";
+import { useMentionMenu } from "./MentionMenu";
 import { iconProps } from "./ui";
 
 export function Composer({
@@ -16,6 +18,7 @@ export function Composer({
   connected,
   value,
   onChange,
+  others,
 }: {
   bot: Bot;
   catalog: ModelCatalog | undefined;
@@ -26,6 +29,8 @@ export function Composer({
   connected: boolean;
   value: string;
   onChange: (update: (current: string) => string) => void;
+  // The bots the owner can mention here. Mentioning one doesn't wake it.
+  others: Bot[];
 }) {
   const box = useRef<HTMLTextAreaElement>(null);
   const sending = useRef(false);
@@ -37,6 +42,7 @@ export function Composer({
   const nextTurnOnly = runId !== undefined && changedDuring === runId;
   const files = useAttachments(bot.roomId);
   const ready = (value.trim() !== "" || files.ids.length > 0) && !files.uploading;
+  const mentions = useMentionMenu(value, (text) => onChange(() => text), others, box);
 
   function changeEngine(change: EngineChange) {
     if (change.access === undefined) {
@@ -56,6 +62,7 @@ export function Composer({
   // Enter never reaches the button, so its disabled state can't be the gate.
   async function send() {
     const body = value;
+    const mentioned = mentionedIds(body, others);
     if (sending.current || !canSend || !ready) {
       return;
     }
@@ -70,6 +77,7 @@ export function Composer({
       roomId: bot.roomId,
       body,
       ...(files.ids.length > 0 && { attachmentIds: files.ids }),
+      ...(mentioned.length > 0 && { mentions: mentioned }),
     });
     sending.current = false;
     if (result.ok) {
@@ -82,9 +90,12 @@ export function Composer({
     }
   }
 
-  function onKeyDown(event: KeyboardEvent) {
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const composing = event.nativeEvent.isComposing || event.keyCode === 229;
-    if (event.key === "Enter" && !event.shiftKey && !composing) {
+    if (composing || mentions.onKeyDown(event)) {
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void send();
     }
@@ -103,7 +114,7 @@ export function Composer({
         </p>
       )}
       <form
-        className="@container flex flex-col gap-1 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md backdrop-saturate-[1.14] transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
+        className="@container relative flex flex-col gap-1 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md backdrop-saturate-[1.14] transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
         onSubmit={(event) => {
           event.preventDefault();
           void send();
@@ -112,6 +123,7 @@ export function Composer({
         onDragOver={files.onDragOver}
       >
         <UploadChips uploads={files.uploads} onRemove={files.remove} />
+        {mentions.menu}
         <textarea
           ref={box}
           data-composer
@@ -119,7 +131,10 @@ export function Composer({
           autoFocus
           className="max-h-40 min-h-8 resize-none bg-transparent px-2.5 py-1 field-sizing-content outline-none"
           aria-label={`Message ${bot.name}`}
-          placeholder={`Message ${bot.name}`}
+          {...mentions.textBoxProps}
+          placeholder={
+            others.length > 0 ? `Message ${bot.name}, @ to mention a bot` : `Message ${bot.name}`
+          }
           rows={1}
           value={value}
           onFocus={({ currentTarget }) =>
@@ -127,8 +142,10 @@ export function Composer({
           }
           onChange={({ target }) => {
             onChange(() => target.value);
+            mentions.onCaret(target, true);
             setMessageId(crypto.randomUUID());
           }}
+          onSelect={({ currentTarget }) => mentions.onCaret(currentTarget, false)}
           onKeyDown={onKeyDown}
           onPaste={files.onPaste}
         />

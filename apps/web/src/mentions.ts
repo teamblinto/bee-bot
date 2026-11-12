@@ -21,3 +21,13 @@ export function insertMention(text: string, caret: number, start: number, name: 
   const after = text.slice(caret).replace(/^\s/, "");
   return { text: text.slice(0, start) + inserted + after, caret: start + inserted.length };
 }
+
+const written = /(?<![\p{L}\p{N}_])@([\p{L}\p{N}_.-]+)/gu;
+
+// The bots a sent message names in full, the way the picker writes them, in order.
+export function mentionedIds<T extends { id: string; name: string }>(text: string, bots: T[]) {
+  const keys = [...text.matchAll(written)].map(([, raw = ""]) =>
+    raw.replace(/[.-]+$/, "").toLowerCase(),
+  );
+  return bots.filter(({ name }) => keys.includes(mentionKey(name))).map(({ id }) => id);
+}

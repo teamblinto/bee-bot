@@ -255,6 +255,7 @@ describe("Claude in a box", () => {
         "notify",
         "delegate",
         "handoff",
+        "read_bot_activity",
         "ask_user",
         "create_routine",
         "browser_navigate",

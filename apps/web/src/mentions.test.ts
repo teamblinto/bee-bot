@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { insertMention, mentionAt, mentionMatches } from "./mentions";
+import { insertMention, mentionAt, mentionedIds, mentionMatches } from "./mentions";
 
 const members = [{ name: "Ada" }, { name: "Ben Ito" }, { name: "Bea" }];
 
@@ -23,5 +23,15 @@ describe("the mention picker", () => {
       text: "ask @benito about it",
       caret: 12,
     });
+  });
+
+  it("finds the bots a message names in full, and not a mention that only starts one", () => {
+    const bots = [
+      { id: "a", name: "Ada" },
+      { id: "b", name: "Ben Ito" },
+      { id: "c", name: "Ben" },
+    ];
+    expect(mentionedIds("ask @benito and @ada.", bots)).toEqual(["a", "b"]);
+    expect(mentionedIds("mail ada@ada.com about @be", bots)).toEqual([]);
   });
 });

@@ -1,10 +1,8 @@
 import type { Bot, Room } from "@beebot/contracts";
 import { ArrowUp, PanelLeft, Users } from "lucide-react";
 import { type KeyboardEvent, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 
 import { connectionLines } from "../labels";
-import { insertMention, mentionAt, mentionMatches } from "../mentions";
 import {
   type ConnectionState,
   isActive,
@@ -15,6 +13,7 @@ import {
 import { buildTranscript } from "../transcript";
 import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { Avatar } from "./Avatar";
+import { useMentionMenu } from "./MentionMenu";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
 
@@ -121,33 +120,12 @@ function RoomComposer({
   const box = useRef<HTMLTextAreaElement>(null);
   const sending = useRef(false);
   const [text, setText] = useState("");
-  const [caret, setCaret] = useState(0);
-  const [highlight, setHighlight] = useState(0);
-  // The start of a mention the owner closed the picker on, so it stays closed while they type.
-  const [dismissed, setDismissed] = useState<number>();
   const [messageId, setMessageId] = useState(() => crypto.randomUUID());
   const [error, setError] = useState<string>();
-  const mention = mentionAt(text, caret);
-  const matches =
-    mention && mention.start !== dismissed ? mentionMatches(members, mention.query) : [];
-  const highlighted = matches[Math.min(highlight, matches.length - 1)];
+  const mentions = useMentionMenu(text, setText, members, box);
   const name = room.name ?? "the room";
   const files = useAttachments(room.id);
   const ready = (text.trim() !== "" || files.ids.length > 0) && !files.uploading;
-
-  function pick(bot: Bot) {
-    if (!mention) {
-      return;
-    }
-    const next = insertMention(text, caret, mention.start, bot.name);
-    flushSync(() => {
-      setText(next.text);
-      setCaret(next.caret);
-      setHighlight(0);
-    });
-    box.current?.focus();
-    box.current?.setSelectionRange(next.caret, next.caret);
-  }
 
   async function send() {
     const body = text;
@@ -177,26 +155,8 @@ function RoomComposer({
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const composing = event.nativeEvent.isComposing || event.keyCode === 229;
-    if (composing) {
+    if (composing || mentions.onKeyDown(event)) {
       return;
-    }
-    if (highlighted && mention) {
-      const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
-      if (step) {
-        event.preventDefault();
-        setHighlight((matches.indexOf(highlighted) + step + matches.length) % matches.length);
-        return;
-      }
-      if (event.key === "Enter" || event.key === "Tab") {
-        event.preventDefault();
-        pick(highlighted);
-        return;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setDismissed(mention.start);
-        return;
-      }
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -221,29 +181,7 @@ function RoomComposer({
         onDragOver={files.onDragOver}
       >
         <UploadChips uploads={files.uploads} onRemove={files.remove} />
-        {highlighted && (
-          <ul
-            id="mention-list"
-            role="listbox"
-            aria-label="Bots in this room"
-            className="menu absolute bottom-full left-0 mb-1 w-56 p-1"
-          >
-            {matches.map((bot) => (
-              <li
-                key={bot.id}
-                id={`mention-${bot.id}`}
-                role="option"
-                aria-selected={bot === highlighted}
-                className="flex cursor-default items-center gap-2 rounded-field px-2 py-1 text-small aria-selected:bg-hover"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => pick(bot)}
-              >
-                <Avatar seed={bot.avatarSeed} className="size-5" />
-                {bot.name}
-              </li>
-            ))}
-          </ul>
-        )}
+        {mentions.menu}
         <div className="flex items-end gap-1">
           <AttachButton disabled={!canSend} onFiles={files.add} />
           <textarea
@@ -252,19 +190,16 @@ function RoomComposer({
             autoFocus
             className="max-h-40 min-h-8 flex-1 resize-none bg-transparent px-2.5 py-1 field-sizing-content outline-none"
             aria-label={`Message ${name}`}
-            aria-autocomplete="list"
-            aria-controls={highlighted ? "mention-list" : undefined}
-            aria-activedescendant={highlighted ? `mention-${highlighted.id}` : undefined}
+            {...mentions.textBoxProps}
             placeholder="Message the room, @ to mention a bot"
             rows={1}
             value={text}
             onChange={({ target }) => {
               setText(target.value);
-              setCaret(target.selectionStart);
-              setHighlight(0);
+              mentions.onCaret(target, true);
               setMessageId(crypto.randomUUID());
             }}
-            onSelect={({ currentTarget }) => setCaret(currentTarget.selectionStart)}
+            onSelect={({ currentTarget }) => mentions.onCaret(currentTarget, false)}
             onKeyDown={onKeyDown}
             onPaste={files.onPaste}
           />

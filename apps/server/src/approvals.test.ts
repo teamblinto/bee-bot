@@ -264,6 +264,7 @@ describe("the MCP endpoint", () => {
       "notify",
       "delegate",
       "handoff",
+      "read_bot_activity",
       "ask_user",
       "create_routine",
     ];
