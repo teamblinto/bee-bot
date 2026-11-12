@@ -1651,11 +1651,12 @@ export function openEventStore(dataDir: string) {
   // What the bot is handed as new input, at turn start and when input steers a live turn.
   function inputText(scope: Scope, input: Input[]) {
     if (!isGroup(scope.roomId)) {
+      // The context first, so the owner's own words end the input.
       return [
+        mentionBlock(scope.botId, input),
         ...input.map(({ name, ...row }) =>
           name === null ? withFiles(scope.botId, row) : inboundText({ ...row, botName: name }),
         ),
-        mentionBlock(scope.botId, input),
       ]
         .filter(Boolean)
         .join("\n\n");

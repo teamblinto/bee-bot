@@ -178,7 +178,7 @@ function Home() {
       {archived && (
         <div
           role="status"
-          className="menu fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 px-3 py-2 text-small"
+          className="menu fixed bottom-28 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 px-3 py-2 text-small"
         >
           {archived.name} archived.
           <button
