@@ -350,8 +350,9 @@ const descriptions: Record<CuaTool, string> = {
     "value instead, which also works where typing doesn't." +
     background,
   computer_window_key:
-    "Presses a key or key combination in a window, or at one of its controls by element token." +
-    background,
+    "Presses a key or key combination in a window, or at one of its controls by element token. " +
+    "A single key works in the background. A combination such as ctrl+s needs the window in " +
+    "front, so it waits for the owner to pause, then briefly brings the window forward.",
   computer_window_scroll: `Scrolls a window.${background}`,
   computer_window_drag:
     "Drags with the left mouse button between two points in a window, in its computer_look " +
@@ -750,13 +751,20 @@ export function createCuaScreen(deps: CuaScreenDeps) {
         : undefined;
     };
     // `inFront` is whether input the window drops in the background may go in front, or why not.
+    // `frontOnly` skips the background, for input it always gets wrong there.
     // `window` is the one it acts on, forgotten when the call fails, since it may have closed.
     const send = async (
       name: string,
       driverArgs: Record<string, unknown>,
-      { inFront = false, window }: { inFront?: boolean | string; window?: number } = {},
+      {
+        inFront = false,
+        frontOnly = false,
+        window,
+      }: { inFront?: boolean | string; frontOnly?: boolean; window?: number } = {},
     ) => {
-      let sent = await driveAction(name, { session, ...driverArgs });
+      const deliver = (sentArgs: Record<string, unknown>) =>
+        frontOnly ? inFrontOnce(name, sentArgs) : driveAction(name, { session, ...sentArgs });
+      let sent = await deliver(driverArgs);
       const token = driverArgs.element_token;
       if (typeof token === "string" && staleToken(sent)) {
         const fresh = await renew(token);
@@ -764,9 +772,9 @@ export function createCuaScreen(deps: CuaScreenDeps) {
           return failed(controlChanged);
         }
         driverArgs = { ...driverArgs, element_token: fresh };
-        sent = await driveAction(name, { session, ...driverArgs });
+        sent = await deliver(driverArgs);
       }
-      if (inFront !== false && backgroundRefused(sent)) {
+      if (!frontOnly && inFront !== false && backgroundRefused(sent)) {
         sent = typeof inFront === "string" ? failed(inFront) : await inFrontOnce(name, driverArgs);
       }
       if (sent.isError && window !== undefined) {
@@ -829,13 +837,20 @@ export function createCuaScreen(deps: CuaScreenDeps) {
             : await target(window_id ?? 0);
         await windowOf(session, at.window_id);
         const parts = keys.toLowerCase().split("+");
-        const pressed = parts.length === 1 ? { key: parts[0] } : { keys: parts };
         const sent = element !== undefined ? { element_token: element } : at;
-        return send(
-          parts.length === 1 ? "press_key" : "hotkey",
-          { ...sent, ...pressed },
-          { inFront: systemWide(parts) ? systemRefused : true, window: at.window_id },
-        );
+        if (parts.length === 1) {
+          return send(
+            "press_key",
+            { ...sent, key: parts[0] },
+            { inFront: systemWide(parts) ? systemRefused : true, window: at.window_id },
+          );
+        }
+        // The driver posts a combination's keys without holding its modifiers, and still reports
+        // success: by element token nothing lands, by window ctrl+s types "s". In front it works.
+        if (systemWide(parts)) {
+          return failed(systemRefused);
+        }
+        return send("hotkey", { ...sent, keys: parts }, { frontOnly: true, window: at.window_id });
       }
       case "computer_window_scroll": {
         const { window_id, direction, amount = 3 } = args[tool].parse(input);

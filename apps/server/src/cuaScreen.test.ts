@@ -205,7 +205,10 @@ describe("the cua host screen", () => {
       { name: "set_value", args: { session, element_token: "s1:12", value: "hi" } },
       { name: "click", args: { session, element_token: "s1:12", button: "left", count: 2 } },
       { name: "click", args: { session, ...target, x: 5, y: 6, button: "left", count: 1 } },
-      { name: "hotkey", args: { session, ...target, keys: ["ctrl", "s"] } },
+      {
+        name: "hotkey",
+        args: { session, ...target, keys: ["ctrl", "s"], delivery_mode: "foreground" },
+      },
       { name: "press_key", args: { session, element_token: "s1:12", key: "return" } },
       { name: "scroll", args: { session, ...target, direction: "down", amount: 3 } },
       {
@@ -314,7 +317,30 @@ describe("the cua host screen", () => {
       const pressed = await screen.call(run, "computer_window_key", { window_id: 33, keys });
       expect(said(pressed)).toContain("whole computer");
     }
-    expect(state.calls.some(({ args }) => args.delivery_mode === "foreground")).toBe(false);
+    expect(state.calls.some(({ name }) => name === "hotkey")).toBe(false);
+    screen.close();
+  });
+
+  it("sends a key combination only in front, since the background drops its modifiers", async () => {
+    const { state, time, screen } = setUp();
+    await screen.call(run, "computer_look", { window_id: 11 });
+    const pressed = await screen.call(run, "computer_window_key", {
+      element: "s1:12",
+      keys: "ctrl+a",
+    });
+    expect(said(pressed)).toBe("did computer_window_key");
+    expect(time.now).toBeGreaterThanOrEqual(time.ownerAt + 3000);
+    expect(state.calls.filter(({ name }) => name === "hotkey")).toEqual([
+      {
+        name: "hotkey",
+        args: {
+          session: "run-1",
+          element_token: "s1:12",
+          keys: ["ctrl", "a"],
+          delivery_mode: "foreground",
+        },
+      },
+    ]);
     screen.close();
   });
 
