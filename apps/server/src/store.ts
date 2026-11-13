@@ -46,7 +46,7 @@ import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
 import { openSkills, skillsDir } from "./skills.ts";
-import { openConnectors } from "./connectors.ts";
+import { openConnectors, reservedSlug, slugFrom } from "./connectors.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
 import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
@@ -792,6 +792,22 @@ export const migrations: Array<{
     name: "connector_egress_hosts",
     // A local server's box reaches only these, normalized by ownerEgressHosts.
     sql: "ALTER TABLE connectors ADD COLUMN egress_hosts TEXT NOT NULL DEFAULT '[]'",
+  },
+  {
+    name: "reserve_connectors_slug",
+    sql: "SELECT 1",
+    backfill: (db) => {
+      const taken = new Set(
+        z
+          .array(z.object({ slug: z.string() }))
+          .parse(db.prepare("SELECT slug FROM connectors").all())
+          .map(({ slug }) => slug),
+      );
+      db.prepare("UPDATE connectors SET slug = ? WHERE slug = ?").run(
+        slugFrom(reservedSlug, taken),
+        reservedSlug,
+      );
+    },
   },
 ];
 

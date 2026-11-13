@@ -296,6 +296,12 @@ const toolVerbs = new Map([
   ["mcp__bee__computer_window_key", { running: "Pressing keys", done: "", bare: "Pressed keys" }],
   ["mcp__bee__computer_window_scroll", { running: "Scrolling", done: "", bare: "Scrolled" }],
   ["mcp__bee__computer_window_drag", { running: "Dragging", done: "", bare: "Dragged" }],
+  // A large catalog's two tools. The real tool's name is only in the input, which clients never see.
+  [
+    "mcp__connectors__connectors_search",
+    { running: "Searching apps", done: "", bare: "Searched apps" },
+  ],
+  ["mcp__connectors__connectors_call", { running: "Using an app", done: "", bare: "Used an app" }],
 ]);
 
 // The app a connector tool belongs to, by its slug, and the tool's own name.
@@ -336,7 +342,7 @@ export function toolRowLabel(
   { name, detail, status }: Omit<LiveTool, "id">,
   connectors: readonly Connector[] = [],
 ) {
-  const app = connectorTool(name, connectors);
+  const app = toolVerbs.has(name) ? undefined : connectorTool(name, connectors);
   if (app) {
     return `${status === "running" ? "Using" : "Used"} ${app.app}${app.tool ? ` · ${app.tool}` : ""}`;
   }

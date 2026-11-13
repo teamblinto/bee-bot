@@ -73,6 +73,11 @@ it("names a connector tool by its app, even when one slug starts another", () =>
     "Using GitHub · list_issues",
   );
   expect(toolRowLabel({ ...tool, status: "done" }, connectors)).toBe("Used GitHub · list_issues");
+
+  const search = { name: "mcp__connectors__connectors_search", detail: null };
+  expect(toolRowLabel({ ...search, status: "running" }, connectors)).toBe("Searching apps…");
+  const call = { name: "mcp__connectors__connectors_call", detail: null };
+  expect(toolRowLabel({ ...call, status: "done" }, connectors)).toBe("Used an app");
 });
 
 it("announces status changes and takes the newest thought line", () => {

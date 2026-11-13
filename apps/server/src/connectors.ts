@@ -378,6 +378,9 @@ export function parseMcpServers(text: string) {
   return { entries, refused };
 }
 
+// The hub's own `connectors_search` and `connectors_call` would collide with this slug's tools.
+export const reservedSlug = "connectors";
+
 // A slug from the entry's name or host: lowercase letters and digits, starting with a letter.
 export function slugFrom(text: string, taken: ReadonlySet<string>) {
   const letters = text
@@ -387,7 +390,7 @@ export function slugFrom(text: string, taken: ReadonlySet<string>) {
   const base = (letters || "app").slice(0, 14);
   for (let index = 1; ; index += 1) {
     const slug = index === 1 ? base : `${base}${index}`;
-    if (!taken.has(slug) && ConnectorSlug.safeParse(slug).success) {
+    if (!taken.has(slug) && slug !== reservedSlug && ConnectorSlug.safeParse(slug).success) {
       return slug;
     }
   }
@@ -570,7 +573,7 @@ export function openConnectors(
         }
         const taken = takenSlugs();
         const slug = fields.slug ?? slugFrom(fields.name, taken);
-        if (taken.has(slug)) {
+        if (taken.has(slug) || slug === reservedSlug) {
           return "connector_slug_taken";
         }
         const id = NodeCrypto.randomUUID();

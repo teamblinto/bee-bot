@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { Duplex, finished, PassThrough } from "node:stream";
 
 import { Connector, protocolVersion } from "@beebot/contracts";
@@ -12,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { WebSocket } from "ws";
 import { z } from "zod";
 
 import { boxLayout } from "./boxEngine.ts";
@@ -35,7 +38,7 @@ import {
 } from "./connectors.ts";
 import { connectorsUrl, type BotLaunch, type RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
-import { type EventStore, openEventStore } from "./store.ts";
+import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
 import { openVault } from "./vaultStore.ts";
 
 // Every way to start a process from this machine, watched: a connector must never use one.
@@ -236,7 +239,7 @@ afterEach(async () => {
 });
 
 // Answers only with the token, and echoes the Authorization it got, as a careless server might.
-async function fakeApp(toolNames: () => string[]) {
+async function fakeApp(toolNames: () => string[], descriptions: Record<string, string> = {}) {
   const calls: Array<{ name: string; args: unknown }> = [];
   const server = NodeHttp.createServer(async (request, response) => {
     if (request.headers.authorization !== `Bearer ${appToken}`) {
@@ -248,8 +251,14 @@ async function fakeApp(toolNames: () => string[]) {
       mcp.registerTool(
         name,
         {
-          description: `Does ${name}.`,
-          inputSchema: { q: z.string().optional() },
+          description: descriptions[name] ?? `Does ${name}.`,
+          // `bloated` is over 32 KB, so it is kept out.
+          inputSchema: {
+            q: (name === "bloated"
+              ? z.string().describe("x".repeat(33 * 1024))
+              : z.string()
+            ).optional(),
+          },
           annotations: { readOnlyHint: name === "search" },
         },
         async (args) => {
@@ -273,7 +282,13 @@ async function fakeApp(toolNames: () => string[]) {
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, calls };
 }
 
-type Seen = { listed: string[]; search: string; create: string; launch: BotLaunch };
+type Seen = {
+  listed: string[];
+  search: string;
+  create: string;
+  results: string[];
+  launch: BotLaunch;
+};
 
 async function rpc(url: string, token: string, method: string, params: object) {
   const response = await fetch(url, {
@@ -288,10 +303,12 @@ async function rpc(url: string, token: string, method: string, params: object) {
 
 const textOf = (result: { content: Array<{ text: string }> }) => result.content[0]?.text ?? "";
 
+// `calls` replaces the default two calls with these, made in order.
 async function startBeebotd({
   box,
   names = ["fake_search", "fake_create"],
-}: { box?: BoxRuntime; names?: [string, string] } = {}) {
+  calls,
+}: { box?: BoxRuntime; names?: [string, string]; calls?: Array<[string, unknown]> } = {}) {
   store = openEventStore(dataDir);
   cleanups.push(() => store.close());
   const seen = new Map<string, Seen>();
@@ -300,12 +317,17 @@ async function startBeebotd({
     const url = connectorsUrl(permissions.url);
     const { token } = permissions;
     const list = await rpc(url, token, "tools/list", {});
-    const call = async (name: string) =>
-      textOf(await rpc(url, token, "tools/call", { name, arguments: searchArgs }));
+    const call = async (name: string, args: unknown = searchArgs) =>
+      textOf(await rpc(url, token, "tools/call", { name, arguments: args }));
+    const results: string[] = [];
+    for (const [name, args] of calls ?? []) {
+      results.push(await call(name, args));
+    }
     seen.set(launch.name, {
       listed: list.tools.map(({ name }: { name: string }) => name).sort(),
-      search: await call(names[0]),
-      create: await call(names[1]),
+      search: calls ? "" : await call(names[0]),
+      create: calls ? "" : await call(names[1]),
+      results,
       launch,
     });
     return { kind: "completed", text: "done" };
@@ -466,6 +488,148 @@ describe("the connectors server", () => {
     const saw = await turn(ada.id, ada.roomId);
     expect(saw.search).toContain("secret_in_input");
     expect(app.calls).toEqual([]);
+  });
+});
+
+describe("a large catalog", () => {
+  it("lists only search and call past 40 tools, and every call is the real tool's", async () => {
+    const usable = ["search", "create", ...Array.from({ length: 39 }, (_, index) => `t${index}`)];
+    const weather = "Tells the weather.";
+    const app = await fakeApp(() => [...usable, "ungranted", "bloated"], {
+      t7: weather,
+      ungranted: weather,
+      bloated: weather,
+    });
+    const other = await fakeApp(() => ["forecast"], { forecast: weather });
+    const { base, command, turn } = await startBeebotd({
+      calls: [
+        ["connectors_search", { query: "the WEATHER" }],
+        ["connectors_call", { name: "fake_search", arguments: { q: "x" } }],
+        ["connectors_call", { name: "fake_create", arguments: {} }],
+        ["connectors_call", { name: "fake_ungranted", arguments: {} }],
+        ["connectors_call", { name: "connectors_call", arguments: { name: "fake_search" } }],
+      ],
+    });
+    // A watching owner, so a write can wait for them.
+    const params = new URLSearchParams({
+      protocolVersion: String(protocolVersion),
+      token: ownerToken,
+    });
+    const socket = new WebSocket(`${base.replace("http", "ws")}/ws?${params}`);
+    cleanups.push(() => socket.terminate());
+    await once(socket, "open");
+    socket.send(JSON.stringify({ type: "subscribe", afterSeq: 0 }));
+
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    const add = async (name: string, url: string) => {
+      const { id } = Connector.parse(
+        (await command({ type: "add-connector", name, url, bearer: appToken })).body,
+      );
+      await vi.waitFor(() => expect(store.connectors.getConnector(id)?.status).toBe("ok"));
+      return id;
+    };
+    const fakeId = await add("Fake", app.url);
+    const otherId = await add("Other", other.url);
+    await command({
+      type: "review-connector",
+      connectorId: fakeId,
+      toolsHash: store.connectors.getConnector(fakeId)?.toolsHash,
+      readOnly: usable.filter((name) => name !== "create"),
+    });
+    const grant = async (connectorId: string, tools: string[] | "*") =>
+      expect(
+        await command({
+          type: "set-bot-connector",
+          botId: ada.id,
+          connectorId,
+          on: true,
+          tools,
+          allowWrites: [],
+        }),
+      ).toMatchObject({ status: 200 });
+    // Unreviewed, so none of its tools count or turn up.
+    await grant(otherId, "*");
+    await grant(fakeId, [...usable, "bloated"]);
+
+    const saw = await turn(ada.id, ada.roomId);
+    expect(saw.listed).toEqual(["connectors_call", "connectors_search"]);
+    const [found, read, write, ungranted, nested] = saw.results;
+    const { from, content } = z
+      .object({ from: z.string(), content: z.string() })
+      .parse(JSON.parse(found ?? ""));
+    expect(from).toBe("Connector search");
+    expect(JSON.parse(content)).toEqual([
+      {
+        name: "fake_t7",
+        connector: "Fake",
+        description: weather,
+        inputSchema: expect.objectContaining({ type: "object" }),
+        writes: false,
+      },
+    ]);
+    expect(read).toContain("search ok");
+    expect(write).toMatch(/^waiting: /);
+    const [card] = store.continuations.waitingContinuations();
+    expect(card?.tool).toBe("mcp__connectors__fake_create");
+    expect(ungranted).toContain("not_granted");
+    expect(nested).toContain("unknown_tool");
+    expect(app.calls.map(({ name }) => name)).toEqual(["search"]);
+
+    const audit = store.policy
+      .auditPage({ unattended: false, limit: 200 })
+      .entries.filter(({ tool }) => tool !== null && !tool.startsWith("mcp__bee__"))
+      .map(({ tool, status, reason }) => [tool, status, reason]);
+    expect(audit.reverse()).toEqual([
+      ["connectors_search", "allow", null],
+      ["fake_search", "allow", null],
+      ["fake_create", "approve", null],
+      ["mcp__connectors__fake_create", "continuation_waiting", null],
+      ["fake_ungranted", "deny", "not_granted"],
+      ["connectors_call", "deny", "unknown_tool"],
+    ]);
+
+    // At 40, the full list.
+    await grant(fakeId, usable.slice(1));
+    expect((await turn(ada.id, ada.roomId)).listed).toHaveLength(40);
+  });
+
+  it("keeps the slug `connectors` for itself", () => {
+    store = openEventStore(dataDir);
+    cleanups.push(() => store.close());
+    const fields = {
+      name: "Connectors",
+      transport: "http" as const,
+      url: "http://127.0.0.1:9/mcp",
+      command: null,
+      args: [],
+      auth: "none" as const,
+      ownerBotId: null,
+      headerKeys: [],
+      envKeys: [],
+      status: "unreachable" as const,
+      lastError: null,
+    };
+    expect(store.connectors.addConnector({ ...fields, slug: "connectors" })).toBe(
+      "connector_slug_taken",
+    );
+    expect(Connector.parse(store.connectors.addConnector(fields)).slug).toBe("connectors2");
+  });
+
+  it("renames a connector that already had it", () => {
+    const db = new DatabaseSync(NodePath.join(dataDir, "old.sqlite"));
+    cleanups.push(() => db.close());
+    migrate(
+      db,
+      migrations.findIndex(({ name }) => name === "reserve_connectors_slug"),
+    );
+    db.exec(`INSERT INTO connectors (id, slug, name, transport, auth, status, created_at)
+      VALUES ('a', 'connectors', 'Connectors', 'http', 'none', 'ok', 'then'),
+        ('b', 'connectors2', 'Other', 'http', 'none', 'ok', 'then')`);
+    migrate(db);
+    expect(db.prepare("SELECT id, slug FROM connectors ORDER BY id").all()).toEqual([
+      { id: "a", slug: "connectors3" },
+      { id: "b", slug: "connectors2" },
+    ]);
   });
 });
 

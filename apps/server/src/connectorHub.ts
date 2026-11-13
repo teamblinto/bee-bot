@@ -14,7 +14,7 @@ import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { type Decide, decide as policyDecide } from "./broker.ts";
+import { type Decide, decide as policyDecide, type ToolRule } from "./broker.ts";
 import type { BoxRuntime } from "./boxRuntime.ts";
 import { boxedArgv, BoxStdioTransport, connectorBoxId } from "./connectorBox.ts";
 import { createConnectorOauth, oauthSecretValues } from "./connectorOauth.ts";
@@ -30,6 +30,7 @@ import {
   granted,
   guardedFetch,
   holdsSecret,
+  isReadOnly,
   ListedTool,
   parseSecret,
   prepareTools,
@@ -60,6 +61,50 @@ const authRequiredCode = -32302;
 type Lookup = (host: string) => Promise<string[]>;
 
 export type ExposedTool = { name: string; description: string; inputSchema: object };
+
+// Past this many tools, a run gets these two in place of the full list.
+const maxListed = 40;
+const searchName = "connectors_search";
+const callName = "connectors_call";
+const defaultFound = 10;
+const maxFound = 20;
+// Descriptions come from outside servers. Searching changes nothing.
+const searchRule: ToolRule = {
+  labels: { readsUntrusted: true, readsPrivate: false, sideEffect: false },
+};
+const SearchInput = z.object({
+  query: z.string().max(500),
+  limit: z.number().int().min(1).max(maxFound).optional(),
+});
+const CallInput = z.object({ name: z.string(), arguments: z.unknown() });
+const catalogTools: ExposedTool[] = [
+  {
+    name: searchName,
+    description:
+      "Search the tools of the apps you can use. Call this first, then call connectors_call with a tool's exact name and arguments matching its inputSchema.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Words that describe what you want to do." },
+        limit: { type: "integer", minimum: 1, maximum: maxFound, default: defaultFound },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: callName,
+    description:
+      "Call an app's tool found with connectors_search, by its exact name, with arguments matching its inputSchema.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The tool's exact name from connectors_search." },
+        arguments: { type: "object", description: "The tool's arguments." },
+      },
+      required: ["name"],
+    },
+  },
+];
 
 class ConnectorError extends Error {
   readonly status: ConnectorStatus;
@@ -405,21 +450,73 @@ export function createConnectorHub({
         waited,
       ]);
     }
-    return connectors.connectorGrants(botId).flatMap(({ connector, grant }) =>
+    const grants = connectors.connectorGrants(botId);
+    const exposed = usable(grants).map(({ connector, tool }) => ({
+      name: exposedName(connector.slug, tool.name),
+      description: `${connector.name}: ${tool.description}`.trim(),
+      inputSchema: tool.inputSchema,
+    }));
+    const standIns = grants
+      .filter(({ connector }) => connector.status !== "ok")
+      .map(({ connector }) => ({
+        name: unavailableName(connector),
+        description: unavailableText(connector),
+        inputSchema: { type: "object", properties: {} },
+      }));
+    return [...(exposed.length > maxListed ? catalogTools : exposed), ...standIns];
+  }
+
+  const usable = (grants: ReturnType<ConnectorStore["connectorGrants"]>) =>
+    grants.flatMap(({ connector, grant }) =>
       connector.status === "ok"
-        ? exposedTools(connector, grant).map((tool) => ({
-            name: exposedName(connector.slug, tool.name),
-            description: `${connector.name}: ${tool.description}`.trim(),
-            inputSchema: tool.inputSchema,
-          }))
-        : [
-            {
-              name: unavailableName(connector),
-              description: unavailableText(connector),
-              inputSchema: { type: "object", properties: {} },
-            },
-          ],
+        ? exposedTools(connector, grant).map((tool) => ({ connector, tool }))
+        : [],
     );
+
+  // Keyword hits, names counting twice. Only what this bot may use right now.
+  function search(run: BrokerRun, args: unknown) {
+    const input = SearchInput.safeParse(args).data;
+    const decideSearch: Decide = input ? decide : () => ({ kind: "deny", reason: "bad_input" });
+    const decision = policy.check(run, searchName, args, decideSearch, searchRule);
+    if (decision.kind !== "allow") {
+      return refusedText(decision);
+    }
+    if (!input) {
+      return refusedText({ kind: "deny", reason: "bad_input" });
+    }
+    const words = input.query
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
+    const found = usable(connectors.connectorGrants(run.botId))
+      .map(({ connector, tool }) => {
+        const name = exposedName(connector.slug, tool.name);
+        const names = `${name} ${tool.name}`.toLowerCase();
+        const rest = `${tool.description} ${connector.name}`.toLowerCase();
+        const score = words.reduce(
+          (sum, word) => sum + (names.includes(word) ? 2 : 0) + (rest.includes(word) ? 1 : 0),
+          0,
+        );
+        return { score, connector, tool, name };
+      })
+      .filter(({ score }) => words.length === 0 || score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, input.limit ?? defaultFound)
+      .map(({ connector, tool, name }) => ({
+        name,
+        connector: connector.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        writes: !isReadOnly(connector, tool),
+      }));
+    return untrustedResult("Connector search", JSON.stringify(found), false);
+  }
+
+  // Audited under the name asked for, and never weighed by another table's rule.
+  function refuseUnknown(run: BrokerRun, name: string, args: unknown) {
+    const unknown = { kind: "deny", reason: "unknown_tool" } as const;
+    policy.check(run, name, args, () => unknown);
+    return refusedText(unknown);
   }
 
   const unavailableName = (connector: Connector) => `${connector.slug}_unavailable`;
@@ -480,14 +577,25 @@ export function createConnectorHub({
   }
 
   // Authorized, decided, audited once, then run.
-  async function call(run: BrokerRun, name: string, args: unknown, signal: AbortSignal) {
+  async function call(
+    run: BrokerRun,
+    name: string,
+    args: unknown,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (name === searchName) {
+      return search(run, args);
+    }
+    if (name === callName) {
+      // One level only: the real tool's own checks, rule and audit apply.
+      const inner = CallInput.safeParse(args).data;
+      return inner && inner.name !== searchName && inner.name !== callName
+        ? call(run, inner.name, inner.arguments, signal)
+        : refuseUnknown(run, inner?.name ?? callName, args);
+    }
     const found = resolve(run.botId, name);
     if (!found) {
-      // A tool no table knows is denied, and the denial is audited.
-      const unknown = policy.check(run, name, args, decide);
-      return refusedText(
-        unknown.kind === "allow" ? { kind: "deny", reason: "unknown_tool" } : unknown,
-      );
+      return refuseUnknown(run, name, args);
     }
     const { connector, tool } = found;
     const grant = connector.grants.find((entry) => entry.botId === run.botId);
