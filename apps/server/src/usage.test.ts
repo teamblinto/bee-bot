@@ -438,7 +438,7 @@ describe("the usage routes", () => {
 
 it("server code names no credentials path and no vendor endpoint", () => {
   const banned =
-    /\.credentials|keychain|secret-tool|oauth\/|api\.anthropic|anthropic\.com|claude\.ai\/|https?:\/\/(?!127\.0\.0\.1|\$\{proxyHost\})/i;
+    /\.credentials|keychain|secret-tool|(?<!connectors\/)oauth\/|api\.anthropic|anthropic\.com|claude\.ai\/|https?:\/\/(?!127\.0\.0\.1|\$\{proxyHost\})/i;
   const sources = NodeFS.readdirSync(import.meta.dirname, { recursive: true, encoding: "utf8" })
     .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
     .map((name) => [name, NodeFS.readFileSync(NodePath.join(import.meta.dirname, name), "utf8")]);

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 35;
+export const protocolVersion = 36;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -1161,13 +1161,19 @@ export const Command = z.discriminatedUnion("type", [
     readOnly: ToolNames,
   }),
   // Replaces what is saved. `bearer` or `headers` for a remote server, `env` for a local one.
+  // `clientId`, with `clientSecret` if it has one, is the OAuth client for a server without
+  // dynamic registration, and replaces only that.
   z.object({
     type: z.literal("set-connector-secret"),
     connectorId: z.uuid(),
     bearer: ConnectorSecret.optional(),
     headers: SecretMap.optional(),
     env: SecretMap.optional(),
+    clientId: z.string().trim().min(1).max(512).optional(),
+    clientSecret: ConnectorSecret.optional(),
   }),
+  // Answers `{ authorizationUrl }` for the owner's browser, or `{ needsClient: true }`.
+  z.object({ type: z.literal("start-connector-oauth"), connectorId: z.uuid() }),
   z.object({ type: z.literal("refresh-connector"), connectorId: z.uuid() }),
   z.object({ type: z.literal("disconnect-connector"), connectorId: z.uuid() }),
   z.object({ type: z.literal("delete-connector"), connectorId: z.uuid() }),
@@ -1180,12 +1186,13 @@ export const Command = z.discriminatedUnion("type", [
     allowWrites: ToolNames,
   }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
-  // Box mode (R17). On a hand_off, "approve" means the owner did it themselves.
+  // Box mode (R17). On a hand_off, "approve" means the owner did it themselves. "always" is for a
+  // connector write only: it stops asking for that tool, then approves.
   z.object({
     type: z.literal("decide-continuation"),
     continuationId: z.uuid(),
     digest: z.string(),
-    decision: z.enum(["approve", "deny"]),
+    decision: z.enum(["approve", "deny", "always"]),
   }),
   z.object({
     type: z.literal("store-api-key"),

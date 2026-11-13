@@ -210,11 +210,78 @@ function SecretForm({
   );
 }
 
+// The web app opens the sign-in page: beebotd never drives a browser.
+async function signIn(connector: Connector, send: Send) {
+  const body = await send({ type: "start-connector-oauth", connectorId: connector.id });
+  if (typeof body === "object" && body !== null && "authorizationUrl" in body) {
+    window.open(String(body.authorizationUrl), "_blank", "noopener");
+  }
+}
+
+// For a server that can't register Bee Bot itself: the owner makes a client and pastes it here.
+function ClientForm({
+  connector,
+  send,
+  busy,
+}: {
+  connector: Connector;
+  send: Send;
+  busy: boolean;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    const body = await send({
+      type: "set-connector-secret",
+      connectorId: connector.id,
+      clientId: clientId.trim(),
+      ...(clientSecret && { clientSecret }),
+    });
+    if (body) {
+      setClientId("");
+      setClientSecret("");
+      await signIn(connector, send);
+    }
+  }
+  return (
+    <form className="flex flex-wrap items-center gap-1" onSubmit={(event) => void save(event)}>
+      <input
+        aria-label={`${connector.name} client ID`}
+        className="field min-w-0 flex-1 text-ink"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="Client ID"
+        value={clientId}
+        onChange={(event) => setClientId(event.target.value)}
+      />
+      <input
+        type="password"
+        aria-label={`${connector.name} client secret`}
+        className="field min-w-0 flex-1 text-ink"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="Client secret, if it has one"
+        value={clientSecret}
+        onChange={(event) => setClientSecret(event.target.value)}
+      />
+      <button type="submit" className="button" disabled={busy || !clientId.trim()}>
+        Save and sign in
+      </button>
+    </form>
+  );
+}
+
 function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot | undefined }) {
   const { busy, error, send } = useSend();
   const [reviewing, setReviewing] = useState(false);
   const where = connector.url ?? [connector.command, ...connector.args].join(" ");
   const needsReview = connector.toolsHash !== null && !connectorUsable(connector);
+  // A token the owner pasted is fixed by pasting another, not by signing in.
+  const signsIn =
+    connector.transport === "http" &&
+    (connector.auth === "oauth" ||
+      (connector.auth === "none" && connector.status === "needs_sign_in"));
 
   function remove() {
     const bots = connector.grants.length;
@@ -244,6 +311,16 @@ function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot |
             Review
           </button>
         )}
+        {signsIn && (
+          <button
+            type="button"
+            className={connector.status === "needs_sign_in" ? "button button-primary" : "button"}
+            disabled={busy}
+            onClick={() => void signIn(connector, send)}
+          >
+            {connector.authStatus === "signed_in" ? "Reconnect" : "Sign in"}
+          </button>
+        )}
         <button
           type="button"
           className="button"
@@ -267,6 +344,9 @@ function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot |
         </button>
       </div>
       <SecretForm connector={connector} send={send} busy={busy} />
+      {connector.status === "needs_client" && (
+        <ClientForm connector={connector} send={send} busy={busy} />
+      )}
       {error && (
         <p role="alert" className="text-small text-ink-secondary">
           {error}

@@ -437,6 +437,15 @@ const ConnectorRow = z
     return { ...row, authStatus: authStatus[row.auth] };
   });
 
+const OauthStateRow = z.object({
+  connectorId: z.string(),
+  url: z.string(),
+  codeVerifier: z.string(),
+  redirectUrl: z.string(),
+  expiresAt: z.string(),
+});
+export type OauthState = Omit<z.infer<typeof OauthStateRow>, "expiresAt">;
+
 export type NewConnector = Pick<
   Connector,
   | "name"
@@ -506,6 +515,15 @@ export function openConnectors(
   );
   const updateAllowWrites = db.prepare(
     "UPDATE bot_connectors SET allow_writes = ? WHERE bot_id = ? AND connector_id = ?",
+  );
+  const insertState = db.prepare(
+    `INSERT INTO oauth_states (state, connector_id, url, code_verifier, redirect_url, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const pruneStates = db.prepare("DELETE FROM oauth_states WHERE expires_at <= ?");
+  const takeState = db.prepare(
+    `DELETE FROM oauth_states WHERE state = ? RETURNING connector_id AS connectorId, url,
+       code_verifier AS codeVerifier, redirect_url AS redirectUrl, expires_at AS expiresAt`,
   );
   const selectSecretNames = db.prepare(
     "SELECT name FROM vault_entries WHERE name LIKE 'connector:%' OR name LIKE 'api_key:%'",
@@ -724,6 +742,27 @@ export function openConnectors(
           const grant = connector.grants.find((entry) => entry.botId === botId);
           return grant ? [{ connector, grant }] : [];
         }),
+
+    saveOauthState: (state: OauthState & { state: string; ttlMs: number }) =>
+      transaction(() => {
+        const now = Date.now();
+        pruneStates.run(new Date(now).toISOString());
+        insertState.run(
+          state.state,
+          state.connectorId,
+          state.url,
+          state.codeVerifier,
+          state.redirectUrl,
+          new Date(now + state.ttlMs).toISOString(),
+        );
+      }),
+
+    // Used up before anything else happens, so a replayed or late `state` finds nothing.
+    takeOauthState: (state: string) =>
+      transaction(() => {
+        const row = OauthStateRow.optional().parse(takeState.get(state));
+        return row && Date.parse(row.expiresAt) > Date.now() ? row : undefined;
+      }),
 
     // Every vault row a connector result must never echo, and a call must never carry.
     secretNames: () =>

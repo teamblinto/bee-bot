@@ -27,6 +27,7 @@ import {
   type UsageRefreshResult,
 } from "@beebot/contracts";
 import { type WebSocket, WebSocketServer } from "ws";
+import { z } from "zod";
 
 import serverPackage from "../package.json" with { type: "json" };
 import { createApprovals, type Execute } from "./approvals.ts";
@@ -81,6 +82,7 @@ import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerConnectors, answerMcp, toolsFor, sendJson } from "./mcp.ts";
 import { createConnectorHub } from "./connectorHub.ts";
+import { oauthCallbackPath } from "./connectorOauth.ts";
 import {
   envProblem,
   headersProblem,
@@ -109,6 +111,24 @@ import {
   type UsageProbe,
 } from "./usage.ts";
 import { type AwakeClock, awakeTimeout, createAwakeClock } from "./watchdog.ts";
+
+const ConnectorPayload = z.object({ input: z.record(z.string(), z.unknown()) });
+
+// The page the owner's browser lands on after signing in. Nothing in it comes from the URL.
+function sendPage(response: NodeHttp.ServerResponse, status: number, text: string) {
+  const escaped = text.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+  response.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+  });
+  response.end(
+    `<!doctype html><meta charset="utf-8"><title>Bee Bot</title>` +
+      `<body style="font:16px system-ui;margin:4rem auto;max-width:32rem;padding:0 1rem">` +
+      `<p>${escaped}</p></body>`,
+  );
+}
 
 // A pasted SKILL.md may be 256 KB before JSON escapes it.
 const maxBodyBytes = 1024 * 1024;
@@ -457,6 +477,12 @@ export async function startServer({
     ]),
     continuationTtlMs,
     describe: cua?.describe,
+    connectors: {
+      granted: (botId, tool) => connectorHub.granted(botId, tool),
+      allowAlways: (botId, tool) => connectorHub.allowAlways(botId, tool),
+      execute: ({ botId, tool, payload }) =>
+        connectorHub.runApproved(botId, tool, ConnectorPayload.parse(JSON.parse(payload)).input),
+    },
     hasSurface: () => subscribers.size > 0,
     onSettled: () => supervisor.pump(),
     onChange: () => {
@@ -469,7 +495,11 @@ export async function startServer({
     policy: store.policy,
     vault,
     decide,
+    requestApproval: (run, tool, args, shown) => approvals.requestApproval(run, tool, args, shown),
+    notify: (run, text) => store.postRunNotice(run.id, text),
   });
+  const oauthRedirect = () =>
+    `http://127.0.0.1:${(server.address() as AddressInfo).port}${oauthCallbackPath}`;
   const supervisor = createSupervisor({
     store,
     runTurn,
@@ -699,10 +729,26 @@ export async function startServer({
   }
 
   async function setConnectorSecret(command: Extract<Command, { type: "set-connector-secret" }>) {
-    const { connectorId, bearer, headers, env } = command;
+    const { connectorId, bearer, headers, env, clientId, clientSecret } = command;
     const connector = store.connectors.getConnector(connectorId);
     if (!connector) {
       return { status: 404, body: { code: "not_found" } };
+    }
+    if (clientId !== undefined || clientSecret !== undefined) {
+      if (!clientId || bearer || headers || env || connector.transport !== "http") {
+        return { status: 400, body: { code: "bad_request" } };
+      }
+      try {
+        await connectorHub.oauth.saveClient(connector, clientId, clientSecret);
+      } catch (error) {
+        if (error instanceof VaultError) {
+          return { status: 409, body: { code: `vault_${error.problem}` } };
+        }
+        throw error;
+      }
+      connectorHub.forget(connectorId);
+      store.connectors.setConnectorStatus(connectorId, "needs_sign_in", null);
+      return { status: 200, body: store.connectors.setAuth(connectorId, "oauth", [], []) };
     }
     const remote = connector.transport === "http";
     if ((remote && (env || (bearer && headers))) || (!remote && (bearer || headers))) {
@@ -761,12 +807,61 @@ export async function startServer({
     return { status: 200, body: updated };
   }
 
+  // Opens no browser: the web app does, with the URL this answers.
+  async function startConnectorOauth(connectorId: string) {
+    const connector = store.connectors.getConnector(connectorId);
+    if (!connector) {
+      return { status: 404, body: { code: "not_found" } };
+    }
+    if (connector.transport !== "http") {
+      return { status: 400, body: { code: "bad_request" } };
+    }
+    try {
+      const authorizationUrl = await connectorHub.oauth.start(connector, oauthRedirect());
+      if (authorizationUrl === undefined) {
+        store.connectors.setConnectorStatus(connectorId, "needs_client", null);
+        return { status: 200, body: { needsClient: true } };
+      }
+      return { status: 200, body: { authorizationUrl } };
+    } catch (error) {
+      if (error instanceof VaultError) {
+        return { status: 409, body: { code: `vault_${error.problem}` } };
+      }
+      console.error(`beebotd: connector sign-in failed to start: ${(error as Error)?.name}`);
+      return { status: 502, body: { code: "connector_sign_in_failed" } };
+    }
+  }
+
+  async function finishConnectorOauth(url: URL, response: NodeHttp.ServerResponse) {
+    const state = url.searchParams.get("state");
+    const code = url.searchParams.get("code");
+    if (!state || !code) {
+      sendPage(response, 400, "The sign-in didn't finish. Go back to Bee Bot and try again.");
+      return;
+    }
+    let connector;
+    try {
+      connector = await connectorHub.oauth.finish(state, code);
+    } catch (error) {
+      console.error(`beebotd: connector sign-in failed: ${(error as Error)?.name}`);
+    }
+    if (!connector) {
+      sendPage(response, 400, "This sign-in link has expired. Go back to Bee Bot and try again.");
+      return;
+    }
+    store.connectors.setAuth(connector.id, "oauth", [], []);
+    connectorHub.forget(connector.id);
+    void connectorHub.refresh(connector.id);
+    sendPage(response, 200, `Signed in to ${connector.name}. You can close this tab.`);
+  }
+
   async function disconnectConnector(connectorId: string) {
     const connector = store.connectors.getConnector(connectorId);
     if (!connector) {
       return { status: 404, body: { code: "not_found" } };
     }
     connectorHub.forget(connectorId);
+    await connectorHub.oauth.revoke(connector).catch(() => {});
     await vault.delete(secretName(connectorId));
     await vault.delete(oauthName(connectorId));
     store.connectors.setAuth(connectorId, connector.auth, [], []);
@@ -1063,6 +1158,8 @@ export async function startServer({
       }
       case "set-connector-secret":
         return setConnectorSecret(command);
+      case "start-connector-oauth":
+        return startConnectorOauth(command.connectorId);
       case "refresh-connector": {
         const { connectorId } = command;
         if (!store.connectors.getConnector(connectorId)) {
@@ -1484,6 +1581,11 @@ export async function startServer({
     }
     if (url.pathname === preToolUsePath) {
       handleHook(request, response).catch(() => response.destroy());
+      return;
+    }
+    // The owner's browser, back from signing in: the one-time `state` stands in for the token.
+    if (request.method === "GET" && url.pathname === oauthCallbackPath) {
+      finishConnectorOauth(url, response).catch(() => response.destroy());
       return;
     }
 

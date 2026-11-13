@@ -775,6 +775,19 @@ export const migrations: Array<{
       PRIMARY KEY (bot_id, connector_id)
     );`,
   },
+  {
+    name: "oauth_states",
+    // A sign-in the owner started in their browser. A row is deleted as the callback uses it, so a
+    // `state` works once. `url` is what the sign-in is for: a connector that moved since is refused.
+    sql: `CREATE TABLE oauth_states (
+      state TEXT PRIMARY KEY,
+      connector_id TEXT NOT NULL REFERENCES connectors (id) ON DELETE CASCADE,
+      url TEXT NOT NULL,
+      code_verifier TEXT NOT NULL,
+      redirect_url TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -2350,6 +2363,28 @@ export function openEventStore(dataDir: string) {
         if (getBot(botId)?.pauseReason === "browser_session") {
           setPause(botId, null);
         }
+      }),
+    // A line from Bee in the room of the run, under the bot's name.
+    postRunNotice: (runId: string, body: string) =>
+      transaction(() => {
+        const run = getRun(runId);
+        if (!run) {
+          return;
+        }
+        addMessage({
+          id: `notice:${NodeCrypto.randomUUID()}`,
+          roomId: getScope(run.scopeId).roomId,
+          author: "bot",
+          body,
+          tools: [],
+          workedMs: null,
+          botId: run.botId,
+          replyToId: null,
+          chainId: null,
+          hop: 0,
+          attachments: [],
+          createdAt: new Date().toISOString(),
+        });
       }),
     vaultStore: openVaultStore(db, tx),
     appendAudit,

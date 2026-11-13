@@ -357,7 +357,8 @@ describe("the connectors server", () => {
     expect(adaSaw.launch.connectors).toEqual(["Fake"]);
     expect(adaSaw.search).toContain("search ok");
     expect(adaSaw.search).toContain("[redacted]");
-    expect(adaSaw.create).toContain("approval_required");
+    // Nobody is watching, so nobody could approve it.
+    expect(adaSaw.create).toContain("nobody can approve this");
 
     const benSaw = await turn(ben.id, ben.roomId);
     expect(benSaw.listed).toEqual([]);

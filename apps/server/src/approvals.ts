@@ -9,6 +9,7 @@ import {
   type Bot,
   type BotAccess,
   type Command,
+  connectorToolPrefix,
   type ContinuationKind,
   type PendingApproval,
 } from "@beebot/contracts";
@@ -286,6 +287,14 @@ type HeldCall = Omit<PendingApproval, "expiresAt"> & {
   updatedInput: Record<string, unknown>;
 };
 
+// The connectors server's tools, as an engine names them: `mcp__connectors__<slug>_<tool>`.
+type ConnectorApprovals = {
+  granted: (botId: string, tool: string) => boolean;
+  execute: Execute;
+  // "Always allow": false when the tool is no longer granted.
+  allowAlways: (botId: string, tool: string) => boolean;
+};
+
 type Options = {
   store: EventStore;
   dataDir: string;
@@ -301,6 +310,7 @@ type Options = {
   onSettled?: (() => void) | undefined;
   // Plain words for an action on the screen, in place of its JSON.
   describe?: ((tool: string, input: Record<string, unknown>) => string | undefined) | undefined;
+  connectors?: ConnectorApprovals | undefined;
 };
 
 export function createApprovals({
@@ -315,6 +325,7 @@ export function createApprovals({
   continuationTtlMs = defaultContinuationTtlMs,
   onSettled = () => {},
   describe = () => undefined,
+  connectors,
 }: Options) {
   const runs = new Map<string, Run>();
   const held = new Map<string, HeldCall>();
@@ -334,8 +345,12 @@ export function createApprovals({
     );
 
   // The test engine fakes only what Bee has no executor for, so its browser and computer calls act.
+  const isConnectorTool = (tool: string) =>
+    connectors !== undefined && tool.startsWith(connectorToolPrefix);
   const executorFor = (bot: Bot, tool: string) =>
-    executors.get(tool) ?? (bot.engineAccountId === "fake" ? testExecute : undefined);
+    executors.get(tool) ??
+    (isConnectorTool(tool) ? connectors?.execute : undefined) ??
+    (bot.engineAccountId === "fake" ? testExecute : undefined);
 
   // Resolved again just before it runs, so a target that moved after the owner saw it is refused.
   function resolveCall(botId: string, tool: ApprovalTool, input: Record<string, unknown>) {
@@ -357,18 +372,26 @@ export function createApprovals({
   // A browser or computer action is shown as exactly what the bot sent, or in words that name it
   // exactly. Those words come from what the screen showed then, so only the payload is sealed:
   // run later, after a restart even, it is checked against that alone.
-  function resolveAny(botId: string, tool: string, input: Record<string, unknown>) {
+  // A connector write is shown as the hub worded it then, sealed the same way.
+  function resolveAny(botId: string, tool: string, input: Record<string, unknown>, shown?: string) {
     const native = ApprovalTool.safeParse(tool);
     if (native.success) {
       return resolveCall(botId, native.data, input);
     }
-    if (!browserToolNames.has(tool) && !computerToolNames.has(tool) && !cuaToolNames.has(tool)) {
+    const connector = isConnectorTool(tool);
+    if (connector && !connectors?.granted(botId, tool)) {
+      return undefined;
+    }
+    const screen =
+      browserToolNames.has(tool) || computerToolNames.has(tool) || cuaToolNames.has(tool);
+    if (!connector && !screen) {
       return undefined;
     }
     const payload = JSON.stringify(stable({ tool, input }));
     return {
       payload,
-      shown: describe(tool, input) ?? `${tool}: ${JSON.stringify(stable(input))}`,
+      shown:
+        (connector ? shown : describe(tool, input)) ?? `${tool}: ${JSON.stringify(stable(input))}`,
       digest: sha256(payload).digest("hex"),
     };
   }
@@ -380,8 +403,9 @@ export function createApprovals({
     tool: string,
     input: Record<string, unknown>,
     toolUseId: string,
+    shown?: string,
   ) {
-    const resolved = resolveAny(run.botId, tool, input);
+    const resolved = resolveAny(run.botId, tool, input, shown);
     if (!resolved) {
       return "Refused: this can't be shown in full, so it can't be approved.";
     }
@@ -589,12 +613,13 @@ export function createApprovals({
       run: Pick<Run, "id" | "botId">,
       tool: string,
       input: Record<string, unknown>,
+      shown?: string,
     ) => {
       const bot = store.getBot(run.botId);
       const executable = bot !== undefined && executorFor(bot, tool) !== undefined;
       const verdict = boxVerdict({ kind: "approve" }, { surface: hasSurface(), executable });
       if (verdict.answer === "wait") {
-        return openWaiting(run, verdict.kind, tool, input, "");
+        return openWaiting(run, verdict.kind, tool, input, "", shown);
       }
       return verdict.answer === "deny" ? verdict.message : refusedText({ kind: "approve" });
     },
@@ -625,7 +650,28 @@ export function createApprovals({
       digest,
       decision,
     }: Extract<Command, { type: "decide-continuation" }>) => {
-      const result = continuations.decideContinuation(continuationId, digest, decision);
+      // Checked before the grant changes, so a stale or closed card changes nothing.
+      if (decision === "always") {
+        const row = continuations.getContinuation(continuationId);
+        if (!row) {
+          return { status: 404, body: { code: "not_found" } };
+        }
+        if (row.kind !== "approval" || !isConnectorTool(row.tool)) {
+          return { status: 403, body: { code: "always_not_allowed" } };
+        }
+        if (row.digest !== digest || row.status !== "waiting") {
+          const code = row.digest !== digest ? "digest_mismatch" : "continuation_closed";
+          return { status: 409, body: { code } };
+        }
+        if (!connectors?.allowAlways(row.botId, row.tool)) {
+          return { status: 403, body: { code: "always_not_allowed" } };
+        }
+      }
+      const result = continuations.decideContinuation(
+        continuationId,
+        digest,
+        decision === "always" ? "approve" : decision,
+      );
       if (result === "not_found") {
         return { status: 404, body: { code: "not_found" } };
       }

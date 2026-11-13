@@ -729,6 +729,7 @@ const errorSentences: Record<string, string> = {
   connector_slug_taken: "A connector with that name is already added.",
   connector_changed: "Its tools changed while you were reviewing. Review the new list.",
   connector_private: "That connector belongs to another bot.",
+  connector_sign_in_failed: "Couldn't start the sign-in. Check the URL, or try again later.",
 };
 
 function errorSentence(body: unknown) {

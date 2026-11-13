@@ -1,4 +1,10 @@
-import type { Approval, ApprovalChange, Continuation, PendingApproval } from "@beebot/contracts";
+import {
+  type Approval,
+  type ApprovalChange,
+  connectorToolPrefix,
+  type Continuation,
+  type PendingApproval,
+} from "@beebot/contracts";
 import { useEffect, useRef, useState } from "react";
 
 import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
@@ -173,7 +179,7 @@ export function ContinuationCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  async function decide(decision: "approve" | "deny") {
+  async function decide(decision: "approve" | "deny" | "always") {
     if (deciding.current) {
       return;
     }
@@ -199,15 +205,19 @@ export function ContinuationCard({
   }
 
   const handOff = continuation.kind === "hand_off";
+  // A connector write comes as "<app>: <tool>", then its arguments.
+  const connector = !handOff && continuation.tool.startsWith(connectorToolPrefix);
   // An action on this PC comes in words, with the exact element or window under them. Anything
   // else is the tool's name and its input.
   const [said = "", ...exact] = continuation.shown.split("\n");
-  const worded = !handOff && !continuation.shown.startsWith(`${continuation.tool}: `);
+  const worded = !handOff && !connector && !continuation.shown.startsWith(`${continuation.tool}: `);
   const title = handOff
     ? `${name} needs you to do this`
-    : worded
-      ? visibleDetail(said)
-      : `${name} wants to run ${continuation.tool}`;
+    : connector
+      ? `${name} wants to use ${visibleDetail(said)}`
+      : worded
+        ? visibleDetail(said)
+        : `${name} wants to run ${continuation.tool}`;
   const disabled = busy || !connected;
   return (
     <article
@@ -235,7 +245,7 @@ export function ContinuationCard({
           className="max-h-[40dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
           onWheel={(event) => event.stopPropagation()}
         >
-          {visibleDetail(continuation.shown)}
+          {visibleDetail(connector ? exact.join("\n") : continuation.shown)}
         </pre>
       )}
       <p className="text-small text-ink-secondary">
@@ -261,6 +271,16 @@ export function ContinuationCard({
         >
           {handOff ? "I did it" : "Approve"}
         </button>
+        {connector && (
+          <button
+            type="button"
+            className="button button-outline"
+            disabled={disabled}
+            onClick={() => void decide("always")}
+          >
+            Always allow
+          </button>
+        )}
       </div>
     </article>
   );
