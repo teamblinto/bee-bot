@@ -64,10 +64,6 @@
   --ease-bee: cubic-bezier(0.32, 0.72, 0, 1);
   --default-transition-duration: 150ms;
   --default-transition-timing-function: var(--ease-bee);
-
-  /* Lightness and chroma; `--hue` supplies the rest. Checked at every hue: at least 6.3:1. */
-  --avatar-background: 0.9 0.05;
-  --avatar-ink: 0.4 0.1;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -94,8 +90,6 @@
     --color-danger-surface: color-mix(in srgb, var(--color-danger) 14%, transparent);
     --shadow-composer: none;
     --shadow-menu: 0 14px 32px -18px rgb(0 0 0 / 0.75);
-    --avatar-background: 0.33 0.06;
-    --avatar-ink: 0.88 0.07;
   }
 }
 
@@ -146,22 +140,6 @@
 }
 
 @layer components {
-  .avatar {
-    color: oklch(var(--avatar-ink) var(--hue));
-  }
-
-  .avatar-body {
-    fill: oklch(var(--avatar-background) var(--hue));
-  }
-
-  .avatar-accent {
-    fill: oklch(var(--avatar-ink) calc(var(--hue) + 150));
-  }
-
-  .avatar-accent-line {
-    stroke: oklch(var(--avatar-ink) calc(var(--hue) + 150));
-  }
-
   .avatar-pop {
     animation: avatar-pop 180ms var(--ease-bee);
   }

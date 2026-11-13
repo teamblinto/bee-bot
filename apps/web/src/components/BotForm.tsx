@@ -23,7 +23,7 @@ import {
   stopShortcut,
   subscribeToConnection,
 } from "../serverConnection";
-import { Avatar } from "./Avatar";
+import { Avatar, shuffledSeed } from "./Avatar";
 import { controlOptions, controlOrder } from "./controlOptions";
 import { ModelPicker } from "./ModelPicker";
 import { AutomatedAccessNotice } from "./VaultPanel";
@@ -226,12 +226,12 @@ export function BotForm({
     <form className="flex flex-col gap-3" onSubmit={(event) => void submit(event)}>
       <div className="flex items-center gap-3">
         {/* Keyed so each new face replays the pop. */}
-        <Avatar key={avatarSeed} seed={avatarSeed} className="avatar-pop size-20" />
+        <Avatar key={avatarSeed} seed={avatarSeed} className="avatar-pop size-16" />
         <button
           type="button"
           aria-label="Shuffle avatar"
           className="button button-outline"
-          onClick={() => setAvatarSeed(randomSeed())}
+          onClick={() => setAvatarSeed(shuffledSeed(avatarSeed))}
         >
           <Dices {...iconProps} />
           Shuffle

@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
-import { Avatar, avatarPartCounts, avatarParts } from "./Avatar";
+import { Avatar, avatarIndex, avatars, shuffledSeed } from "./Avatar";
 
 const { postCommand, chat } = vi.hoisted(() => ({
   postCommand: vi.fn(),
@@ -21,36 +21,27 @@ const { BotForm } = await import("./BotForm");
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const edges = [0, 1, 2, 12345, 2 ** 31, maxAvatarSeed - 1, maxAvatarSeed];
+const edges = [0, 1, 2, 11, 12, 12345, 2 ** 31, maxAvatarSeed - 1, maxAvatarSeed];
 
-it("gives the same seed the same parts and hue", () => {
+it("gives every seed in range one of the designed avatars, and reaches them all", () => {
+  const seen = new Set<string>();
+  for (const seed of [...edges, ...Array.from({ length: 1_000 }, (_, i) => (i * 214_013) >>> 0)]) {
+    const src = avatars[avatarIndex(seed)];
+    expect(src).toBeDefined();
+    seen.add(src ?? "");
+  }
+  expect(seen.size).toBe(avatars.length);
+  expect(renderToStaticMarkup(<Avatar seed={7} />)).toContain('alt=""');
+});
+
+it("always shuffles to a different avatar, within the seed range", () => {
   for (const seed of edges) {
-    expect(avatarParts(seed)).toEqual(avatarParts(seed));
-  }
-  expect(renderToStaticMarkup(<Avatar seed={7} />)).toBe(renderToStaticMarkup(<Avatar seed={7} />));
-});
-
-it("keeps every seed in range valid, and reaches every part", () => {
-  const seen = { body: new Set(), eyes: new Set(), mouth: new Set(), accessory: new Set() };
-  const seeds = [...edges, ...Array.from({ length: 20_000 }, (_, i) => (i * 214_013) >>> 0)];
-  for (const seed of seeds) {
-    const parts = avatarParts(seed);
-    for (const key of ["body", "eyes", "mouth", "accessory"] as const) {
-      expect(parts[key]).toBeLessThan(avatarPartCounts[key]);
-      expect(parts[key]).toBeGreaterThanOrEqual(0);
-      seen[key].add(parts[key]);
+    for (let i = 0; i < 50; i++) {
+      const next = shuffledSeed(seed);
+      expect(avatarIndex(next)).not.toBe(avatarIndex(seed));
+      expect(next).toBeLessThanOrEqual(maxAvatarSeed);
     }
-    expect(parts.hue).toBeGreaterThanOrEqual(0);
-    expect(parts.hue).toBeLessThan(360);
   }
-  for (const key of ["body", "eyes", "mouth", "accessory"] as const) {
-    expect(seen[key].size).toBe(avatarPartCounts[key]);
-  }
-});
-
-it("has the promised parts and stays decorative", () => {
-  expect(avatarPartCounts).toEqual({ body: 8, eyes: 8, mouth: 6, accessory: 8 });
-  expect(renderToStaticMarkup(<Avatar seed={1} />)).toContain('aria-hidden="true"');
 });
 
 let root: Root;
@@ -92,7 +83,7 @@ const bot = {
   archivedAt: null,
 } as const;
 
-const preview = () => host.querySelector("svg.size-20")?.outerHTML;
+const preview = () => host.querySelector("img.size-16")?.getAttribute("src");
 
 it("shuffles the preview, and saves nothing until the form is saved", () => {
   act(() =>
