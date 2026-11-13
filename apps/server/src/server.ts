@@ -82,12 +82,14 @@ import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
 import { answerConnectors, answerMcp, toolsFor, sendJson } from "./mcp.ts";
 import { createConnectorHub } from "./connectorHub.ts";
+import { connectorBoxId } from "./connectorBox.ts";
 import { oauthCallbackPath } from "./connectorOauth.ts";
 import {
   envProblem,
   headersProblem,
   oauthName,
   parseMcpServers,
+  parseSecret,
   type Secret,
   secretName,
   urlProblem,
@@ -494,6 +496,7 @@ export async function startServer({
     connectors: store.connectors,
     policy: store.policy,
     vault,
+    box: box && { runtime: box.runtime, env: box.layout.env },
     decide,
     requestApproval: (run, tool, args, shown) => approvals.requestApproval(run, tool, args, shown),
     notify: (run, text) => store.postRunNotice(run.id, text),
@@ -704,8 +707,8 @@ export async function startServer({
         ownerBotId: command.ownerBotId ?? null,
         headerKeys: Object.keys(entry.headers),
         envKeys: Object.keys(entry.env),
-        status: local ? "error" : "unreachable",
-        lastError: local ? "Local servers aren't supported yet." : null,
+        status: "unreachable",
+        lastError: null,
       });
       if (typeof connector === "string") {
         refused.push({ key: entry.key, code: connector });
@@ -720,9 +723,7 @@ export async function startServer({
         refused.push({ key: entry.key, code: failed.body.code });
         continue;
       }
-      if (!local) {
-        void connectorHub.refresh(connector.id);
-      }
+      void connectorHub.refresh(connector.id);
       added.push(store.connectors.connectorChanged(connector.id) ?? connector);
     }
     return { status: 200, body: { added, refused } };
@@ -758,7 +759,10 @@ export async function startServer({
     if (problem) {
       return { status: 400, body: { code: problem } };
     }
-    const refused = await saveSecret(connectorId, { bearer, headers, env });
+    // A local server's values are set one name at a time, so the others stay.
+    const saved = remote ? {} : (parseSecret(await vault.get(secretName(connectorId))).env ?? {});
+    const merged = remote ? undefined : { ...saved, ...env };
+    const refused = await saveSecret(connectorId, { bearer, headers, env: merged });
     if (refused) {
       return refused;
     }
@@ -767,12 +771,10 @@ export async function startServer({
       connectorId,
       connector.auth === "oauth" ? "oauth" : staticAuth,
       Object.keys(headers ?? {}),
-      Object.keys(env ?? {}),
+      Object.keys(merged ?? {}),
     );
     connectorHub.forget(connectorId);
-    if (remote) {
-      void connectorHub.refresh(connectorId);
-    }
+    void connectorHub.refresh(connectorId);
     return { status: 200, body: updated };
   }
 
@@ -781,6 +783,10 @@ export async function startServer({
     const current = store.connectors.getConnector(connectorId);
     if (!current) {
       return { status: 404, body: { code: "not_found" } };
+    }
+    const egressHosts = command.egressHosts && ownerEgressHosts(command.egressHosts);
+    if (egressHosts === null) {
+      return { status: 400, body: { code: "bad_egress_host" } };
     }
     const moved = url !== undefined && url !== current.url;
     const problem = moved
@@ -799,7 +805,16 @@ export async function startServer({
       ...(name !== undefined && { name }),
       ...(url !== undefined && { url }),
       ...(readsPrivate !== undefined && { readsPrivate }),
+      ...(egressHosts && { egressHosts }),
     });
+    // Live for a running box, like a bot's hosts.
+    if (egressHosts) {
+      await boxes?.applyEgress(connectorBoxId(connectorId)).catch((error: unknown) => {
+        console.error(
+          `beebotd: egress for ${connectorId} not applied: ${(error as Error)?.message}`,
+        );
+      });
+    }
     if (moved) {
       connectorHub.forget(connectorId);
       void connectorHub.refresh(connectorId);
@@ -880,6 +895,13 @@ export async function startServer({
     connectorHub.forget(connectorId);
     await vault.delete(secretName(connectorId));
     await vault.delete(oauthName(connectorId));
+    if (boxesReady()) {
+      await connectorHub.destroyBox(connectorId).catch((error: unknown) => {
+        console.error(
+          `beebotd: box of deleted connector ${connectorId} stayed: ${(error as Error)?.message}`,
+        );
+      });
+    }
     return { status: 200, body: { ok: true } };
   }
 

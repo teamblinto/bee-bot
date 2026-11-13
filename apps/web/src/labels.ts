@@ -322,12 +322,14 @@ export function connectorStatusLine(connector: Connector) {
   if (status) {
     return connector.lastError ? `${status} ${connector.lastError}` : status;
   }
-  if (connector.reviewedHash === null) {
-    return `${connector.tools.length} tools, not reviewed yet.`;
-  }
-  return connectorUsable(connector)
-    ? `${connector.tools.length} tools, reviewed.`
-    : "Its tools changed since your review, so bots don't get them until you review again.";
+  const tools =
+    connector.reviewedHash === null
+      ? `${connector.tools.length} tools, not reviewed yet.`
+      : connectorUsable(connector)
+        ? `${connector.tools.length} tools, reviewed.`
+        : "Its tools changed since your review, so bots don't get them until you review again.";
+  // A local server that stopped on its own starts again on the next call.
+  return connector.lastError ? `${tools} It last stopped: ${connector.lastError}` : tools;
 }
 
 export function toolRowLabel(

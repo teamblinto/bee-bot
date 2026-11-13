@@ -456,7 +456,13 @@ export function BotForm({
   );
 }
 
-function HostList({ hosts, onChange }: { hosts: string[]; onChange: (hosts: string[]) => void }) {
+export function HostList({
+  hosts,
+  onChange,
+}: {
+  hosts: string[];
+  onChange: (hosts: string[]) => void;
+}) {
   const [draft, setDraft] = useState("");
   const add = () => {
     const host = draft.trim().toLowerCase();

@@ -788,6 +788,11 @@ export const migrations: Array<{
       expires_at TEXT NOT NULL
     );`,
   },
+  {
+    name: "connector_egress_hosts",
+    // A local server's box reaches only these, normalized by ownerEgressHosts.
+    sql: "ALTER TABLE connectors ADD COLUMN egress_hosts TEXT NOT NULL DEFAULT '[]'",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });

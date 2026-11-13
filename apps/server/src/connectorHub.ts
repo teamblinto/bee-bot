@@ -15,6 +15,8 @@ import { McpError, ToolListChangedNotificationSchema } from "@modelcontextprotoc
 import { z } from "zod";
 
 import { type Decide, decide as policyDecide } from "./broker.ts";
+import type { BoxRuntime } from "./boxRuntime.ts";
+import { boxedArgv, BoxStdioTransport, connectorBoxId } from "./connectorBox.ts";
 import { createConnectorOauth, oauthSecretValues } from "./connectorOauth.ts";
 import {
   capMiddle,
@@ -48,6 +50,7 @@ const staleMs = 24 * 60 * 60_000;
 const staleWaitMs = 5000;
 const maxPages = 50;
 const maxErrorChars = 200;
+const maxStderrChars = 400;
 const maxShownChars = 4000;
 const firstBackoffMs = 30_000;
 const maxBackoffMs = 5 * 60_000;
@@ -108,12 +111,24 @@ function failureOf(error: unknown): { status: ConnectorStatus; message: string }
   return { status: "unreachable", message: text.slice(0, maxErrorChars) || "No answer." };
 }
 
-type Live = { client: Client; inflight: number; idle: NodeJS.Timeout | undefined };
+type Live = {
+  client: Client;
+  inflight: number;
+  idle: NodeJS.Timeout | undefined;
+  // A local server's stderr so far, which it prints only once it has exited.
+  stderr?: (() => string) | undefined;
+};
+
+// Where local servers run. `env` is the box's fixed HOME, PATH and proxy variables.
+export type ConnectorBoxes = { runtime: BoxRuntime; env: Record<string, string> };
+const noBoxes =
+  "Local servers run in a box of their own, and boxes aren't set up. Set them up in Settings.";
 
 type Options = {
   connectors: ConnectorStore;
   policy: Policy;
   vault: Vault;
+  box?: ConnectorBoxes | undefined;
   decide?: Decide | undefined;
   lookup?: Lookup | undefined;
   idleMs?: number | undefined;
@@ -130,6 +145,7 @@ export function createConnectorHub({
   connectors,
   policy,
   vault,
+  box,
   decide = policyDecide,
   lookup,
   idleMs = defaultIdleMs,
@@ -161,9 +177,49 @@ export function createConnectorHub({
     return values;
   }
 
-  async function connect(connector: Connector) {
-    if (connector.transport !== "http" || !connector.url) {
-      throw new ConnectorError("error", "Local servers aren't supported yet.");
+  // The stderr tail, redacted, for the owner.
+  async function stderrText(stderr: string) {
+    return redact(stderr.trim(), await allSecrets()).slice(-maxStderrChars);
+  }
+
+  // Never on this computer: only in the connector's own box, with only the env it was given.
+  async function connectBoxed(connector: Connector, command: string) {
+    if (!box) {
+      throw new ConnectorError("error", noBoxes);
+    }
+    const { env = {} } = parseSecret(await vault.get(secretName(connector.id)));
+    const transport = new BoxStdioTransport(() =>
+      box.runtime.execAttach(connectorBoxId(connector.id), {
+        argv: boxedArgv(command, connector.args),
+        env: { ...env, ...box.env },
+      }),
+    );
+    const client = new Client({ name: "bee-bot", version: "1" });
+    try {
+      await client.connect(transport, { timeout: connectMs });
+    } catch (error) {
+      await client.close();
+      const stderr = await stderrText(transport.stderr);
+      throw new ConnectorError("error", stderr || failureOf(error).message);
+    }
+    // It ended on its own: the next call starts it again, and the owner sees why it stopped.
+    transport.onexit = (stderr) => {
+      void stderrText(stderr || "The server stopped.").then((text) => {
+        const current = connectors.getConnector(connector.id);
+        if (current) {
+          connectors.setConnectorStatus(connector.id, current.status, text);
+        }
+      });
+    };
+    return { client, stderr: () => transport.stderr };
+  }
+
+  async function connect(connector: Connector): Promise<{ client: Client; stderr?: () => string }> {
+    if (connector.transport === "stdio" && connector.command) {
+      return connectBoxed(connector, connector.command);
+    }
+    if (!connector.url) {
+      throw new ConnectorError("error", "It has no address.");
     }
     const url = new URL(connector.url);
     await checkUrl(url, lookup);
@@ -189,10 +245,7 @@ export function createConnectorHub({
       }
       await client.connect(new SSEClientTransport(url, options), { timeout: connectMs });
     }
-    client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
-      void refresh(connector.id);
-    });
-    return client;
+    return { client };
   }
 
   function drop(id: string) {
@@ -215,13 +268,16 @@ export function createConnectorHub({
     }
     let entry = live.get(connector.id);
     if (!entry) {
-      entry = connect(connector).then((client): Live => {
+      entry = connect(connector).then(({ client, stderr }): Live => {
+        client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+          void refresh(connector.id);
+        });
         client.onclose = () => {
           if (live.get(connector.id) === entry) {
             live.delete(connector.id);
           }
         };
-        return { client, inflight: 0, idle: undefined };
+        return { client, inflight: 0, idle: undefined, stderr };
       });
       live.set(connector.id, entry);
       entry.catch(() => live.get(connector.id) === entry && live.delete(connector.id));
@@ -235,7 +291,13 @@ export function createConnectorHub({
   function release(id: string, held: Live) {
     held.inflight -= 1;
     if (held.inflight === 0) {
-      held.idle = setTimeout(() => drop(id), idleMs);
+      held.idle = setTimeout(() => {
+        drop(id);
+        // The process first, then its box.
+        if (held.stderr) {
+          box?.runtime.stop(connectorBoxId(id)).catch(() => {});
+        }
+      }, idleMs);
       held.idle.unref();
     }
   }
@@ -247,6 +309,11 @@ export function createConnectorHub({
       try {
         return await work(held.client);
       } catch (error) {
+        // A local server that failed says why on stderr, if it said anything.
+        if (held.stderr && !(error instanceof ConnectorError)) {
+          const stderr = await stderrText(held.stderr());
+          throw new ConnectorError("error", stderr || failureOf(error).message);
+        }
         if (attempt > 0 || httpCode(error) !== 404) {
           throw error;
         }
@@ -328,7 +395,6 @@ export function createConnectorHub({
       .connectorGrants(botId)
       .filter(
         ({ connector }) =>
-          connector.transport === "http" &&
           !waitsForOwner(connector) &&
           (connector.refreshedAt === null || at - Date.parse(connector.refreshedAt) > staleMs),
       );
@@ -496,6 +562,10 @@ export function createConnectorHub({
     },
     toolsFor,
     call,
+    // A deleted connector's box goes with it.
+    destroyBox: async (id: string) => {
+      await box?.runtime.destroy(connectorBoxId(id));
+    },
     granted: (botId: string, prefixed: string) => grantedTool(botId, prefixed) !== undefined,
     // "Always allow": this write stops asking for this bot.
     allowAlways: (botId: string, prefixed: string) => {

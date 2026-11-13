@@ -17,6 +17,7 @@ import { createBoxService, defaultBoxMachine, podmanMachine } from "./boxSetup.t
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
+import { connectorOfBox } from "./connectorBox.ts";
 import { spawnCuaDriver } from "./cuaScreen.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { spawnHostDriver } from "./hostScreen.ts";
@@ -129,7 +130,9 @@ async function boot(bootstrap: Bootstrap) {
           return input && { ...input, lane: boxLane(botId, input.lane) };
         },
         beebotdPort: () => port,
-        setBox: store.boxes.setBox,
+        // A connector's box is no bot's, so it has no row.
+        setBox: (botId, state, reason) =>
+          connectorOfBox(botId) === undefined && store.boxes.setBox(botId, state, reason),
       }),
   });
   const box = { runtime: boxes.runtime, layout: boxLayout(dataDir) };

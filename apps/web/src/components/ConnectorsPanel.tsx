@@ -9,6 +9,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { connectorStatusLine } from "../labels";
 import { postCommand } from "../serverConnection";
+import { HostList } from "./BotForm";
 
 // A short list of remote servers that need no setup but a sign-in or a token.
 const catalog = [
@@ -210,6 +211,76 @@ function SecretForm({
   );
 }
 
+function EnvField({
+  connector,
+  name,
+  send,
+  busy,
+}: {
+  connector: Connector;
+  name: string;
+  send: Send;
+  busy: boolean;
+}) {
+  const [value, setValue] = useState("");
+  function save(event: FormEvent) {
+    event.preventDefault();
+    void send({
+      type: "set-connector-secret",
+      connectorId: connector.id,
+      env: { [name]: value },
+    }).then((body) => body && setValue(""));
+  }
+  return (
+    <form className="flex items-center gap-1" onSubmit={save}>
+      <label className="w-40 shrink-0 truncate font-mono text-label text-ink-secondary">
+        {name}
+      </label>
+      <input
+        type="password"
+        aria-label={`${connector.name} ${name}`}
+        className="field min-w-0 flex-1 text-ink"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="Paste a new value to replace it"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      <button type="submit" className="button" disabled={busy || !value}>
+        Save
+      </button>
+    </form>
+  );
+}
+
+// A local server runs in its own box: its env values, and the only sites that box may reach.
+function LocalServerForm({
+  connector,
+  send,
+  busy,
+}: {
+  connector: Connector;
+  send: Send;
+  busy: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {connector.envKeys.map((name) => (
+        <EnvField key={name} connector={connector} name={name} send={send} busy={busy} />
+      ))}
+      <div className={labelClass}>
+        Sites it may reach
+        <HostList
+          hosts={connector.egressHosts}
+          onChange={(hosts) =>
+            void send({ type: "update-connector", connectorId: connector.id, egressHosts: hosts })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
 // The web app opens the sign-in page: beebotd never drives a browser.
 async function signIn(connector: Connector, send: Send) {
   const body = await send({ type: "start-connector-oauth", connectorId: connector.id });
@@ -344,6 +415,9 @@ function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot |
         </button>
       </div>
       <SecretForm connector={connector} send={send} busy={busy} />
+      {connector.transport === "stdio" && (
+        <LocalServerForm connector={connector} send={send} busy={busy} />
+      )}
       {connector.status === "needs_client" && (
         <ClientForm connector={connector} send={send} busy={busy} />
       )}

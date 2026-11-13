@@ -4,12 +4,22 @@ import * as NodeHttp from "node:http";
 import type { AddressInfo } from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { Duplex, finished, PassThrough } from "node:stream";
 
 import { Connector, protocolVersion } from "@beebot/contracts";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
+
+import { boxLayout } from "./boxEngine.ts";
+import { readyBoxRuntime } from "./boxHost.ts";
+import { type BoxExec, type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
+import { connectorBoxId } from "./connectorBox.ts";
+import { createConnectorHub } from "./connectorHub.ts";
+import { createEgressControl } from "./egress.ts";
 
 import {
   capMiddle,
@@ -27,6 +37,27 @@ import { connectorsUrl, type BotLaunch, type RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 import { openVault } from "./vaultStore.ts";
+
+// Every way to start a process from this machine, watched: a connector must never use one.
+const spawned = vi.hoisted(() => ({ calls: [] as string[] }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const watched = <T extends (...args: never[]) => unknown>(name: string, run: T) =>
+    ((...args: Parameters<T>) => {
+      spawned.calls.push(name);
+      return run(...args);
+    }) as T;
+  return {
+    ...actual,
+    spawn: watched("spawn", actual.spawn),
+    spawnSync: watched("spawnSync", actual.spawnSync),
+    exec: watched("exec", actual.exec),
+    execSync: watched("execSync", actual.execSync),
+    execFile: watched("execFile", actual.execFile),
+    execFileSync: watched("execFileSync", actual.execFileSync),
+    fork: watched("fork", actual.fork),
+  };
+});
 
 const listed = (name: string, extra: object = {}) => ({
   name,
@@ -257,7 +288,10 @@ async function rpc(url: string, token: string, method: string, params: object) {
 
 const textOf = (result: { content: Array<{ text: string }> }) => result.content[0]?.text ?? "";
 
-async function startBeebotd() {
+async function startBeebotd({
+  box,
+  names = ["fake_search", "fake_create"],
+}: { box?: BoxRuntime; names?: [string, string] } = {}) {
   store = openEventStore(dataDir);
   cleanups.push(() => store.close());
   const seen = new Map<string, Seen>();
@@ -270,8 +304,8 @@ async function startBeebotd() {
       textOf(await rpc(url, token, "tools/call", { name, arguments: searchArgs }));
     seen.set(launch.name, {
       listed: list.tools.map(({ name }: { name: string }) => name).sort(),
-      search: await call("fake_search"),
-      create: await call("fake_create"),
+      search: await call(names[0]),
+      create: await call(names[1]),
       launch,
     });
     return { kind: "completed", text: "done" };
@@ -287,6 +321,7 @@ async function startBeebotd() {
       key: randomBytes(32).toString("base64"),
     }),
     runTurn,
+    ...(box && { box: { runtime: box, layout: boxLayout(dataDir) } }),
     probeEngine: async () => ({
       cliFound: true,
       version: "2.1.318",
@@ -431,5 +466,260 @@ describe("the connectors server", () => {
     const saw = await turn(ada.id, ada.roomId);
     expect(saw.search).toContain("secret_in_input");
     expect(app.calls).toEqual([]);
+  });
+});
+
+// --- Local servers, in a box --------------------------------------------------------------------
+
+const envSecret = "env-secret-0123456789";
+
+// A box whose exec runs a scripted MCP server over its stdin and stdout, as boxd would. `q: "crash"`
+// makes it print to stderr and exit.
+function scriptedBox() {
+  const fake = createFakeBoxRuntime();
+  const execs: Array<{ boxId: string; exec: BoxExec }> = [];
+  let alive = 0;
+  const runtime = readyBoxRuntime(
+    {
+      ...fake,
+      execAttach: async (boxId, exec) => {
+        if ((await fake.snapshot(boxId)) !== "running") {
+          throw new Error(`box ${boxId} isn't running`);
+        }
+        execs.push({ boxId, exec });
+        const input = new PassThrough();
+        const output = new PassThrough();
+        const stream = Duplex.from({ readable: output, writable: input });
+        const { promise: exited, resolve } = Promise.withResolvers<number | null>();
+        const mcp = new McpServer({ name: "local", version: "1" });
+        alive += 1;
+        finished(stream, () => {
+          alive -= 1;
+          void mcp.close();
+          resolve(null);
+        });
+        for (const name of ["search", "create"]) {
+          mcp.registerTool(
+            name,
+            {
+              description: `Does ${name}.`,
+              inputSchema: { q: z.string().optional() },
+              annotations: { readOnlyHint: name === "search" },
+            },
+            async ({ q }) => {
+              if (q === "crash") {
+                output.end(`\x1e${"x".repeat(1000)}\npanic: lost the token ${exec.env.TOKEN}\n`);
+                return new Promise(() => {});
+              }
+              return { content: [{ type: "text", text: `${name} found ${q}, ${exec.env.TOKEN}` }] };
+            },
+          );
+        }
+        await mcp.connect(new StdioServerTransport(input, output));
+        return { stream, exited };
+      },
+    },
+    { account: () => undefined, applyEgress: async () => {} },
+  );
+  return { runtime, fake, execs, alive: () => alive };
+}
+
+const localConnector = (envKeys: string[]) =>
+  Connector.parse(
+    store.connectors.addConnector({
+      name: "Local",
+      transport: "stdio",
+      url: null,
+      command: "local-server",
+      args: [],
+      auth: "none",
+      ownerBotId: null,
+      headerKeys: [],
+      envKeys,
+      status: "unreachable",
+      lastError: null,
+    }),
+  );
+
+const testVault = () =>
+  openVault(store.vaultStore, { status: "ready", key: randomBytes(32).toString("base64") });
+
+describe("a local server", () => {
+  it("runs only in its own box, with only its env, and its calls are audited", async () => {
+    const errors = vi.spyOn(console, "error");
+    const app = await fakeApp(() => ["search", "create"]);
+    const box = scriptedBox();
+    const { base, command, turn } = await startBeebotd({
+      box: box.runtime,
+      names: ["local_search", "local_create"],
+    });
+    spawned.calls.length = 0;
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+
+    const imported = await command({
+      type: "import-connectors",
+      json: JSON.stringify({
+        mcpServers: {
+          remote: { url: app.url, headers: { Authorization: `Bearer ${appToken}` } },
+          local: { command: "npx", args: ["-y", "local-server"], env: { TOKEN: envSecret } },
+        },
+      }),
+    });
+    expect(imported.status).toBe(200);
+    const byName = (name: string) =>
+      store.connectors.listConnectors().find((connector) => connector.name === name);
+    await vi.waitFor(() => {
+      expect(byName("remote")?.status).toBe("ok");
+      expect(byName("local")?.status).toBe("ok");
+    });
+    const local = byName("local");
+    expect(local).toMatchObject({ transport: "stdio", envKeys: ["TOKEN"], egressHosts: [] });
+    expect(local?.tools.map(({ name }) => name)).toEqual(["search", "create"]);
+
+    // The env reaches the box exec and nothing else: not argv, not beebotd's own environment.
+    const [first] = box.execs;
+    expect(first?.boxId).toBe(connectorBoxId(local?.id ?? ""));
+    expect(first?.exec.env).toEqual({ TOKEN: envSecret, ...boxLayout(dataDir).env });
+    expect(first?.exec.argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(first?.exec.argv.slice(-3)).toEqual(["npx", "-y", "local-server"]);
+    expect(JSON.stringify(first?.exec.argv)).not.toContain(envSecret);
+    expect(Object.values(process.env)).not.toContain(envSecret);
+
+    await command({
+      type: "review-connector",
+      connectorId: local?.id,
+      toolsHash: local?.toolsHash,
+      readOnly: ["search"],
+    });
+    await command({
+      type: "set-bot-connector",
+      botId: ada.id,
+      connectorId: local?.id,
+      on: true,
+      tools: "*",
+      allowWrites: [],
+    });
+    const saw = await turn(ada.id, ada.roomId);
+    expect(saw.listed).toEqual(["local_create", "local_search"]);
+    expect(saw.search).toContain("search found x, [redacted]");
+    expect(saw.create).toContain("nobody can approve this");
+    const audit = store.policy
+      .auditPage({ unattended: false, limit: 200 })
+      .entries.filter(({ tool }) => tool?.startsWith("local_"))
+      .map(({ tool, status }) => [tool, status]);
+    expect(audit.reverse()).toEqual([
+      ["local_search", "allow"],
+      ["local_create", "approve"],
+    ]);
+
+    // Its hosts are public names, normalized.
+    expect(
+      await command({
+        type: "update-connector",
+        connectorId: local?.id,
+        egressHosts: ["localhost"],
+      }),
+    ).toMatchObject({ status: 400, body: { code: "bad_egress_host" } });
+    const hosts = await command({
+      type: "update-connector",
+      connectorId: local?.id,
+      egressHosts: ["Registry.NPMjs.org.", "registry.npmjs.org"],
+    });
+    expect(hosts).toMatchObject({ status: 200, body: { egressHosts: ["registry.npmjs.org"] } });
+
+    // One value is set without losing the others.
+    await command({ type: "set-connector-secret", connectorId: local?.id, env: { OTHER: "o" } });
+    expect(byName("local")?.envKeys).toEqual(["TOKEN", "OTHER"]);
+    await vi.waitFor(() => expect(box.execs).toHaveLength(2));
+    expect(box.execs[1]?.exec.env).toMatchObject({ TOKEN: envSecret, OTHER: "o" });
+
+    expect(spawned.calls).toEqual([]);
+    const state = await fetch(`${base}/state?protocolVersion=${protocolVersion}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    }).then((response) => response.text());
+    for (const text of [state, JSON.stringify(store.eventsAfter(0)), JSON.stringify(saw)]) {
+      expect(text).not.toContain(envSecret);
+    }
+    expect(JSON.stringify(errors.mock.calls)).not.toContain(envSecret);
+
+    // Deleting it takes its box.
+    const boxId = connectorBoxId(local?.id ?? "");
+    expect(await box.fake.snapshot(boxId)).toBe("running");
+    await command({ type: "delete-connector", connectorId: local?.id });
+    expect(await box.fake.snapshot(boxId)).toBe("absent");
+  });
+
+  it("keeps a crash's redacted stderr, stops when idle, and starts again on the next call", async () => {
+    store = openEventStore(dataDir);
+    cleanups.push(() => store.close());
+    const vault = testVault();
+    const box = scriptedBox();
+    const hub = createConnectorHub({
+      connectors: store.connectors,
+      policy: store.policy,
+      vault,
+      box: { runtime: box.runtime, env: boxLayout(dataDir).env },
+      idleMs: 200,
+    });
+    cleanups.push(() => hub.close());
+    const { id } = localConnector(["TOKEN"]);
+    await vault.put(`connector:${id}:secret`, JSON.stringify({ env: { TOKEN: envSecret } }));
+    await hub.refresh(id);
+    store.connectors.reviewConnector(id, store.connectors.getConnector(id)?.toolsHash ?? "", []);
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    store.connectors.setBotConnector(ada.id, id, true, "*", []);
+    const search = (q: string) => hub.runApproved(ada.id, "mcp__connectors__local_search", { q });
+
+    expect(await search("crash")).toMatchObject({ ok: false });
+    const crashed = store.connectors.getConnector(id);
+    expect(crashed?.status).toBe("error");
+    expect(crashed?.lastError).toContain("panic: lost the token [redacted]");
+    expect(crashed?.lastError?.length).toBeLessThanOrEqual(400);
+    expect(JSON.stringify(store.eventsAfter(0))).not.toContain(envSecret);
+
+    expect(await search("x")).toMatchObject({ ok: true });
+    expect(box.execs).toHaveLength(2);
+
+    const boxId = connectorBoxId(id);
+    await vi.waitFor(async () => {
+      expect(box.alive()).toBe(0);
+      expect(await box.fake.snapshot(boxId)).toBe("stopped");
+    });
+    expect(await search("y")).toMatchObject({ ok: true });
+    expect(box.execs).toHaveLength(3);
+    expect(await box.fake.snapshot(boxId)).toBe("running");
+  });
+
+  it("gets an egress policy of exactly its hosts and no vendor", async () => {
+    store = openEventStore(dataDir);
+    cleanups.push(() => store.close());
+    const { id } = localConnector([]);
+    store.connectors.updateConnector(id, { egressHosts: ["registry.npmjs.org"] });
+    const sent: unknown[] = [];
+    const control = new Duplex({
+      read() {},
+      write(chunk, _encoding, done) {
+        sent.push(JSON.parse(String(chunk)));
+        this.push('{"ok":true}\n');
+        done();
+      },
+    });
+    const egress = createEgressControl({
+      connect: async () => control,
+      vault: testVault(),
+      egressInput: store.egress.egressInput,
+    });
+    await egress.apply(connectorBoxId(id));
+    egress.close();
+    expect(sent).toEqual([
+      {
+        type: "policy",
+        botId: connectorBoxId(id),
+        anySite: false,
+        hosts: ["registry.npmjs.org"],
+        subscription: null,
+        api: null,
+      },
+    ]);
   });
 });

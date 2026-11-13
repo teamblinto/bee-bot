@@ -420,6 +420,7 @@ const ConnectorRow = z
     readOnlyTools: json(z.array(z.string())),
     headerKeys: json(z.array(z.string())),
     envKeys: json(z.array(z.string())),
+    egressHosts: json(z.array(z.string())),
     hasSecret: flag,
     hasOauth: flag,
     grants: json(z.array(ConnectorGrant)),
@@ -469,7 +470,7 @@ export function openConnectors(
     c.last_error AS lastError, c.tools_json AS tools, c.tools_hash AS toolsHash,
     c.reviewed_hash AS reviewedHash, c.reviewed_tools_json AS reviewedTools,
     c.read_only_tools AS readOnlyTools, c.header_keys AS headerKeys, c.env_keys AS envKeys,
-    c.refreshed_at AS refreshedAt, c.created_at AS createdAt,
+    c.egress_hosts AS egressHosts, c.refreshed_at AS refreshedAt, c.created_at AS createdAt,
     EXISTS (SELECT 1 FROM vault_entries WHERE name = 'connector:' || c.id || ':secret') AS hasSecret,
     EXISTS (SELECT 1 FROM vault_entries WHERE name = 'connector:' || c.id || ':oauth') AS hasOauth,
     (SELECT json_group_array(json_object('botId', bot_id, 'tools', json(tools),
@@ -489,7 +490,7 @@ export function openConnectors(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const updateFields = db.prepare(
-    "UPDATE connectors SET name = ?, url = ?, reads_private = ? WHERE id = ?",
+    "UPDATE connectors SET name = ?, url = ?, reads_private = ?, egress_hosts = ? WHERE id = ?",
   );
   const updateAuth = db.prepare(
     "UPDATE connectors SET auth = ?, header_keys = ?, env_keys = ? WHERE id = ?",
@@ -598,7 +599,12 @@ export function openConnectors(
 
     updateConnector: (
       id: string,
-      { name, url, readsPrivate }: { name?: string; url?: string; readsPrivate?: boolean },
+      {
+        name,
+        url,
+        readsPrivate,
+        egressHosts,
+      }: { name?: string; url?: string; readsPrivate?: boolean; egressHosts?: string[] },
     ) =>
       transaction(() => {
         const current = getConnector(id);
@@ -609,6 +615,7 @@ export function openConnectors(
           name ?? current.name,
           url ?? current.url,
           Number(readsPrivate ?? current.readsPrivate),
+          JSON.stringify(egressHosts ?? current.egressHosts),
           id,
         );
         return changed(id);

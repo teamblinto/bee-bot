@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { EngineLane } from "@beebot/contracts";
 import { z } from "zod";
 
+import { connectorOfBox } from "./connectorBox.ts";
 import { apiKeyName, type Vault } from "./vault.ts";
 
 // The egress proxy runs beside boxd in the Linux host (apps/boxd/egress). This side decides what
@@ -81,8 +82,27 @@ export function openEgress(db: DatabaseSync) {
   const selectHosts = db.prepare(
     "SELECT host FROM bot_egress_hosts WHERE bot_id = ? ORDER BY host",
   );
+  const selectConnectorHosts = db.prepare(
+    "SELECT egress_hosts AS hosts FROM connectors WHERE id = ?",
+  );
   return {
     egressInput: (botId: string): EgressInput | null => {
+      // A local MCP server's box reaches exactly its owner's hosts, and no vendor.
+      const connectorId = connectorOfBox(botId);
+      if (connectorId !== undefined) {
+        const row = z
+          .object({ hosts: z.string() })
+          .optional()
+          .parse(selectConnectorHosts.get(connectorId));
+        return row
+          ? {
+              engineAccountId: "connector",
+              lane: "subscription",
+              anySite: false,
+              hosts: z.array(z.string()).parse(JSON.parse(row.hosts)),
+            }
+          : null;
+      }
       const row = selectBot.get(botId);
       if (row === undefined) {
         return null;

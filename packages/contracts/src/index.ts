@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 36;
+export const protocolVersion = 37;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -745,6 +745,8 @@ export const Connector = z.object({
   hasSecret: z.boolean(),
   headerKeys: z.array(z.string()),
   envKeys: z.array(z.string()),
+  // What a local server's box may reach. Nothing else, and no vendor.
+  egressHosts: z.array(z.string()),
   authStatus: z.enum(["not_needed", "missing", "saved", "signed_in", "signed_out"]),
   grants: z.array(ConnectorGrant),
   refreshedAt: z.string().nullable(),
@@ -1152,6 +1154,7 @@ export const Command = z.discriminatedUnion("type", [
     name: ConnectorName.optional(),
     url: ConnectorUrl.optional(),
     readsPrivate: z.boolean().optional(),
+    egressHosts: EgressHosts.optional(),
   }),
   // `toolsHash` is the list the owner was shown: one that changed since can't be marked seen.
   z.object({
@@ -1160,7 +1163,8 @@ export const Command = z.discriminatedUnion("type", [
     toolsHash: z.string(),
     readOnly: ToolNames,
   }),
-  // Replaces what is saved. `bearer` or `headers` for a remote server, `env` for a local one.
+  // Replaces what is saved: `bearer` or `headers` for a remote server. A local one's `env` values
+  // replace only the names given.
   // `clientId`, with `clientSecret` if it has one, is the OAuth client for a server without
   // dynamic registration, and replaces only that.
   z.object({

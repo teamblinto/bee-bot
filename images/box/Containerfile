@@ -1,12 +1,13 @@
 FROM docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
-# Engine: tmux, git, and what the vendor installers need (bash, curl, CA roots).
+# Engine: tmux, git, and what the vendor installers need (bash, curl, CA roots). Node and npm
+# run local MCP servers (`npx ...`) in a connector's own box.
 # Computer: an Xfce desktop on Xvfb (window manager, panels, desktop icons, terminal, file
 # manager, app finder) with headed Chromium, dbus and portals for file pickers, a VNC server,
 # xdotool and ImageMagick for input and screenshots, and socat for boxd to reach loopback-only
 # DevTools and the VNC socket via podman exec.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates curl git tmux \
+ && apt-get install -y --no-install-recommends bash ca-certificates curl git tmux nodejs npm \
       chromium fonts-noto-core socat \
       xvfb dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk x11vnc xdotool imagemagick \
       xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf xfce4-terminal thunar xfce4-appfinder \
