@@ -49,6 +49,7 @@ const launch: BotLaunch = {
   memory: "",
   skills: [],
   skillsDir: "/skills",
+  connectors: [],
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };
@@ -247,6 +248,26 @@ describe("the launch", () => {
         'mcp_servers.bee.default_tools_approval_mode="approve"',
         'shell_environment_policy.exclude=["BEE_MCP_TOKEN"]',
       ]),
+    );
+  });
+
+  it("mounts the connectors server, without a tool list, only for a bot with a grant", async () => {
+    await turn("success").outcome;
+    expect(settings().join(" ")).not.toContain("mcp_servers.connectors");
+  });
+
+  it("gives a granted bot the connectors server and names its apps", async () => {
+    await turn("success", { fields: { connectors: ["Notion"] } }).outcome;
+    const connectors = settings().filter((setting) =>
+      setting.startsWith("mcp_servers.connectors."),
+    );
+    expect(connectors).toEqual([
+      `mcp_servers.connectors.url=${JSON.stringify(new URL("/mcp/connectors", permissions.url).href)}`,
+      'mcp_servers.connectors.bearer_token_env_var="BEE_MCP_TOKEN"',
+      'mcp_servers.connectors.default_tools_approval_mode="approve"',
+    ]);
+    expect(called("thread/start")?.developerInstructions).toContain(
+      "Connected apps you may use through the connectors tools: Notion.",
     );
   });
 

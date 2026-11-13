@@ -5,6 +5,7 @@
   "description": "Bee Bot egress proxy, runs beside boxd in the Linux host",
   "type": "module",
   "exports": {
+    "./policy": "./src/policy.ts",
     "./proxy": "./src/proxy.ts"
   },
   "scripts": {

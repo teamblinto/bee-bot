@@ -21,6 +21,7 @@ import {
   parseManifest,
   type PolicyDecision,
   ruleFor,
+  type ToolRule,
 } from "./broker.ts";
 import type { StoreTx } from "./store.ts";
 
@@ -101,11 +102,11 @@ export function openPolicy(
       tool: string,
       args: unknown,
       decide: Decide = brokerDecide,
+      rule: ToolRule | undefined = ruleFor(tool),
     ): PolicyDecision =>
       transaction(() => {
         const row = selectBotPolicy.get(run.botId);
         const legsRow = selectLegs.get(run.id);
-        const rule = ruleFor(tool);
         let decision: PolicyDecision = { kind: "deny", reason: "unknown_run" };
         if (row && legsRow) {
           const { access, manifest, control } = BotPolicy.parse(row);
@@ -118,6 +119,7 @@ export function openPolicy(
               attended: run.attended,
             },
             decide,
+            rule,
           );
         }
         if (rule && (decision.kind === "allow" || decision.kind === "approve")) {

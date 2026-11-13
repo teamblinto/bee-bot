@@ -53,6 +53,7 @@ const launchFor = (botId: string, engineAccountId: string, lane: BotLaunch["lane
   memory: "",
   skills: [],
   skillsDir: "/skills",
+  connectors: [],
 });
 
 // The fake runtime runs the box's command on this machine, so the box's paths are this machine's.
@@ -351,7 +352,7 @@ describe("Claude in a box", () => {
         effort: null,
         mode: "plan",
       },
-      { mcp: "m", hook: "h" },
+      { mcp: "m", hook: "h", connectors: "c" },
     );
     expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe("/run/bee/bot/persona.md");
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep");

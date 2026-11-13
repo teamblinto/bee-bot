@@ -1,9 +1,16 @@
 import type { Bot } from "@beebot/contracts";
 import { ArrowDown } from "lucide-react";
-import { type UIEvent, type WheelEvent, useEffect, useRef, useState } from "react";
+import {
+  type UIEvent,
+  type WheelEvent,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { answeredLine, liveStatusLine, workedLine } from "../labels";
-import type { LiveTool } from "../serverConnection";
+import { getConnectionState, type LiveTool, subscribeToConnection } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
 import { isOpenItem, isOutcomeMessage, itemKey, type TranscriptItem } from "../transcript";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
@@ -38,6 +45,10 @@ function Item({
   finishedTools: Record<string, LiveTool[]>;
   authorName: ((botId: string) => string | undefined) | undefined;
 }) {
+  const connectors = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().chat.connectors,
+  );
   if (item.kind === "approval") {
     const { approval, pending } = item;
     return pending ? (
@@ -86,6 +97,7 @@ function Item({
         <WorkGroup
           label={workedLine(message.workedMs, message.tools.length)}
           tools={finishedTools[message.id] ?? namedTools(message.tools)}
+          connectors={connectors}
         />
       )}
       <Markdown text={message.body} />
@@ -124,6 +136,10 @@ export function Transcript({
   // Labels each bot message with who wrote it, for rooms with more than one bot.
   authorName?: (botId: string) => string | undefined;
 }) {
+  const connectors = useSyncExternalStore(
+    subscribeToConnection,
+    () => getConnectionState().chat.connectors,
+  );
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -248,10 +264,19 @@ export function Transcript({
           <div aria-live="off" className="mt-6 flex flex-col gap-2 empty:hidden">
             {thought !== undefined && <ThinkingRow text={thought} />}
             {workingSince && (
-              <WorkGroup live label={<WorkingLabel startedAt={workingSince} />} tools={liveTools} />
+              <WorkGroup
+                live
+                label={<WorkingLabel startedAt={workingSince} />}
+                tools={liveTools}
+                connectors={connectors}
+              />
             )}
             {!workingSince && endedWork !== undefined && liveTools.length > 0 && (
-              <WorkGroup label={workedLine(endedWork, liveTools.length)} tools={liveTools} />
+              <WorkGroup
+                label={workedLine(endedWork, liveTools.length)}
+                tools={liveTools}
+                connectors={connectors}
+              />
             )}
             {pendingItems.map((item) => (
               <Item
@@ -290,7 +315,12 @@ export function Transcript({
         onJump={jumpToMessage}
       />
       <p role="status" className="sr-only">
-        {liveStatusLine(thought !== undefined, workingSince ? liveTools : [], Boolean(draft))}
+        {liveStatusLine(
+          thought !== undefined,
+          workingSince ? liveTools : [],
+          Boolean(draft),
+          connectors,
+        )}
       </p>
       {away && (
         <button

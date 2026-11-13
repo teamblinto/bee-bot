@@ -86,10 +86,10 @@ function parseRpc(text: string) {
 }
 
 // The CLI gives up on a plain JSON answer at 60 s, and a card can wait 5 minutes.
-async function streamToolCall(
+async function streamResult(
   response: NodeHttp.ServerResponse,
   id: string | number,
-  approve: (closed: AbortSignal) => Promise<Decision>,
+  produce: (closed: AbortSignal) => Promise<unknown>,
   keepaliveMs: number,
 ) {
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
@@ -100,13 +100,31 @@ async function streamToolCall(
     clearInterval(beat);
     closed.abort();
   });
-  const decision = await approve(closed.signal).catch((): Decision => ({
-    behavior: "deny",
-    message: "Refused: the request could not be checked.",
-  }));
+  const result = await produce(closed.signal);
   clearInterval(beat);
-  const result = { content: [{ type: "text", text: JSON.stringify(decision) }] };
   response.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id, result })}\n\n`);
+}
+
+const textResult = (text: string) => ({ content: [{ type: "text", text }] });
+
+function streamToolCall(
+  response: NodeHttp.ServerResponse,
+  id: string | number,
+  approve: (closed: AbortSignal) => Promise<Decision>,
+  keepaliveMs: number,
+) {
+  return streamResult(
+    response,
+    id,
+    async (closed) => {
+      const decision = await approve(closed).catch((): Decision => ({
+        behavior: "deny",
+        message: "Refused: the request could not be checked.",
+      }));
+      return textResult(JSON.stringify(decision));
+    },
+    keepaliveMs,
+  );
 }
 
 export async function answerMcp(
@@ -192,6 +210,68 @@ export async function answerMcp(
       }
       const args = params?.name === "approve" ? params.arguments : undefined;
       await streamToolCall(response, id, (closed) => approve(args, closed), keepaliveMs);
+      return;
+    }
+    default: {
+      const error = { code: -32601, message: "Method not found" };
+      sendJson(response, 200, { jsonrpc: "2.0", id, error });
+    }
+  }
+}
+
+export type ConnectorHandlers = {
+  tools: () => Promise<Tool[]>;
+  call: (name: string, args: unknown, closed: AbortSignal) => Promise<string>;
+};
+
+// The `connectors` server: outside apps' tools, which beebotd calls on the bot's behalf. The list
+// and every call read the run's grants afresh.
+export async function answerConnectors(
+  response: NodeHttp.ServerResponse,
+  body: string,
+  { tools, call }: ConnectorHandlers,
+  keepaliveMs = defaultKeepaliveMs,
+) {
+  const rpc = parseRpc(body);
+  if (!rpc) {
+    const error = { code: -32600, message: "Invalid request" };
+    sendJson(response, 400, { jsonrpc: "2.0", id: null, error });
+    return;
+  }
+  const { id, method, params } = rpc;
+  if (id === undefined) {
+    response.writeHead(202).end();
+    return;
+  }
+  const answer = (result: unknown) => sendJson(response, 200, { jsonrpc: "2.0", id, result });
+  switch (method) {
+    case "initialize":
+      answer({
+        protocolVersion: params?.protocolVersion,
+        capabilities: { tools: {} },
+        serverInfo: { name: "connectors", version: "1" },
+      });
+      return;
+    case "tools/list":
+      answer({ tools: await tools() });
+      return;
+    case "ping":
+      answer({});
+      return;
+    case "tools/call": {
+      const name = typeof params?.name === "string" ? params.name : "";
+      await streamResult(
+        response,
+        id,
+        async (closed) =>
+          textResult(
+            await call(name, params?.arguments, closed).catch((error: unknown) => {
+              console.error(`beebotd: connector tool failed: ${(error as Error)?.name}`);
+              return "This app is unavailable right now.";
+            }),
+          ),
+        keepaliveMs,
+      );
       return;
     }
     default: {

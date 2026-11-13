@@ -307,7 +307,8 @@ export function createSupervisor({
             seenTools.add(tool.id);
             tools.push(tool.name);
             recordEffect(tool);
-            if (!tool.name.startsWith("mcp__bee__")) {
+            // Bee and connector tools taint through the broker, by their own labels.
+            if (!tool.name.startsWith("mcp__bee__") && !tool.name.startsWith("mcp__connectors__")) {
               try {
                 store.markTainted(run.id);
               } catch (error) {

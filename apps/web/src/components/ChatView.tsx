@@ -17,6 +17,7 @@ import { Composer } from "./Composer";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutinesPanel } from "./RoutinesPanel";
 import { SkillsPanel } from "./SkillsPanel";
+import { BotConnectorsPanel } from "./BotConnectorsPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
@@ -33,6 +34,7 @@ function BotMenu({
   onMemory,
   onRoutines,
   onSkills,
+  onConnectors,
   onLogin,
   onArchive,
 }: {
@@ -43,6 +45,7 @@ function BotMenu({
   onMemory: () => void;
   onRoutines: () => void;
   onSkills: () => void;
+  onConnectors: () => void;
   onLogin: () => void;
   onArchive: () => void;
 }) {
@@ -73,6 +76,9 @@ function BotMenu({
         </button>
         <button type="button" {...hide} className={menuItemClass} onClick={onSkills}>
           Skills
+        </button>
+        <button type="button" {...hide} className={menuItemClass} onClick={onConnectors}>
+          Connectors
         </button>
         {bot.boundary === "box" && bot.engineAccountId !== "fake" && (
           <button
@@ -179,6 +185,7 @@ export function ChatView({
   const [loginOpen, setLoginOpen] = useState(false);
   const [routinesOpen, setRoutinesOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [connectorsOpen, setConnectorsOpen] = useState(false);
   const [archiveError, setArchiveError] = useState<string>();
   const workspace = useWorkspace(bot, run, tools, connection.activity[bot.id], openComputer);
 
@@ -261,6 +268,7 @@ export function ChatView({
             onMemory={() => setMemoryOpen(true)}
             onRoutines={() => setRoutinesOpen(true)}
             onSkills={() => setSkillsOpen(true)}
+            onConnectors={() => setConnectorsOpen(true)}
             onLogin={() => setLoginOpen(true)}
             onArchive={() =>
               void postCommand({ type: "archive-bot", botId: bot.id }).then((result) =>
@@ -349,6 +357,14 @@ export function ChatView({
           skills={chat.skills}
           connected={connected}
           onClose={() => setSkillsOpen(false)}
+        />
+      )}
+      {connectorsOpen && (
+        <BotConnectorsPanel
+          bot={bot}
+          connectors={chat.connectors}
+          connected={connected}
+          onClose={() => setConnectorsOpen(false)}
         />
       )}
 

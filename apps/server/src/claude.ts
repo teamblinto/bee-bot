@@ -26,6 +26,7 @@ import { waitingPattern } from "./continuations.ts";
 import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
+  connectorsUrl,
   cliVersion,
   type EngineChoice,
   killTree,
@@ -87,18 +88,22 @@ const beeTools = [
   "computer_window_scroll",
   "computer_window_drag",
 ].map((name) => `mcp__bee__${name}`);
+// The whole server: its tools change with the owner's grants, and beebotd checks every call.
+const connectorsRule = "mcp__connectors";
 // Without `ask`, `Bash ls`, `Bash cat` and in-workspace reads never reach the permission tool.
 // Exact names: `allow` keeps these off the permission tool, whose schema refuses them, and a call
 // reaching `approve` would taint the scope. A new bee tool must be added here on purpose.
-const askSettings = JSON.stringify({
-  // Relative to the workspace. Plan mode writes this file without asking, and the default is under
-  // ~/.claude, a path no bot may touch.
-  plansDirectory: ".plans",
-  permissions: {
-    ask: ["Bash", "Read", "Glob", "Grep"],
-    allow: beeTools,
-  },
-});
+const askSettings = (connectors: boolean) =>
+  JSON.stringify({
+    // Relative to the workspace. Plan mode writes this file without asking, and the default is
+    // under ~/.claude, a path no bot may touch.
+    plansDirectory: ".plans",
+    permissions: {
+      ask: ["Bash", "Read", "Glob", "Grep"],
+      allow: [...beeTools, ...(connectors ? [connectorsRule] : [])],
+    },
+  });
+
 const permissionTool = "mcp__bee__approve";
 const mcpTimeoutMs = 900_000;
 
@@ -184,7 +189,7 @@ export function turnArgs(
   personaPath: string,
   sessionId: string,
   resume: boolean,
-  { model, effort, mode }: EngineChoice,
+  { model, effort, mode, connectors = [] }: EngineChoice & Partial<Pick<BotLaunch, "connectors">>,
   configPath: string,
 ) {
   return [
@@ -206,7 +211,7 @@ export function turnArgs(
     "--tools",
     toolList,
     "--settings",
-    askSettings,
+    askSettings(connectors.length > 0),
     "--mcp-config",
     configPath,
     "--permission-prompt-tool",
@@ -221,13 +226,25 @@ export function turnArgs(
   ];
 }
 
+// Only ever beebotd's own two servers: an outside one here would bypass grants, approvals and the
+// audit log.
+export function mcpServers(beeUrl: string, connectors: string | undefined, authorization: string) {
+  const server = (url: string) => ({
+    type: "http",
+    timeout: mcpTimeoutMs,
+    url,
+    headers: { Authorization: authorization },
+  });
+  return { bee: server(beeUrl), ...(connectors && { connectors: server(connectors) }) };
+}
+
 // Measured on 2.1.319. The token stays off argv: both configs name the variable the CLI expands.
 export function boxTurnArgs(
   personaPath: string,
   sessionId: string,
   resume: boolean,
-  { model, effort, mode }: EngineChoice,
-  urls: { mcp: string; hook: string },
+  { model, effort, mode, connectors = [] }: EngineChoice & Partial<Pick<BotLaunch, "connectors">>,
+  urls: { mcp: string; hook: string; connectors: string },
 ) {
   const tools = mode === "plan" ? boxPlanTools : boxTools;
   const hook = {
@@ -242,12 +259,12 @@ export function boxTurnArgs(
     plansDirectory: ".plans",
     hooks: { PreToolUse: [{ matcher: "*", hooks: [hook] }] },
   };
-  const bee = {
-    type: "http",
-    timeout: mcpTimeoutMs,
-    url: urls.mcp,
-    headers: { Authorization: `Bearer \${${tokenVariable}}` },
-  };
+  const mounted = connectors.length > 0;
+  const servers = mcpServers(
+    urls.mcp,
+    mounted ? urls.connectors : undefined,
+    `Bearer \${${tokenVariable}}`,
+  );
   return [
     "-p",
     "--output-format",
@@ -267,11 +284,11 @@ export function boxTurnArgs(
     "--tools",
     tools,
     "--allowedTools",
-    [tools, ...beeTools].join(","),
+    [tools, ...beeTools, ...(mounted ? [connectorsRule] : [])].join(","),
     "--settings",
     JSON.stringify(settings),
     "--mcp-config",
-    JSON.stringify({ mcpServers: { bee } }),
+    JSON.stringify({ mcpServers: servers }),
     "--system-prompt-snapshot",
     "off",
     "--append-system-prompt-file",
@@ -722,7 +739,7 @@ async function currentUserSid() {
 }
 
 // Created empty and tightened before the content goes in, so the token never sits in a looser file.
-export async function writeMcpConfig(path: string, url: string, token: string) {
+export async function writeMcpConfig(path: string, url: string, token: string, connectors = false) {
   await NodeFS.mkdir(NodePath.dirname(path), { recursive: true, mode: 0o700 });
   await (await NodeFS.open(path, "wx", 0o600)).close();
   if (process.platform === "win32") {
@@ -741,13 +758,8 @@ export async function writeMcpConfig(path: string, url: string, token: string) {
       windowsHide: true,
     });
   }
-  const bee = {
-    type: "http",
-    timeout: mcpTimeoutMs,
-    url,
-    headers: { Authorization: `Bearer ${token}` },
-  };
-  await NodeFS.writeFile(path, JSON.stringify({ mcpServers: { bee } }));
+  const servers = mcpServers(url, connectors ? connectorsUrl(url) : undefined, `Bearer ${token}`);
+  await NodeFS.writeFile(path, JSON.stringify({ mcpServers: servers }));
 }
 
 const isFolder = (path: string) =>
@@ -849,6 +861,7 @@ export function createClaudeRunTurn({
         ? boxTurnArgs(`${box.layout.beeDir.box}/persona.md`, sessionId, asResume, launch, {
             mcp: box.layout.beeUrl(permissions.url),
             hook: box.layout.beeUrl(new URL(preToolUsePath, permissions.url).href),
+            connectors: box.layout.beeUrl(connectorsUrl(permissions.url)),
           })
         : turnArgs(personaPath, sessionId, asResume, launch, configPath);
     const openTools = new Set<string>();
@@ -895,7 +908,12 @@ export function createClaudeRunTurn({
     }
     try {
       if (!box) {
-        await writeMcpConfig(configPath, permissions.url, permissions.token);
+        await writeMcpConfig(
+          configPath,
+          permissions.url,
+          permissions.token,
+          launch.connectors.length > 0,
+        );
       }
       let input = prompt;
       let asResume = resume;

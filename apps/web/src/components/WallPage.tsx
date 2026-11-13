@@ -69,7 +69,11 @@ export function WallTile({
         <span className="truncate text-small text-ink-secondary">
           {status === "Stopped" ? "Computer off" : controller}
         </span>
-        {tool && <span className="truncate text-small text-ink">{toolRowLabel(tool)}</span>}
+        {tool && (
+          <span className="truncate text-small text-ink">
+            {toolRowLabel(tool, connection.chat.connectors)}
+          </span>
+        )}
       </button>
     </li>
   );

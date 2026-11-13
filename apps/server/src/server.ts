@@ -79,7 +79,17 @@ import {
 import { ownerEgressHosts } from "./egress.ts";
 import { answerPreToolUse } from "./hooks.ts";
 import type { BrowserRuntime } from "./browserRuntime.ts";
-import { answerMcp, toolsFor, sendJson } from "./mcp.ts";
+import { answerConnectors, answerMcp, toolsFor, sendJson } from "./mcp.ts";
+import { createConnectorHub } from "./connectorHub.ts";
+import {
+  envProblem,
+  headersProblem,
+  oauthName,
+  parseMcpServers,
+  type Secret,
+  secretName,
+  urlProblem,
+} from "./connectors.ts";
 import { callMemoryTool, readTeamMemoryFiles, teamMemoryDir } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
@@ -89,7 +99,7 @@ import { createThumbnails, type Thumbnail } from "./thumbnails.ts";
 import type { EventStore } from "./store.ts";
 import { fallbackSummary, type Summarize } from "./summary.ts";
 import type { Vault } from "./vault.ts";
-import { deleteApiKey, openVault, storeApiKey } from "./vaultStore.ts";
+import { deleteApiKey, openVault, storeApiKey, VaultError } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
 import { createTerminals } from "./terminal.ts";
 import {
@@ -454,6 +464,12 @@ export async function startServer({
       supervisor.syncClocks();
     },
   });
+  const connectorHub = createConnectorHub({
+    connectors: store.connectors,
+    policy: store.policy,
+    vault,
+    decide,
+  });
   const supervisor = createSupervisor({
     store,
     runTurn,
@@ -589,6 +605,187 @@ export async function startServer({
         log("team memory"),
       );
     }
+  }
+
+  // Replaces what is saved. An empty secret removes the row.
+  async function saveSecret(connectorId: string, secret: Secret) {
+    try {
+      if (Object.values(secret).some((value) => value !== undefined)) {
+        await vault.put(secretName(connectorId), JSON.stringify(secret));
+      } else {
+        await vault.delete(secretName(connectorId));
+      }
+      return undefined;
+    } catch (error) {
+      if (error instanceof VaultError) {
+        return { status: 409, body: { code: `vault_${error.problem}` } };
+      }
+      throw error;
+    }
+  }
+
+  async function addConnector(command: Extract<Command, { type: "add-connector" }>) {
+    const { name, url, bearer, headers } = command;
+    const problem = urlProblem(url) ?? headersProblem(headers ?? {});
+    if (problem || (bearer && headers)) {
+      return { status: 400, body: { code: problem ?? "bad_request" } };
+    }
+    const added = store.connectors.addConnector({
+      name,
+      transport: "http",
+      url,
+      command: null,
+      args: [],
+      auth: bearer ? "bearer" : headers ? "headers" : "none",
+      ownerBotId: command.ownerBotId ?? null,
+      headerKeys: Object.keys(headers ?? {}),
+      envKeys: [],
+      status: "unreachable",
+      lastError: null,
+    });
+    if (typeof added === "string") {
+      return { status: added === "not_found" ? 404 : 409, body: { code: added } };
+    }
+    const refused = await saveSecret(added.id, { bearer, headers });
+    if (refused) {
+      store.connectors.deleteConnector(added.id);
+      return refused;
+    }
+    void connectorHub.refresh(added.id);
+    return { status: 200, body: store.connectors.connectorChanged(added.id) };
+  }
+
+  async function importConnectors(command: Extract<Command, { type: "import-connectors" }>) {
+    const parsed = parseMcpServers(command.json);
+    if ("error" in parsed) {
+      return { status: 400, body: { code: parsed.error } };
+    }
+    const added = [];
+    const refused = [...parsed.refused];
+    for (const entry of parsed.entries) {
+      const local = entry.transport === "stdio";
+      const connector = store.connectors.addConnector({
+        name: entry.key.slice(0, 80) || "App",
+        transport: entry.transport,
+        url: entry.url,
+        command: entry.command,
+        args: entry.args,
+        auth: Object.keys(entry.headers).length > 0 ? "headers" : "none",
+        ownerBotId: command.ownerBotId ?? null,
+        headerKeys: Object.keys(entry.headers),
+        envKeys: Object.keys(entry.env),
+        status: local ? "error" : "unreachable",
+        lastError: local ? "Local servers aren't supported yet." : null,
+      });
+      if (typeof connector === "string") {
+        refused.push({ key: entry.key, code: connector });
+        continue;
+      }
+      const values = local ? entry.env : entry.headers;
+      const secret = local ? { env: entry.env } : { headers: entry.headers };
+      const failed =
+        Object.keys(values).length === 0 ? undefined : await saveSecret(connector.id, secret);
+      if (failed) {
+        store.connectors.deleteConnector(connector.id);
+        refused.push({ key: entry.key, code: failed.body.code });
+        continue;
+      }
+      if (!local) {
+        void connectorHub.refresh(connector.id);
+      }
+      added.push(store.connectors.connectorChanged(connector.id) ?? connector);
+    }
+    return { status: 200, body: { added, refused } };
+  }
+
+  async function setConnectorSecret(command: Extract<Command, { type: "set-connector-secret" }>) {
+    const { connectorId, bearer, headers, env } = command;
+    const connector = store.connectors.getConnector(connectorId);
+    if (!connector) {
+      return { status: 404, body: { code: "not_found" } };
+    }
+    const remote = connector.transport === "http";
+    if ((remote && (env || (bearer && headers))) || (!remote && (bearer || headers))) {
+      return { status: 400, body: { code: "bad_request" } };
+    }
+    const problem = headersProblem(headers ?? {}) ?? envProblem(env ?? {});
+    if (problem) {
+      return { status: 400, body: { code: problem } };
+    }
+    const refused = await saveSecret(connectorId, { bearer, headers, env });
+    if (refused) {
+      return refused;
+    }
+    const staticAuth = bearer ? "bearer" : headers ? "headers" : "none";
+    const updated = store.connectors.setAuth(
+      connectorId,
+      connector.auth === "oauth" ? "oauth" : staticAuth,
+      Object.keys(headers ?? {}),
+      Object.keys(env ?? {}),
+    );
+    connectorHub.forget(connectorId);
+    if (remote) {
+      void connectorHub.refresh(connectorId);
+    }
+    return { status: 200, body: updated };
+  }
+
+  async function updateConnector(command: Extract<Command, { type: "update-connector" }>) {
+    const { connectorId, name, url, readsPrivate } = command;
+    const current = store.connectors.getConnector(connectorId);
+    if (!current) {
+      return { status: 404, body: { code: "not_found" } };
+    }
+    const moved = url !== undefined && url !== current.url;
+    const problem = moved
+      ? current.transport === "http"
+        ? urlProblem(url)
+        : "bad_request"
+      : undefined;
+    if (problem) {
+      return { status: 400, body: { code: problem } };
+    }
+    // Tokens belong to the URL they were issued for.
+    if (moved) {
+      await vault.delete(oauthName(connectorId));
+    }
+    const updated = store.connectors.updateConnector(connectorId, {
+      ...(name !== undefined && { name }),
+      ...(url !== undefined && { url }),
+      ...(readsPrivate !== undefined && { readsPrivate }),
+    });
+    if (moved) {
+      connectorHub.forget(connectorId);
+      void connectorHub.refresh(connectorId);
+    }
+    return { status: 200, body: updated };
+  }
+
+  async function disconnectConnector(connectorId: string) {
+    const connector = store.connectors.getConnector(connectorId);
+    if (!connector) {
+      return { status: 404, body: { code: "not_found" } };
+    }
+    connectorHub.forget(connectorId);
+    await vault.delete(secretName(connectorId));
+    await vault.delete(oauthName(connectorId));
+    store.connectors.setAuth(connectorId, connector.auth, [], []);
+    if (connector.auth !== "none") {
+      store.connectors.setConnectorStatus(connectorId, "needs_sign_in", null);
+    }
+    store.connectors.auditConnector(connectorId, "connector_disconnected");
+    return { status: 200, body: store.connectors.connectorChanged(connectorId) };
+  }
+
+  // The rows first, so no run after this sees it, then the secrets.
+  async function deleteConnector(connectorId: string) {
+    if (!store.connectors.deleteConnector(connectorId)) {
+      return { status: 404, body: { code: "not_found" } };
+    }
+    connectorHub.forget(connectorId);
+    await vault.delete(secretName(connectorId));
+    await vault.delete(oauthName(connectorId));
+    return { status: 200, body: { ok: true } };
   }
 
   function runCommand(command: Command) {
@@ -848,6 +1045,48 @@ export async function startServer({
       }
       case "delete-skill":
         return store.deleteSkill(command.name) ? ok : notFound;
+      case "add-connector":
+        return addConnector(command);
+      case "import-connectors":
+        return importConnectors(command);
+      case "update-connector":
+        return updateConnector(command);
+      case "review-connector": {
+        const { connectorId, toolsHash, readOnly } = command;
+        const reviewed = store.connectors.reviewConnector(connectorId, toolsHash, readOnly);
+        if (reviewed === "not_found") {
+          return notFound;
+        }
+        return typeof reviewed === "string"
+          ? { status: 409, body: { code: reviewed } }
+          : { status: 200, body: reviewed };
+      }
+      case "set-connector-secret":
+        return setConnectorSecret(command);
+      case "refresh-connector": {
+        const { connectorId } = command;
+        if (!store.connectors.getConnector(connectorId)) {
+          return notFound;
+        }
+        connectorHub.forget(connectorId);
+        return connectorHub
+          .refresh(connectorId)
+          .then(() => ({ status: 200, body: store.connectors.getConnector(connectorId) }));
+      }
+      case "disconnect-connector":
+        return disconnectConnector(command.connectorId);
+      case "delete-connector":
+        return deleteConnector(command.connectorId);
+      case "set-bot-connector": {
+        const { botId, connectorId, on, tools, allowWrites } = command;
+        const set = store.connectors.setBotConnector(botId, connectorId, on, tools, allowWrites);
+        if (set === "not_found") {
+          return notFound;
+        }
+        return typeof set === "string"
+          ? { status: 409, body: { code: set } }
+          : { status: 200, body: set };
+      }
       case "start-firing": {
         const result = store.startFiring(command.firingId, attended);
         if (result === "not_found") {
@@ -1145,6 +1384,26 @@ export async function startServer({
     );
   }
 
+  async function handleConnectors(
+    request: NodeHttp.IncomingMessage,
+    response: NodeHttp.ServerResponse,
+  ) {
+    const call = await engineCall(request, response);
+    if (!call) {
+      return;
+    }
+    const { run, body } = call;
+    await answerConnectors(
+      response,
+      body,
+      {
+        tools: () => connectorHub.toolsFor(run.botId),
+        call: (name, args, closed) => connectorHub.call(run, name, args, closed),
+      },
+      mcpKeepaliveMs,
+    );
+  }
+
   // Skipped during a turn: the login is shared, and R5 allows one app-server per account.
   async function checkCodex() {
     const hasBot = store.botIds().some((id) => store.getBot(id)?.engineAccountId === "codex");
@@ -1217,6 +1476,10 @@ export async function startServer({
 
     if (url.pathname === "/mcp") {
       handleMcp(request, response).catch(() => response.destroy());
+      return;
+    }
+    if (url.pathname === "/mcp/connectors") {
+      handleConnectors(request, response).catch(() => response.destroy());
       return;
     }
     if (url.pathname === preToolUsePath) {
@@ -1453,6 +1716,7 @@ export async function startServer({
       thumbnails.close();
       approvals.close();
       await supervisor.close();
+      connectorHub.close();
       for (const client of [
         ...sockets.clients,
         ...handoffSockets.clients,

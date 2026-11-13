@@ -1205,6 +1205,7 @@ describe("fake engine", () => {
         memory: "",
         skills: [],
         skillsDir: "/skills",
+        connectors: [],
       },
       onDelta: () => {},
       onToolStart: () => {},

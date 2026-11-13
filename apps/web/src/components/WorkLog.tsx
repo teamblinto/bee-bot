@@ -10,6 +10,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import type { Connector } from "@beebot/contracts";
 import { createElement, type ReactNode, useState } from "react";
 
 import { liveThoughtLine, toolRowLabel, visibleDetail } from "../labels";
@@ -37,7 +38,15 @@ function Elapsed({ startedAt }: { startedAt: string }) {
   );
 }
 
-function ToolRow({ tool, live }: { tool: LiveTool; live: boolean }) {
+function ToolRow({
+  tool,
+  live,
+  connectors,
+}: {
+  tool: LiveTool;
+  live: boolean;
+  connectors: readonly Connector[];
+}) {
   const running = live && tool.status === "running";
   const failed = tool.status === "failed";
   return (
@@ -49,7 +58,7 @@ function ToolRow({ tool, live }: { tool: LiveTool; live: boolean }) {
     >
       {createElement(toolIcon(tool.name), { ...iconProps, className: "shrink-0 opacity-70" })}
       <span className={`min-w-0 truncate ${running ? "live-tool-shine" : ""}`}>
-        {visibleDetail(toolRowLabel(tool))}
+        {visibleDetail(toolRowLabel(tool, connectors))}
       </span>
       {failed && (
         <>
@@ -66,10 +75,13 @@ export function WorkGroup({
   label,
   tools,
   live = false,
+  connectors = [],
 }: {
   label: ReactNode;
   tools: LiveTool[];
   live?: boolean;
+  // Names a connector tool by its app.
+  connectors?: readonly Connector[];
 }) {
   const [open, setOpen] = useState(live);
   const failures = tools.filter(({ status }) => status === "failed").length;
@@ -101,7 +113,7 @@ export function WorkGroup({
       {open && tools.length > 0 && (
         <ul className="flex max-h-72 min-w-0 flex-col overflow-y-auto">
           {tools.map((tool) => (
-            <ToolRow key={tool.id} tool={tool} live={live} />
+            <ToolRow key={tool.id} tool={tool} live={live} connectors={connectors} />
           ))}
         </ul>
       )}

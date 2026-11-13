@@ -25,6 +25,7 @@ import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
   cliVersion,
+  connectorsUrl,
   personaText,
   type RunTurn,
   toolDetail,
@@ -150,13 +151,22 @@ export const prepareCodexHome = (codexHome: string, credentialLink: string | und
   credentialLink ?? "",
 ];
 
-const beeArgs = (url: string) =>
+// `connectors` has no `enabled_tools`: its list follows the owner's grants, and beebotd checks
+// every call. It is mounted only for a bot with a grant.
+const beeArgs = (url: string, connectors: string | undefined) =>
   [
     `mcp_servers.bee.url=${JSON.stringify(url)}`,
     `mcp_servers.bee.bearer_token_env_var="${tokenVariable}"`,
     `mcp_servers.bee.enabled_tools=${JSON.stringify(beeTools)}`,
     // Otherwise every memory call raises an elicitation, which is refused like any other.
     'mcp_servers.bee.default_tools_approval_mode="approve"',
+    ...(connectors
+      ? [
+          `mcp_servers.connectors.url=${JSON.stringify(connectors)}`,
+          `mcp_servers.connectors.bearer_token_env_var="${tokenVariable}"`,
+          'mcp_servers.connectors.default_tools_approval_mode="approve"',
+        ]
+      : []),
     `shell_environment_policy.exclude=["${tokenVariable}"]`,
   ].flatMap((setting) => ["-c", setting]);
 
@@ -485,7 +495,7 @@ const ConfigRead = z.object({
 
 // Dotted keys: a `skills` or `mcp_servers` table here would replace the whole table, which drops
 // bee and turns the bundled skills back on. Undefined means the isolation can't be vouched for.
-function threadConfig(skills: unknown, config: unknown) {
+function threadConfig(skills: unknown, config: unknown, connectors: boolean) {
   const skillNames = SkillList.safeParse(skills)
     .data?.data.flatMap((entry) => entry.skills)
     .map(({ name }) => ({ name, enabled: false }));
@@ -496,7 +506,8 @@ function threadConfig(skills: unknown, config: unknown) {
   const projectActive = read.layers.some(
     ({ name, disabledReason }) => name.type === "project" && !disabledReason,
   );
-  const servers = Object.keys(read.config.mcp_servers ?? {}).filter((name) => name !== "bee");
+  const ours = new Set(["bee", ...(connectors ? ["connectors"] : [])]);
+  const servers = Object.keys(read.config.mcp_servers ?? {}).filter((name) => !ours.has(name));
   if (projectActive || servers.some((name) => !/^[\w-]+$/.test(name))) {
     return undefined;
   }
@@ -695,7 +706,10 @@ async function startInBox(
     argv: [
       ...command,
       ...boxLaunchArgs(layout.workdir, launch.lane, layout.apiLane),
-      ...beeArgs(layout.beeUrl(permissions.url)),
+      ...beeArgs(
+        layout.beeUrl(permissions.url),
+        launch.connectors.length > 0 ? layout.beeUrl(connectorsUrl(permissions.url)) : undefined,
+      ),
     ],
     env: { ...layout.env, CODEX_HOME: codexHome, [tokenVariable]: permissions.token },
     cwd: layout.workdir,
@@ -855,10 +869,18 @@ export function createCodexRunTurn({
     }
     const child = box
       ? await startInBox(box, command, dataDir, launch, permissions)
-      : hostProcess(command, [...launchArgs(cwd, launch.lane), ...beeArgs(permissions.url)], cwd, {
-          ...childEnv(),
-          [tokenVariable]: permissions.token,
-        });
+      : hostProcess(
+          command,
+          [
+            ...launchArgs(cwd, launch.lane),
+            ...beeArgs(
+              permissions.url,
+              launch.connectors.length > 0 ? connectorsUrl(permissions.url) : undefined,
+            ),
+          ],
+          cwd,
+          { ...childEnv(), [tokenVariable]: permissions.token },
+        );
     if (!child) {
       release?.();
       return { kind: "failed" };
@@ -892,7 +914,7 @@ export function createCodexRunTurn({
       }
       const skills = await server.request("skills/list", { cwds: [cwd], forceReload: true });
       const read = await server.request("config/read", { cwd, includeLayers: true });
-      const config = threadConfig(skills?.result, read?.result);
+      const config = threadConfig(skills?.result, read?.result, launch.connectors.length > 0);
       if (!config) {
         return { kind: "failed" };
       }

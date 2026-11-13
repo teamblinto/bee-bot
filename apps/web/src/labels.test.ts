@@ -1,4 +1,4 @@
-import type { EngineStatus, MemoryItem, Run } from "@beebot/contracts";
+import type { Connector, EngineStatus, MemoryItem, Run } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
 import {
@@ -63,6 +63,16 @@ it("labels tool rows by state, and by name alone after a reload", () => {
   expect(toolRowLabel({ ...read, status: "done" })).toBe("Read notes.md");
   expect(toolRowLabel({ ...read, detail: null, status: "done" })).toBe("Read a file");
   expect(toolRowLabel({ name: "constructor", detail: null, status: "done" })).toBe("constructor");
+});
+
+it("names a connector tool by its app, even when one slug starts another", () => {
+  const app = (slug: string, name: string) => ({ slug, name }) as Connector;
+  const connectors = [app("git", "Git"), app("github", "GitHub")];
+  const tool = { name: "mcp__connectors__github_list_issues", detail: null };
+  expect(toolRowLabel({ ...tool, status: "running" }, connectors)).toBe(
+    "Using GitHub · list_issues",
+  );
+  expect(toolRowLabel({ ...tool, status: "done" }, connectors)).toBe("Used GitHub · list_issues");
 });
 
 it("announces status changes and takes the newest thought line", () => {

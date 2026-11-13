@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 34;
+export const protocolVersion = 35;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -685,6 +685,87 @@ export type Skill = z.infer<typeof Skill>;
 export const skillUsable = ({ sha256, reviewedSha256 }: Pick<Skill, "sha256" | "reviewedSha256">) =>
   sha256 !== null && sha256 === reviewedSha256;
 
+// What both engines call a tool of the `connectors` MCP server.
+export const connectorToolPrefix = "mcp__connectors__";
+// That server names a tool `<slug>_<tool>`, so a slug never holds an underscore.
+export const ConnectorSlug = z.string().regex(/^[a-z][a-z0-9]{0,15}$/);
+export const ConnectorStatus = z.enum([
+  "ok",
+  "needs_sign_in",
+  "needs_client",
+  "unreachable",
+  "error",
+]);
+export type ConnectorStatus = z.infer<typeof ConnectorStatus>;
+export const ConnectorAuth = z.enum(["none", "bearer", "headers", "oauth"]);
+export type ConnectorAuth = z.infer<typeof ConnectorAuth>;
+
+// A tool as the server listed it. `excluded` says why Bee leaves it out, such as a schema too large.
+export const ConnectorTool = z.object({
+  name: z.string(),
+  description: z.string(),
+  inputSchema: z.record(z.string(), z.unknown()),
+  readOnlyHint: z.boolean(),
+  destructiveHint: z.boolean(),
+  sha256: z.string(),
+  excluded: z.string().nullable(),
+});
+export type ConnectorTool = z.infer<typeof ConnectorTool>;
+
+// `allowWrites` are the write tools that run without asking the owner.
+export const ConnectorGrant = z.object({
+  botId: z.string(),
+  tools: z.union([z.literal("*"), z.array(z.string())]),
+  allowWrites: z.array(z.string()),
+});
+export type ConnectorGrant = z.infer<typeof ConnectorGrant>;
+
+// Never a secret: only whether one is saved, and the header and env names it has values for.
+// `ownerBotId` set makes it that bot's alone. Tools reach a bot only while `toolsHash` is
+// `reviewedHash`, and a tool is read-only only if the owner marked it so in `readOnlyTools`.
+export const Connector = z.object({
+  id: z.string(),
+  slug: ConnectorSlug,
+  name: z.string(),
+  transport: z.enum(["http", "stdio"]),
+  url: z.string().nullable(),
+  command: z.string().nullable(),
+  args: z.array(z.string()),
+  auth: ConnectorAuth,
+  ownerBotId: z.string().nullable(),
+  readsPrivate: z.boolean(),
+  status: ConnectorStatus,
+  lastError: z.string().nullable(),
+  tools: z.array(ConnectorTool),
+  toolsHash: z.string().nullable(),
+  reviewedHash: z.string().nullable(),
+  // What the owner saw at the last review, to show what changed since.
+  reviewedTools: z.array(z.object({ name: z.string(), sha256: z.string() })),
+  readOnlyTools: z.array(z.string()),
+  hasSecret: z.boolean(),
+  headerKeys: z.array(z.string()),
+  envKeys: z.array(z.string()),
+  authStatus: z.enum(["not_needed", "missing", "saved", "signed_in", "signed_out"]),
+  grants: z.array(ConnectorGrant),
+  refreshedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type Connector = z.infer<typeof Connector>;
+
+export const connectorUsable = ({
+  toolsHash,
+  reviewedHash,
+}: Pick<Connector, "toolsHash" | "reviewedHash">) =>
+  toolsHash !== null && toolsHash === reviewedHash;
+
+const ConnectorName = z.string().trim().min(1).max(80);
+const ConnectorUrl = z.string().trim().min(1).max(2048);
+const ConnectorSecret = z.string().min(1).max(8192);
+const SecretMap = z
+  .record(z.string().min(1).max(256), ConnectorSecret)
+  .refine((map) => Object.keys(map).length <= 32);
+const ToolNames = z.array(z.string().max(256)).max(1000);
+
 const MessageBody = z.string().trim().min(1).max(32_000);
 export const maxAttachments = 10;
 const RoutineName = z.string().trim().min(1).max(80);
@@ -802,6 +883,7 @@ export const ChatState = z.object({
   usageLimits: z.array(UsageLimits),
   routines: z.array(Routine),
   skills: z.array(Skill),
+  connectors: z.array(Connector),
   // Only the latest of each routine. An open card always is its routine's latest.
   firings: z.array(RoutineFiring),
   rooms: z.array(Room),
@@ -834,6 +916,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("routine.deleted"), routineId: z.string() }),
   z.object({ type: z.literal("skill.changed"), skill: Skill }),
   z.object({ type: z.literal("skill.deleted"), name: z.string() }),
+  z.object({ type: z.literal("connector.changed"), connector: Connector }),
+  z.object({ type: z.literal("connector.deleted"), connectorId: z.string() }),
   z.object({ type: z.literal("firing.changed"), firing: RoutineFiring }),
   z.object({ type: z.literal("room.changed"), room: Room }),
   z.object({ type: z.literal("task.changed"), task: Task }),
@@ -1043,6 +1127,58 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("review-skill"), name: SkillName, sha256: z.string() }),
   z.object({ type: z.literal("set-bot-skill"), botId: z.uuid(), name: SkillName, on: z.boolean() }),
   z.object({ type: z.literal("delete-skill"), name: SkillName }),
+  // A remote MCP server by URL. A local one comes only from `import-connectors`.
+  z.object({
+    type: z.literal("add-connector"),
+    name: ConnectorName,
+    url: ConnectorUrl,
+    ownerBotId: z.uuid().nullable().optional(),
+    bearer: ConnectorSecret.optional(),
+    headers: SecretMap.optional(),
+  }),
+  // A pasted `{"mcpServers": {...}}` block, as Claude Desktop, Cursor and Claude Code write it.
+  z.object({
+    type: z.literal("import-connectors"),
+    json: z
+      .string()
+      .min(1)
+      .max(256 * 1024),
+    ownerBotId: z.uuid().nullable().optional(),
+  }),
+  // Missing keeps the value. A new URL needs a new sign-in.
+  z.object({
+    type: z.literal("update-connector"),
+    connectorId: z.uuid(),
+    name: ConnectorName.optional(),
+    url: ConnectorUrl.optional(),
+    readsPrivate: z.boolean().optional(),
+  }),
+  // `toolsHash` is the list the owner was shown: one that changed since can't be marked seen.
+  z.object({
+    type: z.literal("review-connector"),
+    connectorId: z.uuid(),
+    toolsHash: z.string(),
+    readOnly: ToolNames,
+  }),
+  // Replaces what is saved. `bearer` or `headers` for a remote server, `env` for a local one.
+  z.object({
+    type: z.literal("set-connector-secret"),
+    connectorId: z.uuid(),
+    bearer: ConnectorSecret.optional(),
+    headers: SecretMap.optional(),
+    env: SecretMap.optional(),
+  }),
+  z.object({ type: z.literal("refresh-connector"), connectorId: z.uuid() }),
+  z.object({ type: z.literal("disconnect-connector"), connectorId: z.uuid() }),
+  z.object({ type: z.literal("delete-connector"), connectorId: z.uuid() }),
+  z.object({
+    type: z.literal("set-bot-connector"),
+    botId: z.uuid(),
+    connectorId: z.uuid(),
+    on: z.boolean(),
+    tools: z.union([z.literal("*"), ToolNames]),
+    allowWrites: ToolNames,
+  }),
   z.object({ type: z.literal("skip-firing"), firingId: z.uuid() }),
   // Box mode (R17). On a hand_off, "approve" means the owner did it themselves.
   z.object({

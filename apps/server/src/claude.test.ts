@@ -7,9 +7,11 @@ import { Effort, type EngineLane, EngineStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  boxTurnArgs,
   childEnv,
   createClaudeRunTurn,
   createClaudeSummarize,
+  mcpServers,
   modelsFromInitialize,
   probeEngine,
   probeUsage,
@@ -44,6 +46,7 @@ const launch: BotLaunch = {
   memory: "",
   skills: [],
   skillsDir: "/skills",
+  connectors: [],
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };
@@ -404,6 +407,44 @@ describe("a turn", () => {
         ],
       },
     });
+  });
+
+  it("mounts the connectors server, allowed as a whole, only for a bot with a grant", () => {
+    const flag = (list: string[], name: string) => list[list.indexOf(name) + 1] ?? "";
+    const allow = (list: string[]) => JSON.parse(flag(list, "--settings")).permissions.allow;
+    expect(allow(turnArgs("p", "s", false, plain, "c"))).not.toContain("mcp__connectors");
+    const granted = { ...plain, connectors: ["Notion"] };
+    expect(allow(turnArgs("p", "s", false, granted, "c"))).toContain("mcp__connectors");
+
+    const urls = {
+      mcp: "http://proxy/bee/mcp",
+      hook: "h",
+      connectors: "http://proxy/bee/mcp/connectors",
+    };
+    const box = (choice: EngineChoice & { connectors?: string[] }) => {
+      const args = boxTurnArgs("p", "s", false, choice, urls);
+      return {
+        tools: flag(args, "--allowedTools"),
+        config: JSON.parse(flag(args, "--mcp-config")),
+      };
+    };
+    expect(box(plain).tools.split(",")).not.toContain("mcp__connectors");
+    expect(Object.keys(box(plain).config.mcpServers)).toEqual(["bee"]);
+    expect(box(granted).tools.split(",")).toContain("mcp__connectors");
+    expect(box(granted).config.mcpServers.connectors).toEqual({
+      type: "http",
+      timeout: 900_000,
+      url: urls.connectors,
+      headers: { Authorization: "Bearer ${BEE_RUN_TOKEN}" },
+    });
+
+    const host = mcpServers(
+      "http://127.0.0.1:1/mcp",
+      "http://127.0.0.1:1/mcp/connectors",
+      "Bearer x",
+    );
+    expect(Object.keys(host)).toEqual(["bee", "connectors"]);
+    expect(host.connectors?.url).toBe("http://127.0.0.1:1/mcp/connectors");
   });
 
   it("starts a session by ID and continues it with --resume", () => {

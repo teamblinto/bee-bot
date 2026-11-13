@@ -5,9 +5,9 @@ import { z } from "zod";
 import type { Decision } from "./approvals.ts";
 import { sendJson } from "./mcp.ts";
 
-// Bee's own tools are checked where they run, on /mcp, so the hook leaves them to the CLI's
-// allowlist.
-const beeToolPrefix = "mcp__bee__";
+// Bee's own tools and connectors' are checked where they run, on /mcp and /mcp/connectors, so the
+// hook leaves them to the CLI's allowlist.
+const checkedElsewhere = ["mcp__bee__", "mcp__connectors__"];
 
 const HookInput = z.object({
   hook_event_name: z.literal("PreToolUse"),
@@ -45,7 +45,7 @@ export async function answerPreToolUse(
   approve: (args: unknown, closed: AbortSignal) => Promise<Decision>,
 ) {
   const input = parseHook(body);
-  if (input?.tool_name.startsWith(beeToolPrefix)) {
+  if (input && checkedElsewhere.some((prefix) => input.tool_name.startsWith(prefix))) {
     sendJson(response, 200, {});
     return;
   }

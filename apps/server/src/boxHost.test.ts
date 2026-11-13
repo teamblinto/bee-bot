@@ -605,6 +605,7 @@ describe.skipIf(!available || !keyFile)(
           memory: "",
           skills: [],
           skillsDir: "/skills",
+          connectors: [],
           projectPath: null,
           engineAccountId: "claude",
           lane: "api_key",

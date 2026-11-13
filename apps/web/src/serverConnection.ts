@@ -135,6 +135,10 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
           ),
           boxes: chat.boxes.filter(mine),
           continuations: chat.continuations.filter(mine),
+          // Its own connectors went with it, and its grants on the shared ones.
+          connectors: chat.connectors
+            .filter(({ ownerBotId }) => ownerBotId !== botId)
+            .map((connector) => ({ ...connector, grants: connector.grants.filter(mine) })),
         },
       };
     }
@@ -204,6 +208,18 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     case "skill.deleted": {
       const skills = chat.skills.filter(({ name }) => name !== event.name);
       return { ...state, chat: { ...chat, skills } };
+    }
+    case "connector.changed": {
+      const { connector } = event;
+      const others = chat.connectors.filter(({ id }) => id !== connector.id);
+      const connectors = [...others, connector].sort((a, b) =>
+        a.name === b.name ? (a.slug < b.slug ? -1 : 1) : a.name < b.name ? -1 : 1,
+      );
+      return { ...state, chat: { ...chat, connectors } };
+    }
+    case "connector.deleted": {
+      const connectors = chat.connectors.filter(({ id }) => id !== event.connectorId);
+      return { ...state, chat: { ...chat, connectors } };
     }
     case "firing.changed": {
       // Snapshots hold each routine's latest only, and replay must land on the same state.
@@ -375,6 +391,7 @@ let state: ConnectionState = {
     usageLimits: [],
     routines: [],
     skills: [],
+    connectors: [],
     firings: [],
     rooms: [],
 
@@ -700,6 +717,18 @@ const errorSentences: Record<string, string> = {
   skill_bad_description: "The skill needs a description of at most 1024 characters.",
   skill_not_reviewed: "Read the skill's SKILL.md and mark it reviewed before turning it on.",
   skill_changed: "This skill changed since you reviewed it. Review it again first.",
+  connector_bad_url: "That isn't a URL Bee Bot can use.",
+  connector_url_not_https: "Use an https:// address. Plain http works only for this computer.",
+  connector_url_credentials: "Take the name and password out of the URL, and save a token instead.",
+  connector_private_address: "That address is on a private network, which bots may not reach.",
+  connector_bad_header:
+    "One of those headers isn't allowed: Host, Cookie, Proxy-* and Sec-* headers, or values with line breaks.",
+  connector_bad_env: "An environment variable name must be letters, digits and underscores.",
+  connector_bad_json: 'That isn\'t an mcpServers block. Paste JSON like {"mcpServers": {...}}.',
+  connector_bad_entry: "That entry needs a url, or a command for a local server.",
+  connector_slug_taken: "A connector with that name is already added.",
+  connector_changed: "Its tools changed while you were reviewing. Review the new list.",
+  connector_private: "That connector belongs to another bot.",
 };
 
 function errorSentence(body: unknown) {

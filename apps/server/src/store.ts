@@ -46,6 +46,7 @@ import { openPolicy } from "./policy.ts";
 import { openRooms } from "./rooms.ts";
 import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
 import { openSkills, skillsDir } from "./skills.ts";
+import { openConnectors } from "./connectors.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
 import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
@@ -738,6 +739,42 @@ export const migrations: Array<{
     // Bot IDs the owner picked from the @ menu, which also say whom a chain may reach.
     sql: "ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'",
   },
+  {
+    name: "connectors",
+    // Outside MCP servers. Secrets live in vault_entries as `connector:<id>:secret`, so these rows
+    // hold only the header and env names. `owner_bot_id` set keeps one to that bot alone.
+    sql: `CREATE TABLE connectors (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      transport TEXT NOT NULL CHECK (transport IN ('http', 'stdio')),
+      url TEXT,
+      command TEXT,
+      args TEXT NOT NULL DEFAULT '[]',
+      auth TEXT NOT NULL CHECK (auth IN ('none', 'bearer', 'headers', 'oauth')),
+      header_keys TEXT NOT NULL DEFAULT '[]',
+      env_keys TEXT NOT NULL DEFAULT '[]',
+      owner_bot_id TEXT REFERENCES bots (id),
+      reads_private INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL
+        CHECK (status IN ('ok', 'needs_sign_in', 'needs_client', 'unreachable', 'error')),
+      last_error TEXT,
+      tools_json TEXT NOT NULL DEFAULT '[]',
+      tools_hash TEXT,
+      reviewed_hash TEXT,
+      reviewed_tools_json TEXT NOT NULL DEFAULT '[]',
+      read_only_tools TEXT NOT NULL DEFAULT '[]',
+      refreshed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE bot_connectors (
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      connector_id TEXT NOT NULL REFERENCES connectors (id),
+      tools TEXT NOT NULL,
+      allow_writes TEXT NOT NULL DEFAULT '[]',
+      PRIMARY KEY (bot_id, connector_id)
+    );`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1097,6 +1134,12 @@ export function openEventStore(dataDir: string) {
     "DELETE FROM boxes WHERE bot_id = $bot",
     "DELETE FROM takeovers WHERE bot_id = $bot",
     "DELETE FROM bot_skills WHERE bot_id = $bot",
+    `DELETE FROM bot_connectors WHERE bot_id = $bot
+       OR connector_id IN (SELECT id FROM connectors WHERE owner_bot_id = $bot)`,
+    `DELETE FROM vault_entries WHERE name IN
+       (SELECT 'connector:' || id || ':secret' FROM connectors WHERE owner_bot_id = $bot
+        UNION SELECT 'connector:' || id || ':oauth' FROM connectors WHERE owner_bot_id = $bot)`,
+    "DELETE FROM connectors WHERE owner_bot_id = $bot",
     "DELETE FROM room_rounds WHERE room_id = $dm",
     "DELETE FROM attachments WHERE room_id = $dm",
     "DELETE FROM messages WHERE room_id = $dm",
@@ -2239,6 +2282,7 @@ export function openEventStore(dataDir: string) {
   const attachmentStore = openAttachments(db);
   const skills = openSkills(db, tx, dataDir);
   skills.rebuildSkills();
+  const connectors = openConnectors(db, tx, appendAudit);
   const continuations = openContinuations(db, tx);
   const takeovers = openTakeovers(db, tx);
   const { vaultStatus } = openVaultEntries(db);
@@ -2297,6 +2341,7 @@ export function openEventStore(dataDir: string) {
     rooms,
     tasks,
     boxes,
+    connectors,
     continuations,
     takeovers,
     // A restart releases every takeover, so none can leave its bot paused.
@@ -2343,6 +2388,7 @@ export function openEventStore(dataDir: string) {
         .map(({ accountId }) => usageLimits(accountId)),
       routines: z.array(RoutineRow).parse(selectRoutines.all()),
       skills: skills.listSkills(),
+      connectors: connectors.listConnectors(),
       firings: z.array(RoutineFiring).parse(selectLatestFirings.all()),
       rooms: rooms.listRooms(),
       tasks: tasks.openTasks(),
@@ -2769,6 +2815,9 @@ export function openEventStore(dataDir: string) {
             memory,
             skills: skills.launchSkills(run.botId),
             skillsDir: boundary === "box" ? boxSkillsDir : skillsDir(dataDir),
+            connectors: connectors
+              .connectorGrants(run.botId)
+              .map(({ connector }) => connector.name),
           },
         };
       }),

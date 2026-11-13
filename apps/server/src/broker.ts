@@ -22,6 +22,8 @@ export type ToolRule = {
   humanOnly?: boolean;
   // The input can hold what a person typed or a credential, so not even its digest is audited.
   typed?: boolean;
+  // A side effect waits for the owner at any access level, such as a connector's write.
+  ask?: boolean;
 };
 
 const legs = (...names: Array<keyof ToolLabels>): ToolLabels => ({
@@ -176,19 +178,19 @@ export const decide: Decide = (call, { access, manifest, session, attended }) =>
   ) {
     return { kind: "deny", reason: "nobody_watching" };
   }
-  if (access !== "full" && call.labels.sideEffect && screenGrants.has(call.grant)) {
+  if (call.labels.sideEffect && (call.ask || (access !== "full" && screenGrants.has(call.grant)))) {
     return { kind: "approve" };
   }
   return { kind: "allow" };
 };
 
-// Default deny: a tool missing from the table is refused.
+// Default deny: a tool missing from the table is refused. A connector's tool brings its own rule.
 export function decideTool(
   call: { botId: string; runId: string; tool: string },
   context: PolicyContext,
   decideCall: Decide = decide,
+  rule = ruleFor(call.tool),
 ): PolicyDecision {
-  const rule = ruleFor(call.tool);
   return rule
     ? decideCall({ ...call, ...rule }, context)
     : { kind: "deny", reason: "unknown_tool" };

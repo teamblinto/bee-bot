@@ -1,5 +1,8 @@
 import {
   type Approval,
+  type Connector,
+  connectorToolPrefix,
+  connectorUsable,
   type ApprovalChange,
   type ApprovalTool,
   type Bot,
@@ -295,7 +298,46 @@ const toolVerbs = new Map([
   ["mcp__bee__computer_window_drag", { running: "Dragging", done: "", bare: "Dragged" }],
 ]);
 
-export function toolRowLabel({ name, detail, status }: Omit<LiveTool, "id">) {
+// The app a connector tool belongs to, by its slug, and the tool's own name.
+function connectorTool(name: string, connectors: readonly Connector[]) {
+  if (!name.startsWith(connectorToolPrefix)) {
+    return undefined;
+  }
+  const exposed = name.slice(connectorToolPrefix.length);
+  const connector = connectors.find(({ slug }) => exposed.startsWith(`${slug}_`));
+  return connector
+    ? { app: connector.name, tool: exposed.slice(connector.slug.length + 1) }
+    : { app: exposed.split("_")[0] ?? exposed, tool: exposed.split("_").slice(1).join("_") };
+}
+
+export function connectorStatusLine(connector: Connector) {
+  const statuses = {
+    ok: "",
+    needs_sign_in: "Needs a sign-in or a valid token.",
+    needs_client: "Needs a client ID from the app's developer settings.",
+    unreachable: "Can't be reached right now.",
+    error: "Doesn't work.",
+  };
+  const status = statuses[connector.status];
+  if (status) {
+    return connector.lastError ? `${status} ${connector.lastError}` : status;
+  }
+  if (connector.reviewedHash === null) {
+    return `${connector.tools.length} tools, not reviewed yet.`;
+  }
+  return connectorUsable(connector)
+    ? `${connector.tools.length} tools, reviewed.`
+    : "Its tools changed since your review, so bots don't get them until you review again.";
+}
+
+export function toolRowLabel(
+  { name, detail, status }: Omit<LiveTool, "id">,
+  connectors: readonly Connector[] = [],
+) {
+  const app = connectorTool(name, connectors);
+  if (app) {
+    return `${status === "running" ? "Using" : "Used"} ${app.app}${app.tool ? ` · ${app.tool}` : ""}`;
+  }
   const verbs = toolVerbs.get(name);
   if (!verbs) {
     return name;
@@ -307,13 +349,18 @@ export function toolRowLabel({ name, detail, status }: Omit<LiveTool, "id">) {
 }
 
 // For screen readers, which get status changes, not every delta.
-export function liveStatusLine(thinking: boolean, tools: LiveTool[], replying: boolean) {
+export function liveStatusLine(
+  thinking: boolean,
+  tools: LiveTool[],
+  replying: boolean,
+  connectors: readonly Connector[] = [],
+) {
   const last = tools.at(-1);
   if (last?.status === "failed") {
-    return `${toolRowLabel(last)} failed`;
+    return `${toolRowLabel(last, connectors)} failed`;
   }
   if (last?.status === "running") {
-    return toolRowLabel(last);
+    return toolRowLabel(last, connectors);
   }
   if (thinking) {
     return "Thinking";

@@ -581,7 +581,11 @@ describe("planted hooks", { timeout: 30_000 }, () => {
     const choice = { model: "sonnet", effort: null, mode: "build" } as const;
     for (const args of [
       turnArgs("persona.md", "s", true, choice, "mcp.json"),
-      boxTurnArgs("persona.md", "s", true, choice, { mcp: "http://m", hook: "http://h" }),
+      boxTurnArgs("persona.md", "s", true, choice, {
+        mcp: "http://m",
+        hook: "http://h",
+        connectors: "http://c",
+      }),
     ]) {
       expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
       expect(args).toContain("--strict-mcp-config");
