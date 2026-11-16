@@ -55,6 +55,7 @@ function createWindow() {
   const window = new BrowserWindow({
     show: false,
     autoHideMenuBar: true,
+    icon: beeIcon(256, true),
     minWidth: 360,
     minHeight: 620,
     webPreferences: {
@@ -126,22 +127,50 @@ function openWindow() {
   mainWindow.focus();
 }
 
-// A honey-coloured dot, drawn here so the tray needs no image asset.
-function trayIcon() {
-  const size = 32;
+// The Figma pixel bee (12x12): A is the amber body, K the ink eyes and stripes.
+const beeGlyph = [
+  "...A....A...",
+  "....A..A....",
+  "..AAAAAAAA..",
+  ".AAAAAAAAAA.",
+  ".AAKAAAAKAA.",
+  ".AAKAAAAKAA.",
+  "AAAAAAAAAAAA",
+  ".KKKKKKKKKK.",
+  ".AAAAAAAAAA.",
+  ".KKKKKKKKKK.",
+  "..AAAAAAAA..",
+  "..A..AA..A..",
+];
+
+// Drawn here so the window and tray need no image asset. Pixels are BGRA, as createFromBitmap expects.
+// With `tile`, it's the app icon: the bee on an ink rounded square, as in build/icon.png.
+function beeIcon(size: number, tile: boolean, scaleFactor = 1) {
   const pixels = Buffer.alloc(size * size * 4);
+  const ink = [0x1a, 0x1a, 0x1a, 0xff];
+  const amber = [0x00, 0xb8, 0xea, 0xff];
+  const inset = tile ? size * (22.75 / 128) : size / 8;
+  const cell = (size - inset * 2) / 12;
+  const radius = size * (28 / 128);
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
-      if (Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) <= size / 2 - 1) {
-        pixels.set([0x1a, 0xb3, 0xf5, 0xff], (y * size + x) * 4);
+      const glyph =
+        beeGlyph[Math.floor((y + 0.5 - inset) / cell)]?.[Math.floor((x + 0.5 - inset) / cell)];
+      const cx = Math.min(Math.max(x + 0.5, radius), size - radius);
+      const cy = Math.min(Math.max(y + 0.5, radius), size - radius);
+      const inTile = tile && Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= radius;
+      if (glyph === "A") {
+        pixels.set(amber, (y * size + x) * 4);
+      } else if (glyph === "K" || inTile) {
+        pixels.set(ink, (y * size + x) * 4);
       }
     }
   }
-  return nativeImage.createFromBitmap(pixels, { width: size, height: size, scaleFactor: 2 });
+  return nativeImage.createFromBitmap(pixels, { width: size, height: size, scaleFactor });
 }
 
 function createTray() {
-  tray = new Tray(trayIcon());
+  tray = new Tray(beeIcon(32, false, 2));
   tray.setToolTip("Bee Bot");
   tray.setContextMenu(
     Menu.buildFromTemplate([
