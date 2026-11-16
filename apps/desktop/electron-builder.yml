@@ -5,14 +5,23 @@ extraMetadata:
 artifactName: Bee-Bot-${version}-${arch}.${ext}
 npmRebuild: false
 afterPack: scripts/check-box-image.mjs
+publish:
+  provider: github
+  owner: teamblinto
+  repo: bee-bot-releases
+  releaseType: draft
 directories:
   output: release
+# Source maps stay in dist for debugging but never ship: the server map embeds the original source.
 files:
   - dist-electron/**
+  - "!**/*.map"
   - from: ../server/dist
     to: server
+    filter: ["!**/*.map"]
   - from: ../web/dist
     to: web
+    filter: ["!**/*.map"]
 extraResources:
   - from: ../../THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
@@ -41,3 +50,9 @@ win:
   extraResources:
     - from: vendor/cua-driver/cua-driver.exe
       to: cua-driver/cua-driver.exe
+mac:
+  target: [dmg, zip]
+  category: public.app-category.productivity
+linux:
+  target: AppImage
+  category: Utility

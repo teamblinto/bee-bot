@@ -1257,3 +1257,11 @@ export const ProtocolNotice = z.object({
   serverProtocolVersion: z.number().int(),
 });
 export type ProtocolNotice = z.infer<typeof ProtocolNotice>;
+
+// What the desktop app's updater is doing, sent from its main process to the web app over the preload.
+export type DesktopUpdateState =
+  | { status: "disabled" }
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "downloading"; version: string; percent: number }
+  | { status: "ready"; version: string };

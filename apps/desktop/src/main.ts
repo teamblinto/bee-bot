@@ -20,6 +20,7 @@ import {
 
 import { watchNotices } from "./notices.ts";
 import { sendIdle, sendPower, startServer, stopServer } from "./server.ts";
+import { checkForUpdates, quitAndInstall, startUpdates, updateState } from "./updates.ts";
 import { loadVaultKey } from "./vault.ts";
 
 const devServerUrl = app.isPackaged ? undefined : process.env.VITE_DEV_SERVER_URL;
@@ -44,6 +45,7 @@ const stopShortcut = "Ctrl+Alt+Shift+X";
 let connection: Awaited<ReturnType<typeof startServer>>;
 let serverStopped = false;
 let quitting = false;
+let installingUpdate = false;
 let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let stopNotices: (() => void) | undefined;
@@ -169,16 +171,30 @@ function beeIcon(size: number, tile: boolean, scaleFactor = 1) {
   return nativeImage.createFromBitmap(pixels, { width: size, height: size, scaleFactor });
 }
 
+function trayMenu() {
+  const { status } = updateState();
+  return Menu.buildFromTemplate([
+    { label: "Open Bee Bot", click: openWindow },
+    ...(status === "ready" ? [{ label: "Restart to update", click: installUpdate }] : []),
+    ...(status === "idle"
+      ? [{ label: "Check for updates…", click: () => checkForUpdates(true) }]
+      : []),
+    { label: "Quit", click: () => app.quit() },
+  ]);
+}
+
 function createTray() {
   tray = new Tray(beeIcon(32, false, 2));
   tray.setToolTip("Bee Bot");
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "Open Bee Bot", click: openWindow },
-      { label: "Quit", click: () => app.quit() },
-    ]),
-  );
+  tray.setContextMenu(trayMenu());
   tray.on("click", openWindow);
+}
+
+function installUpdate() {
+  if (updateState().status === "ready") {
+    installingUpdate = true;
+    app.quit();
+  }
 }
 
 // Listening keeps Electron from quitting with the last window: the tray decides when to quit.
@@ -206,8 +222,13 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   stopNotices?.();
   clearInterval(idleTimer);
+  // The installer force-kills every running Bee Bot.exe, the server included, so it starts only
+  // once the server has closed its database.
   void stopServer().finally(() => {
     serverStopped = true;
+    if (installingUpdate) {
+      quitAndInstall();
+    }
     app.quit();
   });
 });
@@ -248,6 +269,12 @@ async function start() {
   }
   createTray();
   createWindow();
+  startUpdates((state) => {
+    tray?.setContextMenu(trayMenu());
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send("update-state-changed", state);
+    }
+  });
   stopNotices = watchNotices(connection.url, connection.token, ({ title, body }) => {
     if (!Notification.isSupported() || BrowserWindow.getFocusedWindow()) {
       return;
@@ -269,6 +296,9 @@ ipcMain.handle("pick-folder", async (event) => {
     : dialog.showOpenDialog(options));
   return picked.canceled ? null : (picked.filePaths[0] ?? null);
 });
+
+ipcMain.handle("update-state", () => updateState());
+ipcMain.handle("update-install", () => installUpdate());
 
 // One server per database: a second one would write events this one never broadcasts.
 if (app.requestSingleInstanceLock()) {

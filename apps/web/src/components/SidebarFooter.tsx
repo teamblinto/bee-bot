@@ -1,6 +1,16 @@
-import { CircleCheck, CircleX, LoaderCircle, Moon, Sun, SunMoon } from "lucide-react";
+import {
+  CircleCheck,
+  CircleX,
+  Download,
+  LoaderCircle,
+  Moon,
+  RefreshCw,
+  Sun,
+  SunMoon,
+} from "lucide-react";
 import { useState } from "react";
 
+import { useDesktopUpdate } from "../desktop";
 import { connectionLines, engineFix } from "../labels";
 import { readTheme, saveTheme, type Theme } from "../preferences";
 import type { ConnectionState } from "../serverConnection";
@@ -53,6 +63,31 @@ function ThemeSwitch() {
       ))}
     </div>
   );
+}
+
+function UpdateLine() {
+  const update = useDesktopUpdate();
+  if (update?.status === "downloading") {
+    return (
+      <p className="flex items-center gap-2 text-caption text-ink-secondary">
+        <Download {...iconProps} size={12} className="shrink-0" />
+        Downloading update · {Math.round(update.percent)}%
+      </p>
+    );
+  }
+  if (update?.status === "ready") {
+    return (
+      <button
+        type="button"
+        className="flex items-center gap-2 self-start rounded-xs text-caption text-ink-secondary transition-colors hover:text-ink"
+        onClick={() => void window.beeDesktop?.updates?.install()}
+      >
+        <RefreshCw {...iconProps} size={12} className="shrink-0 text-brand-icon" />
+        Update ready · Restart
+      </button>
+    );
+  }
+  return null;
 }
 
 function PlanMeter({ connection, onUsage }: { connection: ConnectionState; onUsage: () => void }) {
@@ -110,6 +145,7 @@ export function SidebarFooter({
         />
         {status.text}
       </p>
+      <UpdateLine />
       <PlanMeter connection={connection} onUsage={onUsage} />
       <ThemeSwitch />
     </div>

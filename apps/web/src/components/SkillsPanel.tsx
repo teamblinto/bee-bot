@@ -14,13 +14,6 @@ import {
 } from "./SidePanel";
 import { iconProps } from "./ui";
 
-declare global {
-  interface Window {
-    // Set by the desktop app's preload. A plain browser has no folder picker.
-    beeDesktop?: { pickFolder: () => Promise<string | null> };
-  }
-}
-
 const metaClass = "text-caption text-ink-secondary";
 
 function skillLine(skill: Skill, on: boolean) {
