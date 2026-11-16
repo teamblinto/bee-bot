@@ -19,7 +19,7 @@ export function CopyButton({ label, text }: { label: string; text: () => string 
   return (
     <button
       type="button"
-      className="button !min-h-8 !px-2 text-ink-secondary"
+      className="button button-icon button-sm"
       aria-label={copied ? "Copied" : label}
       onClick={() => void copy()}
     >

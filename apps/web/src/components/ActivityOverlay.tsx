@@ -13,7 +13,7 @@ export function ActivityOverlay({ activity }: { activity: BotActivity | undefine
         <span
           key={activity.seq}
           data-activity="click"
-          className="activity-ripple absolute -mt-4 -ml-4 size-8 rounded-full border-2 border-honey-fill bg-honey-surface"
+          className="activity-ripple absolute -mt-4 -ml-4 size-8 rounded-full border-2 border-brand-fill bg-brand-surface"
           style={at}
         />
       )}
@@ -21,7 +21,7 @@ export function ActivityOverlay({ activity }: { activity: BotActivity | undefine
         <span
           key={`text-${activity.seq}`}
           data-activity="type"
-          className="activity-chip absolute mt-4 max-w-[60%] -translate-x-1/2 truncate rounded-md bg-honey-fill px-1.5 py-0.5 text-label text-honey-ink"
+          className="activity-chip absolute mt-4 max-w-[60%] -translate-x-1/2 truncate rounded-xs bg-brand-fill px-1.5 py-0.5 text-caption text-on-brand"
           style={at}
         >
           {activity.text}

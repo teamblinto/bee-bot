@@ -29,7 +29,7 @@ export function RedactedText({ value, label }: { value: string; label: string })
         type="button"
         aria-label={revealed ? `Hide ${label}` : `Show ${label}`}
         aria-pressed={revealed}
-        className={`min-w-0 truncate rounded-sm font-mono text-small transition hover:text-ink ${revealed ? "text-ink-secondary" : "text-ink-secondary blur-xs select-none"}`}
+        className={`min-w-0 truncate rounded-sm font-mono text-label transition hover:text-ink ${revealed ? "text-ink-secondary" : "text-ink-secondary blur-xs select-none"}`}
         onClick={() => setRevealed((shown) => !shown)}
       >
         {revealed ? value : redactedPlaceholder(value)}

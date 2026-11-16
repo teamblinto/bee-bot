@@ -34,13 +34,31 @@ export const avatarIndex = (seed: number) => seed % avatars.length;
 export const shuffledSeed = (seed: number) =>
   (avatarIndex(seed) + 1 + Math.floor(Math.random() * (avatars.length - 1))) % avatars.length;
 
-export function Avatar({ seed, className = "size-8" }: { seed: number; className?: string }) {
-  return (
+// `tight` is Figma's 16–24px crop: the face fills a round frame with a subtle edge.
+export function Avatar({
+  seed,
+  className = "size-8",
+  tight = false,
+}: {
+  seed: number;
+  className?: string;
+  tight?: boolean;
+}) {
+  const image = (
     <img
       alt=""
       src={avatars[avatarIndex(seed)]}
       draggable={false}
-      className={`shrink-0 select-none ${className}`}
+      className={`shrink-0 select-none ${tight ? "size-full scale-145" : className}`}
     />
+  );
+  return tight ? (
+    <span
+      className={`shrink-0 overflow-hidden rounded-full border border-edge-subtle ${className}`}
+    >
+      {image}
+    </span>
+  ) : (
+    image
   );
 }

@@ -1,7 +1,18 @@
 import { type Bot, type Command, Skill, skillUsable } from "@beebot/contracts";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { BookOpen, ChevronLeft } from "lucide-react";
+import { type FormEvent, useRef, useState } from "react";
 
 import { postCommand } from "../serverConnection";
+import {
+  checkboxClass,
+  ConfirmDialog,
+  EmptyState,
+  errorClass,
+  fieldLabelClass,
+  RowMenu,
+  SidePanel,
+} from "./SidePanel";
+import { iconProps } from "./ui";
 
 declare global {
   interface Window {
@@ -10,9 +21,7 @@ declare global {
   }
 }
 
-const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
-const headingClass = "text-label text-ink-secondary";
-const metaClass = "text-label text-ink-faint";
+const metaClass = "text-caption text-ink-secondary";
 
 function skillLine(skill: Skill, on: boolean) {
   if (skill.sha256 === null) {
@@ -42,21 +51,17 @@ export function SkillsPanel({
   connected: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const sending = useRef(false);
   const [text, setText] = useState("");
   const [reviewing, setReviewing] = useState<string>();
+  const [deleting, setDeleting] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
-    if (!dialog.current?.open) {
-      dialog.current?.showModal();
-    }
-  }, []);
-
   const disabled = busy || !connected;
   const review = skills.find(({ name }) => name === reviewing);
+  const deletingSkill = skills.find(({ name }) => name === deleting);
+  const others = deletingSkill?.botIds.filter((id) => id !== bot.id).length ?? 0;
 
   // State updates arrive by event, so a success only has to tidy up here.
   async function send(command: Command, onDone: (body: unknown) => void = () => {}) {
@@ -94,39 +99,23 @@ export function SkillsPanel({
     }
   }
 
-  function remove(skill: Skill) {
-    const others = skill.botIds.filter((id) => id !== bot.id).length;
-    const also = others > 0 ? ` It is also taken off ${others} other bots.` : "";
-    if (window.confirm(`Delete ${skill.name} from the skill library?${also}`)) {
-      void send({ type: "delete-skill", name: skill.name }, () => setReviewing(undefined));
-    }
-  }
+  const alert = error && (
+    <p role="alert" className={errorClass}>
+      {error}
+    </p>
+  );
 
   return (
-    <dialog
-      ref={dialog}
-      aria-label={`${bot.name} skills`}
-      className="dialog m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
+    <SidePanel
+      label={`${bot.name} skills`}
+      botName={bot.name}
+      title={review ? review.name : "Skills"}
       onClose={onClose}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-title font-semibold">{review ? review.name : "Skills"}</h2>
-        <button type="button" className="button" onClick={() => dialog.current?.close()}>
-          Close
-        </button>
-      </div>
-      {review ? (
-        <>
-          <p className="text-small text-ink-secondary">
-            A skill tells the bot how to do something, and may come with files and scripts it can
-            read. Read its SKILL.md before you turn it on. Scripts still ask you before they run, as
-            your Access setting says.
-          </p>
-          <pre className="scroller surface min-h-0 overflow-auto p-3 text-small wrap-anywhere whitespace-pre-wrap">
-            {review.text}
-          </pre>
-          <div className="flex flex-wrap justify-end gap-1">
+      footer={
+        review && (
+          <>
             <button type="button" className="button" onClick={() => setReviewing(undefined)}>
+              <ChevronLeft {...iconProps} />
               Back
             </button>
             <button
@@ -142,107 +131,140 @@ export function SkillsPanel({
             >
               {skillUsable(review) ? "Reviewed" : "Mark as reviewed"}
             </button>
-          </div>
+          </>
+        )
+      }
+    >
+      {review ? (
+        <>
+          <p className="text-body-s text-ink-secondary">
+            A skill tells the bot how to do something, and may come with files and scripts it can
+            read. Read its SKILL.md before you turn it on. Scripts still ask you before they run, as
+            your Access setting says.
+          </p>
+          <pre className="rounded-card border border-edge-subtle bg-code p-3 font-mono text-code wrap-anywhere whitespace-pre-wrap">
+            {review.text}
+          </pre>
+          {alert}
         </>
       ) : (
         <>
-          <p className="text-small text-ink-secondary">
+          <p className="text-body-s text-ink-secondary">
             One library for every bot. Turn on what this bot may use. Changes reach its next turn.
           </p>
-          <section
-            className="scroller flex min-h-0 flex-col gap-2 overflow-y-auto"
-            aria-label="Library"
-          >
-            <h3 className={headingClass}>Library</h3>
-            {skills.length === 0 && <p className="text-small text-ink-secondary">No skills yet.</p>}
-            <ul className="flex flex-col gap-3">
-              {skills.map((skill) => {
-                const on = skill.botIds.includes(bot.id);
-                return (
-                  <li key={skill.name} className="flex items-start gap-2">
-                    <input
-                      type="checkbox"
-                      className="mt-1"
-                      aria-label={`${skill.name} on for ${bot.name}`}
-                      checked={on}
-                      // Off is always allowed. On needs a review of what is there now.
-                      disabled={disabled || (!on && !skillUsable(skill))}
-                      onChange={(event) =>
-                        void send({
-                          type: "set-bot-skill",
-                          botId: bot.id,
-                          name: skill.name,
-                          on: event.target.checked,
-                        })
-                      }
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-name font-medium">{skill.name}</p>
-                      <p className="text-small wrap-anywhere">{skill.description}</p>
-                      <p className={metaClass}>{skillLine(skill, on)}</p>
-                    </div>
-                    <button
-                      type="button"
-                      className="button shrink-0"
-                      onClick={() => setReviewing(skill.name)}
+          <section className="flex flex-col gap-4" aria-label="Library">
+            {skills.length === 0 ? (
+              <EmptyState icon={BookOpen} title="No skills yet">
+                <p className="text-body-s text-ink-secondary">
+                  Paste a SKILL.md below to add one to the library.
+                </p>
+              </EmptyState>
+            ) : (
+              <ul className="flex flex-col gap-4">
+                {skills.map((skill) => {
+                  const on = skill.botIds.includes(bot.id);
+                  return (
+                    <li
+                      key={skill.name}
+                      className="flex items-start gap-3 border-b border-edge-subtle pb-4"
                     >
-                      Review
-                    </button>
-                    <button
-                      type="button"
-                      className="button shrink-0"
-                      disabled={disabled}
-                      onClick={() => remove(skill)}
-                    >
-                      Delete
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                      <input
+                        type="checkbox"
+                        className={checkboxClass}
+                        aria-label={`${skill.name} on for ${bot.name}`}
+                        checked={on}
+                        // Off is always allowed. On needs a review of what is there now.
+                        disabled={disabled || (!on && !skillUsable(skill))}
+                        onChange={(event) =>
+                          void send({
+                            type: "set-bot-skill",
+                            botId: bot.id,
+                            name: skill.name,
+                            on: event.target.checked,
+                          })
+                        }
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <p className="text-body-s font-medium wrap-anywhere">{skill.name}</p>
+                        <p className="text-body-s wrap-anywhere text-ink-secondary">
+                          {skill.description}
+                        </p>
+                        <p className={metaClass}>{skillLine(skill, on)}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="button button-sm shrink-0"
+                        onClick={() => setReviewing(skill.name)}
+                      >
+                        Review
+                      </button>
+                      <RowMenu
+                        label={`${skill.name} actions`}
+                        items={[
+                          {
+                            label: "Delete",
+                            danger: true,
+                            disabled,
+                            onSelect: () => setDeleting(skill.name),
+                          },
+                        ]}
+                      />
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
+          {alert}
+          <form className="flex flex-col gap-2" onSubmit={submit}>
+            <label className={fieldLabelClass}>
+              Add a skill: paste its SKILL.md
+              <textarea
+                className="field resize-none font-mono text-code font-normal"
+                rows={4}
+                placeholder={
+                  "---\nname: my-skill\ndescription: What it does and when to use it.\n---"
+                }
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+              />
+            </label>
+            <div className="flex justify-end gap-2">
+              {window.beeDesktop && (
+                <button
+                  type="button"
+                  className="button button-outline"
+                  disabled={disabled}
+                  onClick={() => void addFolder()}
+                >
+                  Add a folder…
+                </button>
+              )}
+              <button
+                type="submit"
+                className="button button-primary"
+                disabled={disabled || !text.trim()}
+              >
+                Add skill
+              </button>
+            </div>
+          </form>
         </>
       )}
-      {error && (
-        <p role="alert" className="text-small text-ink-secondary">
-          {error}
-        </p>
+      {deletingSkill && (
+        <ConfirmDialog
+          title={`Delete ${deletingSkill.name}?`}
+          confirmLabel="Delete"
+          onConfirm={() =>
+            void send({ type: "delete-skill", name: deletingSkill.name }, () =>
+              setReviewing(undefined),
+            )
+          }
+          onClose={() => setDeleting(undefined)}
+        >
+          {`It is removed from the skill library.${others > 0 ? ` It is also taken off ${others} other ${others === 1 ? "bot" : "bots"}.` : ""}`}
+        </ConfirmDialog>
       )}
-      {!review && (
-        <form className="flex shrink-0 flex-col gap-2" onSubmit={submit}>
-          <label className={labelClass}>
-            Add a skill: paste its SKILL.md
-            <textarea
-              className="field resize-none font-mono text-ink"
-              rows={4}
-              placeholder={
-                "---\nname: my-skill\ndescription: What it does and when to use it.\n---"
-              }
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-            />
-          </label>
-          <div className="flex justify-end gap-2">
-            {window.beeDesktop && (
-              <button
-                type="button"
-                className="button"
-                disabled={disabled}
-                onClick={() => void addFolder()}
-              >
-                Add a folder…
-              </button>
-            )}
-            <button
-              type="submit"
-              className="button button-primary"
-              disabled={disabled || !text.trim()}
-            >
-              Add skill
-            </button>
-          </div>
-        </form>
-      )}
-    </dialog>
+    </SidePanel>
   );
 }

@@ -5,11 +5,13 @@ import {
   type Connector,
   connectorUsable,
 } from "@beebot/contracts";
+import { Plug, Plus } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { connectorStatusLine } from "../labels";
 import { postCommand } from "../serverConnection";
 import { HostList } from "./BotForm";
+import { iconProps } from "./ui";
 
 // A short list of remote servers that need no setup but a sign-in or a token.
 const catalog = [
@@ -19,8 +21,10 @@ const catalog = [
   { name: "GitHub", url: "https://api.githubcopilot.com/mcp/" },
 ];
 
-const metaClass = "text-label text-ink-faint";
-const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
+const metaClass = "text-caption text-ink-secondary";
+const labelClass = "flex flex-col gap-2 text-body-s font-medium";
+const badgeClass = "inline-flex h-[22px] items-center rounded-xs px-2 text-label font-medium";
+const errorClass = "text-caption text-danger";
 
 type Send = (command: Command) => Promise<unknown>;
 
@@ -97,11 +101,11 @@ function ReviewDialog({ connector, onClose }: { connector: Connector; onClose: (
     <dialog
       ref={dialog}
       aria-label={`Review ${connector.name}`}
-      className="dialog m-auto max-h-[80dvh] w-[min(640px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
+      className="dialog m-auto max-h-[80dvh] w-[min(640px,calc(100vw-32px))] flex-col gap-4 p-6 backdrop:bg-scrim open:flex"
       onClose={onClose}
     >
-      <h2 className="text-title font-semibold">Review {connector.name}</h2>
-      <p className="text-small text-ink-secondary">
+      <h2 className="text-title-s font-semibold">Review {connector.name}</h2>
+      <p className="text-body-s text-ink-secondary">
         These are the tools {connector.name} offers. Bots you allow can call them. Tick a tool only
         if it just reads: every other tool asks you before it runs, unless you allow it for a bot.
       </p>
@@ -119,18 +123,20 @@ function ReviewDialog({ connector, onClose }: { connector: Connector; onClose: (
             <li key={tool.name} className="flex items-start gap-2">
               <input
                 type="checkbox"
-                className="mt-1"
+                className="mt-0.5 size-4 accent-brand-fill"
                 aria-label={`${tool.name} only reads`}
                 checked={readOnly.has(tool.name)}
                 disabled={tool.destructiveHint || tool.excluded !== null}
                 onChange={(event) => toggle(tool.name, event.target.checked)}
               />
               <div className="min-w-0 flex-1">
-                <p className="text-name font-medium">
+                <p className="text-body-s font-medium">
                   {tool.name}
-                  {tag && <span className="ml-2 text-label text-honey">{tag}</span>}
+                  {tag && (
+                    <span className={`ml-2 ${badgeClass} bg-brand-surface text-brand`}>{tag}</span>
+                  )}
                 </p>
-                <p className="text-small wrap-anywhere text-ink-secondary">{tool.description}</p>
+                <p className="text-caption wrap-anywhere text-ink-secondary">{tool.description}</p>
                 {tool.excluded && <p className={metaClass}>Left out: {tool.excluded}</p>}
                 {tool.destructiveHint && (
                   <p className={metaClass}>The server says this can delete or overwrite.</p>
@@ -140,18 +146,22 @@ function ReviewDialog({ connector, onClose }: { connector: Connector; onClose: (
           );
         })}
         {removed.map(({ name }) => (
-          <li key={name} className="text-small text-ink-faint line-through">
+          <li key={name} className="text-body-s text-ink-disabled line-through">
             {name} <span className="no-underline">(removed)</span>
           </li>
         ))}
       </ul>
       {error && (
-        <p role="alert" className="text-small text-ink-secondary">
+        <p role="alert" className={errorClass}>
           {error}
         </p>
       )}
-      <div className="flex justify-end gap-1">
-        <button type="button" className="button" onClick={() => dialog.current?.close()}>
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          className="button button-outline"
+          onClick={() => dialog.current?.close()}
+        >
           Cancel
         </button>
         <button
@@ -191,7 +201,7 @@ function SecretForm({
     );
   }
   return (
-    <form className="flex items-center gap-1" onSubmit={save}>
+    <form className="flex items-center gap-2" onSubmit={save}>
       <input
         type="password"
         aria-label={`${connector.name} token`}
@@ -204,7 +214,7 @@ function SecretForm({
         value={token}
         onChange={(event) => setToken(event.target.value)}
       />
-      <button type="submit" className="button" disabled={busy || !token.trim()}>
+      <button type="submit" className="button button-outline" disabled={busy || !token.trim()}>
         Save
       </button>
     </form>
@@ -232,8 +242,8 @@ function EnvField({
     }).then((body) => body && setValue(""));
   }
   return (
-    <form className="flex items-center gap-1" onSubmit={save}>
-      <label className="w-40 shrink-0 truncate font-mono text-label text-ink-secondary">
+    <form className="flex items-center gap-2" onSubmit={save}>
+      <label className="w-40 shrink-0 truncate font-mono text-code text-ink-secondary">
         {name}
       </label>
       <input
@@ -246,7 +256,7 @@ function EnvField({
         value={value}
         onChange={(event) => setValue(event.target.value)}
       />
-      <button type="submit" className="button" disabled={busy || !value}>
+      <button type="submit" className="button button-outline" disabled={busy || !value}>
         Save
       </button>
     </form>
@@ -316,7 +326,7 @@ function ClientForm({
     }
   }
   return (
-    <form className="flex flex-wrap items-center gap-1" onSubmit={(event) => void save(event)}>
+    <form className="flex flex-wrap items-center gap-2" onSubmit={(event) => void save(event)}>
       <input
         aria-label={`${connector.name} client ID`}
         className="field min-w-0 flex-1 text-ink"
@@ -336,7 +346,7 @@ function ClientForm({
         value={clientSecret}
         onChange={(event) => setClientSecret(event.target.value)}
       />
-      <button type="submit" className="button" disabled={busy || !clientId.trim()}>
+      <button type="submit" className="button button-outline" disabled={busy || !clientId.trim()}>
         Save and sign in
       </button>
     </form>
@@ -363,56 +373,64 @@ function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot |
   }
 
   return (
-    <li className="flex flex-col gap-2">
-      <div className="flex items-start gap-2">
-        <div className="min-w-0 flex-1">
-          <p className="text-small font-medium">
+    <li className="flex flex-col gap-3 border-b border-edge-subtle py-3">
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
+        <Plug {...iconProps} className="mt-0.5 shrink-0 text-ink-secondary" />
+        <div className="min-w-0 flex-1 basis-48">
+          <p className="flex items-center gap-2 text-body-s font-medium">
             {connector.name}
-            {owner && <span className={`ml-2 ${metaClass}`}>Only {owner.name}</span>}
+            {owner && <span className={`${badgeClass} bg-raised text-ink`}>Only {owner.name}</span>}
           </p>
-          <p className="truncate text-label text-ink-faint">{where}</p>
-          <p className="text-label text-ink-secondary">{connectorStatusLine(connector)}</p>
+          <p className="truncate text-caption text-ink-secondary">{where}</p>
+          <p className="text-caption text-ink-secondary">{connectorStatusLine(connector)}</p>
         </div>
-        {connector.tools.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {connector.tools.length > 0 && (
+            <button
+              type="button"
+              className={`button button-sm ${needsReview ? "button-primary" : "button-outline"}`}
+              onClick={() => setReviewing(true)}
+            >
+              Review
+            </button>
+          )}
+          {signsIn && (
+            <button
+              type="button"
+              className={`button button-sm ${connector.status === "needs_sign_in" ? "button-primary" : "button-outline"}`}
+              disabled={busy}
+              onClick={() => void signIn(connector, send)}
+            >
+              {connector.authStatus === "signed_in" ? "Reconnect" : "Sign in"}
+            </button>
+          )}
           <button
             type="button"
-            className={needsReview ? "button button-primary" : "button"}
-            onClick={() => setReviewing(true)}
-          >
-            Review
-          </button>
-        )}
-        {signsIn && (
-          <button
-            type="button"
-            className={connector.status === "needs_sign_in" ? "button button-primary" : "button"}
+            className="button button-sm button-outline"
             disabled={busy}
-            onClick={() => void signIn(connector, send)}
+            onClick={() => void send({ type: "refresh-connector", connectorId: connector.id })}
           >
-            {connector.authStatus === "signed_in" ? "Reconnect" : "Sign in"}
+            Refresh
           </button>
-        )}
-        <button
-          type="button"
-          className="button"
-          disabled={busy}
-          onClick={() => void send({ type: "refresh-connector", connectorId: connector.id })}
-        >
-          Refresh
-        </button>
-        {connector.authStatus !== "not_needed" && (
+          {connector.authStatus !== "not_needed" && (
+            <button
+              type="button"
+              className="button button-sm button-outline"
+              disabled={busy}
+              onClick={() => void send({ type: "disconnect-connector", connectorId: connector.id })}
+            >
+              Disconnect
+            </button>
+          )}
           <button
             type="button"
-            className="button"
+            className="button button-sm button-danger"
             disabled={busy}
-            onClick={() => void send({ type: "disconnect-connector", connectorId: connector.id })}
+            onClick={remove}
           >
-            Disconnect
+            Delete
           </button>
-        )}
-        <button type="button" className="button" disabled={busy} onClick={remove}>
-          Delete
-        </button>
+        </div>
       </div>
       <SecretForm connector={connector} send={send} busy={busy} />
       {connector.transport === "stdio" && (
@@ -422,7 +440,7 @@ function ConnectorRow({ connector, owner }: { connector: Connector; owner: Bot |
         <ClientForm connector={connector} send={send} busy={busy} />
       )}
       {error && (
-        <p role="alert" className="text-small text-ink-secondary">
+        <p role="alert" className={errorClass}>
           {error}
         </p>
       )}
@@ -476,32 +494,34 @@ function AddConnector({ bots }: { bots: Bot[] }) {
   }
 
   return (
-    <div className="flex flex-col gap-2">
-      <div
-        className="flex flex-wrap items-center gap-1"
-        role="tablist"
-        aria-label="Add a connector"
-      >
-        {(
-          [
-            ["catalog", "Catalog"],
-            ["url", "URL"],
-            ["json", "Paste JSON"],
-          ] as const
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            role="tab"
-            aria-selected={mode === value}
-            className={mode === value ? "button button-primary" : "button"}
-            onClick={() => setMode(value)}
-          >
-            {label}
-          </button>
-        ))}
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div
+          className="flex rounded-field bg-raised p-0.5"
+          role="tablist"
+          aria-label="Add a connector"
+        >
+          {(
+            [
+              ["catalog", "Catalog"],
+              ["url", "URL"],
+              ["json", "Paste JSON"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={mode === value}
+              className="h-7 rounded-xs px-3 text-label whitespace-nowrap text-ink-secondary transition-colors hover:text-ink aria-selected:bg-card aria-selected:font-medium aria-selected:text-ink aria-selected:shadow-composer forced-colors:aria-selected:outline-2"
+              onClick={() => setMode(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <span className="flex-1" />
-        <label className="flex items-center gap-1 text-label text-ink-secondary">
+        <label className="flex items-center gap-2 text-body-s text-ink-secondary">
           For
           <select
             className="field w-auto text-ink"
@@ -518,22 +538,23 @@ function AddConnector({ bots }: { bots: Bot[] }) {
         </label>
       </div>
       {mode === "catalog" ? (
-        <ul className="flex flex-wrap gap-1">
+        <ul className="flex flex-wrap gap-2">
           {catalog.map((entry) => (
             <li key={entry.name}>
               <button
                 type="button"
-                className="button"
+                className="button button-sm button-outline"
                 disabled={busy}
                 onClick={() => void add({ type: "add-connector", ...entry, ownerBotId: owner })}
               >
+                <Plus {...iconProps} />
                 Add {entry.name}
               </button>
             </li>
           ))}
         </ul>
       ) : (
-        <form className="flex flex-col gap-2" onSubmit={submit}>
+        <form className="flex flex-col gap-3" onSubmit={submit}>
           {mode === "url" ? (
             <>
               <label className={labelClass}>
@@ -545,7 +566,7 @@ function AddConnector({ bots }: { bots: Bot[] }) {
                   onChange={(event) => setUrl(event.target.value)}
                 />
               </label>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-3">
                 <label className={`${labelClass} flex-1`}>
                   Name
                   <input
@@ -570,7 +591,7 @@ function AddConnector({ bots }: { bots: Bot[] }) {
             <label className={labelClass}>
               Paste an mcpServers block, as Claude Desktop, Cursor or Claude Code write it
               <textarea
-                className="field resize-none font-mono text-ink"
+                className="field resize-none font-mono text-code text-ink"
                 rows={5}
                 spellCheck={false}
                 placeholder={
@@ -593,7 +614,7 @@ function AddConnector({ bots }: { bots: Bot[] }) {
         </form>
       )}
       {error && (
-        <p role="alert" className="text-small text-ink-secondary">
+        <p role="alert" className={errorClass}>
           {error}
         </p>
       )}
@@ -604,16 +625,16 @@ function AddConnector({ bots }: { bots: Bot[] }) {
 export function ConnectorsPanel({ chat }: { chat: ChatState }) {
   const bots = chat.bots.filter(({ archivedAt }) => !archivedAt);
   return (
-    <section aria-label="Connectors" className="flex flex-col gap-4 border-t border-edge pt-6">
+    <section aria-label="Connectors" className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="text-name font-medium">Connectors</h3>
-        <p className="text-small text-ink-secondary">
+        <h3 className="text-body-s font-medium">Connectors</h3>
+        <p className="text-caption text-ink-secondary">
           Apps your bots can use through MCP. Bee Bot keeps their keys and makes every call itself,
           so a bot only ever gets the tools you allow it.
         </p>
       </div>
       {chat.connectors.length > 0 && (
-        <ul className="flex flex-col gap-4">
+        <ul className="flex flex-col">
           {chat.connectors.map((connector) => (
             <ConnectorRow
               key={connector.id}

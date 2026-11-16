@@ -99,7 +99,7 @@ it("labels each file of a patch inside one scrolling preview", () => {
   expect(groups().map((group) => group.getAttribute("aria-label"))).toEqual(["a.ts", "b.ts"]);
   expect(groups().map((group) => group.textContent)).toEqual(["a.ts- old+ new", "b.ts+ more"]);
   expect(groups()[0]?.querySelector(".text-danger")?.textContent).toBe("- old");
-  expect(groups()[0]?.querySelector(".text-honey")?.textContent).toBe("+ new");
+  expect(groups()[0]?.querySelector(".text-brand")?.textContent).toBe("+ new");
 });
 
 it("still names a patched file with no lines, and never calls a patch an empty file", () => {
@@ -121,7 +121,7 @@ it("says what a patch's preview leaves out", () => {
 
 it("says what is hidden right above the buttons, and Allow stays enabled", () => {
   show({ ...edit, action: "edit", hiddenChars: 12_345 });
-  const line = host.querySelector(".justify-end")?.previousElementSibling;
+  const line = host.querySelector("button")?.parentElement?.previousElementSibling;
   expect(line?.textContent).toBe(
     "12,345 more characters not shown. Allowing applies the whole change.",
   );

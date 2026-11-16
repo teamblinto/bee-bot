@@ -88,11 +88,13 @@ it("shows each computer's screen, status, tool and controller, and opens its bot
   expect(ada?.textContent).toContain("Working");
   expect(ada?.textContent).toContain("Ada has control");
   expect(ada?.textContent).toContain("Running ls");
-  expect(ada?.querySelector("img")?.getAttribute("src")).toBe("data:image/jpeg;base64,AAAA");
+  expect(ada?.querySelector('img[src^="data:"]')?.getAttribute("src")).toBe(
+    "data:image/jpeg;base64,AAAA",
+  );
   expect(bo?.textContent).toContain("Idle");
   expect(bo?.textContent).toContain("You have control");
-  expect(bo?.querySelector("img")).toBeNull();
-  expect(di?.textContent).toContain("Waiting for you");
+  expect(bo?.querySelector('img[src^="data:"]')).toBeNull();
+  expect(di?.textContent).toContain("Waiting on you");
 
   await act(async () => ada?.querySelector("button")?.click());
   expect(onOpen).toHaveBeenCalledWith("ada");

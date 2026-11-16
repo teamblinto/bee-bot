@@ -1,41 +1,60 @@
 import type { Bot, BotAccess, Effort, ModelCatalog } from "@beebot/contracts";
 import {
-  Bot as BotIcon,
   Check,
   ChevronDown,
-  Lock,
-  PencilLine,
-  PencilRuler,
-  ShieldOff,
+  FilePen,
+  Hammer,
+  ListChecks,
+  type LucideIcon,
+  ShieldAlert,
+  ShieldCheck,
+  Signal,
 } from "lucide-react";
 import { type CSSProperties, type KeyboardEvent, type ReactNode, useId, useState } from "react";
 
 import { codexRulesWarning } from "../labels";
 import { effortLabels, EffortGlyph, resolveEffortGlyph } from "./EffortGlyph";
-import { findModel, ModelPicker } from "./ModelPicker";
+import { findModel, ModelPicker, pillClass } from "./ModelPicker";
 import { Tooltip } from "./Tooltip";
 import { iconProps } from "./ui";
 
 export const accessOptions = {
   supervised: {
     label: "Supervised",
-    description: "Ask before commands and file changes.",
-    Icon: Lock,
+    description: "Asks before commands and file edits.",
+    Icon: ShieldCheck,
   },
   "auto-edits": {
     label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    Icon: PencilLine,
+    description: "Edits files without asking. Asks before commands.",
+    Icon: FilePen,
   },
   full: {
     label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    // An open lock reads like a closed one at small sizes; a crossed shield does not.
-    Icon: ShieldOff,
+    description: "Runs any command without asking.",
+    Icon: ShieldAlert,
   },
 } as const;
 
 const accessLevels = ["supervised", "auto-edits", "full"] as const;
+
+const effortDescriptions: Record<Effort | "default", string> = {
+  default: "Balanced.",
+  low: "Faster answers, less thinking.",
+  medium: "A little more thinking than Low.",
+  high: "Thinks longer on hard tasks.",
+  xhigh: "Thinks even longer.",
+  max: "Thinks as long as it needs.",
+};
+
+const modeOptions = {
+  build: { label: "Build", description: "Makes changes and runs commands.", Icon: Hammer },
+  plan: {
+    label: "Plan",
+    description: "Proposes a plan first. Changes nothing until you say so.",
+    Icon: ListChecks,
+  },
+} as const;
 
 export type EngineChange = {
   model?: string;
@@ -46,13 +65,13 @@ export type EngineChange = {
 
 const closeMenu = (item: HTMLElement) => item.closest<HTMLElement>("[popover]")?.hidePopover?.();
 
-function moveFocus(event: KeyboardEvent<HTMLElement>, keys: { next: string; previous: string }) {
-  if (event.key !== keys.next && event.key !== keys.previous) {
+function moveFocus(event: KeyboardEvent<HTMLElement>) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
     return;
   }
   const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
   const at = items.indexOf(document.activeElement as HTMLElement);
-  const step = event.key === keys.next ? 1 : -1;
+  const step = event.key === "ArrowDown" ? 1 : -1;
   event.preventDefault();
   items[(at + step + items.length) % items.length]?.focus();
 }
@@ -61,17 +80,26 @@ function Menu({
   label,
   tooltip,
   disabled,
-  trigger,
+  danger = false,
+  Icon,
+  text,
+  textClass,
+  section,
   children,
 }: {
   label: string;
   tooltip: string;
   disabled: boolean;
-  trigger: ReactNode;
+  danger?: boolean;
+  Icon: ReactNode;
+  text: string;
+  textClass: string;
+  section: string;
   children: ReactNode;
 }) {
   const id = useId();
   const anchor = `--menu-${id.replace(/[^\w-]/g, "")}`;
+  const [open, setOpen] = useState(false);
   return (
     <>
       <Tooltip label={tooltip}>
@@ -79,12 +107,19 @@ function Menu({
           type="button"
           popoverTarget={id}
           aria-haspopup="menu"
+          aria-expanded={open}
           aria-label={label}
           disabled={disabled}
-          className="composer-control"
+          className={`${pillClass} ${danger ? "bg-danger-surface text-danger" : ""}`}
           style={{ anchorName: anchor } as CSSProperties}
         >
-          {trigger}
+          {Icon}
+          <span className={textClass}>{text}</span>
+          <ChevronDown
+            aria-hidden
+            size={12}
+            className={`shrink-0 transition-transform group-aria-expanded:rotate-180 ${danger ? "" : "text-ink-secondary"}`}
+          />
         </button>
       </Tooltip>
       <div
@@ -93,26 +128,73 @@ function Menu({
         role="menu"
         aria-label={label}
         data-placement="top"
-        className="popup menu"
+        className="popup menu w-72 p-1"
         style={{ positionAnchor: anchor } as CSSProperties}
         onToggle={({ newState, currentTarget }) => {
+          setOpen(newState === "open");
           if (newState === "open") {
             currentTarget.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
           }
         }}
       >
+        <div className="px-2 pt-2 pb-1 text-caption text-ink-secondary">{section}</div>
         {children}
       </div>
     </>
   );
 }
 
-function ReasoningMenu({
+function MenuItem({
+  label,
+  description,
+  describedBy,
+  Icon,
+  checked,
+  onSelect,
+}: {
+  label: string;
+  description: string;
+  describedBy?: string | undefined;
+  Icon?: LucideIcon;
+  checked: boolean;
+  onSelect: () => void;
+}) {
+  const descriptionId = useId();
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={checked}
+      aria-label={label}
+      aria-describedby={describedBy ? `${descriptionId} ${describedBy}` : descriptionId}
+      className="flex min-h-8 w-full items-center gap-2 rounded-row px-2 py-1 text-left transition-colors hover:bg-hover focus-visible:bg-hover focus-visible:-outline-offset-2"
+      onClick={({ currentTarget }) => {
+        if (!checked) {
+          onSelect();
+        }
+        closeMenu(currentTarget);
+      }}
+    >
+      {Icon && <Icon {...iconProps} className="shrink-0 text-ink-secondary" />}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="text-body-s text-ink">{label}</span>
+        <span id={descriptionId} className="text-caption text-ink-secondary">
+          {description}
+        </span>
+      </span>
+      {checked && <Check {...iconProps} className="shrink-0 text-brand-icon" />}
+    </button>
+  );
+}
+
+function EffortMenu({
+  name,
   levels,
   effort,
   disabled,
   onChange,
 }: {
+  name: string;
   levels: readonly Effort[];
   effort: Effort | null;
   disabled: boolean;
@@ -120,43 +202,65 @@ function ReasoningMenu({
 }) {
   const glyph = resolveEffortGlyph(levels, effort);
   const current = effort ? effortLabels[effort] : "Default";
-  const options = [null, ...levels];
   return (
     <Menu
-      label={`Reasoning: ${current}`}
-      tooltip={`Reasoning: ${current}`}
+      label={`Effort: ${current}`}
+      tooltip={`Effort: ${current}`}
       disabled={disabled}
-      trigger={
-        <>
-          {glyph && <EffortGlyph {...glyph} />}
-          <span className="@max-[380px]:sr-only">{current}</span>
-          <ChevronDown {...iconProps} size={14} className="opacity-60" />
-        </>
+      Icon={
+        glyph ? (
+          <EffortGlyph {...glyph} />
+        ) : (
+          <Signal {...iconProps} className="shrink-0 text-ink-secondary" />
+        )
       }
+      text={`Effort: ${current}`}
+      textClass="@max-[540px]:sr-only"
+      section={`How long ${name} thinks before answering`}
     >
-      <div
-        role="group"
-        aria-label="Reasoning"
-        className="flex w-40 flex-col gap-0.5 p-1"
-        onKeyDown={(event) => moveFocus(event, { next: "ArrowDown", previous: "ArrowUp" })}
-      >
-        {options.map((level) => (
-          <button
+      <div role="group" aria-label="Effort" onKeyDown={moveFocus}>
+        {[null, ...levels].map((level) => (
+          <MenuItem
             key={level ?? "default"}
-            type="button"
-            role="menuitemradio"
-            aria-checked={level === effort}
-            className="flex h-8 items-center gap-2 rounded-field px-2 text-left text-small transition-colors hover:bg-hover focus-visible:bg-hover focus-visible:-outline-offset-2"
-            onClick={({ currentTarget }) => {
-              if (level !== effort) {
-                onChange(level);
-              }
-              closeMenu(currentTarget);
-            }}
-          >
-            <span className="flex-1">{level ? effortLabels[level] : "Default"}</span>
-            {level === effort && <Check {...iconProps} size={14} />}
-          </button>
+            label={level ? effortLabels[level] : "Default"}
+            description={effortDescriptions[level ?? "default"]}
+            checked={level === effort}
+            onSelect={() => onChange(level)}
+          />
+        ))}
+      </div>
+    </Menu>
+  );
+}
+
+function ModeMenu({
+  mode,
+  disabled,
+  onChange,
+}: {
+  mode: Bot["mode"];
+  disabled: boolean;
+  onChange: (mode: Bot["mode"]) => void;
+}) {
+  const { label, Icon } = modeOptions[mode];
+  return (
+    <Menu
+      label={`Mode: ${label}`}
+      tooltip={`Mode: ${label}`}
+      disabled={disabled}
+      Icon={<Icon {...iconProps} className="shrink-0 text-ink-secondary" />}
+      text={label}
+      textClass="@max-[540px]:sr-only"
+      section="Build makes changes · Plan only proposes them"
+    >
+      <div role="group" aria-label="Mode" onKeyDown={moveFocus}>
+        {(["build", "plan"] as const).map((option) => (
+          <MenuItem
+            key={option}
+            {...modeOptions[option]}
+            checked={option === mode}
+            onSelect={() => onChange(option)}
+          />
         ))}
       </div>
     </Menu>
@@ -164,90 +268,49 @@ function ReasoningMenu({
 }
 
 function AccessMenu({
+  name,
   access,
   accountId,
   disabled,
   onChange,
 }: {
+  name: string;
   access: BotAccess;
   accountId: string;
   disabled: boolean;
   onChange: (access: BotAccess) => void;
 }) {
-  // Hover or keyboard focus previews a level's name and description before a pick.
-  const [preview, setPreview] = useState<BotAccess>();
-  const descriptionId = useId();
+  const warningId = useId();
   const { label, description, Icon } = accessOptions[access];
-  const shown = accessOptions[preview ?? access];
   const warning = accountId === "codex" ? codexRulesWarning : undefined;
-  const warningId = `${descriptionId}-rules`;
+  const full = access === "full";
   return (
     <Menu
       label={`Permissions: ${label}`}
       tooltip={`Permissions: ${label}. ${description}${warning ? ` ${warning}` : ""}`}
       disabled={disabled}
-      trigger={
-        <>
-          <Icon {...iconProps} className={access === "full" ? "text-danger" : "opacity-70"} />
-          <span className="@max-[460px]:sr-only">{label}</span>
-        </>
-      }
+      danger={full}
+      Icon={<Icon {...iconProps} className={`shrink-0 ${full ? "" : "text-ink-secondary"}`} />}
+      text={label}
+      textClass="@max-[600px]:sr-only"
+      section={`What ${name} can do without asking`}
     >
-      <div className="grid w-72 gap-1.5 px-2 py-1.5">
-        <div className="text-label font-medium text-ink-secondary">Permissions</div>
-        <div
-          role="group"
-          aria-label="Permissions"
-          className="flex rounded-row bg-raised/60 p-0.5"
-          onKeyDown={(event) => moveFocus(event, { next: "ArrowRight", previous: "ArrowLeft" })}
-        >
-          {accessLevels.map((level) => {
-            const option = accessOptions[level];
-            return (
-              <button
-                key={level}
-                type="button"
-                role="menuitemradio"
-                aria-checked={level === access}
-                aria-label={option.label}
-                aria-describedby={`${descriptionId}-${level}${warning ? ` ${warningId}` : ""}`}
-                className="flex h-6 flex-1 items-center justify-center rounded-field text-ink-secondary outline-none transition-colors hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 aria-checked:bg-card aria-checked:text-ink aria-checked:shadow-composer"
-                onPointerEnter={() => setPreview(level)}
-                onPointerLeave={() => setPreview(undefined)}
-                onFocus={() => setPreview(level)}
-                onBlur={() => setPreview(undefined)}
-                onClick={({ currentTarget }) => {
-                  if (level !== access) {
-                    onChange(level);
-                  }
-                  closeMenu(currentTarget);
-                }}
-              >
-                <option.Icon {...iconProps} size={14} />
-              </button>
-            );
-          })}
-        </div>
+      <div role="group" aria-label="Permissions" onKeyDown={moveFocus}>
         {accessLevels.map((level) => (
-          <span key={level} id={`${descriptionId}-${level}`} className="sr-only">
-            {accessOptions[level].description}
-          </span>
+          <MenuItem
+            key={level}
+            {...accessOptions[level]}
+            describedBy={warning ? warningId : undefined}
+            checked={level === access}
+            onSelect={() => onChange(level)}
+          />
         ))}
-        <div aria-hidden className="grid gap-0.5">
-          <span
-            className={`text-small ${preview && preview !== access ? "text-ink-secondary" : ""}`}
-          >
-            {shown.label}
-          </span>
-          {/* Two lines reserved so the menu doesn't shift during a preview. */}
-          <span className="min-h-8 text-label text-ink-secondary">{shown.description}</span>
-        </div>
-        {warning && (
-          <p id={warningId} className="text-label text-ink-secondary">
-            {warning}
-          </p>
-        )}
       </div>
+      {warning && (
+        <p id={warningId} className="px-2 pt-1 pb-2 text-caption text-ink-secondary">
+          {warning}
+        </p>
+      )}
     </Menu>
   );
 }
@@ -272,11 +335,11 @@ export function FullAccessDialog({
       className="dialog m-auto w-[min(420px,calc(100vw-32px))] p-5 backdrop:bg-scrim"
       onCancel={onCancel}
     >
-      <h2 className="mb-2 text-title font-semibold">Give {name} full access?</h2>
-      <p className="mb-2 text-small text-ink-secondary">
+      <h2 className="mb-2 text-title-s font-semibold">Give {name} full access?</h2>
+      <p className="mb-2 text-label text-ink-secondary">
         {name} will run commands and edit files without asking you, while you're attending the run.
       </p>
-      <p className="mb-4 text-small text-ink-secondary">
+      <p className="mb-4 text-label text-ink-secondary">
         Bash can't be path-checked, and it runs on this computer with your permissions. Forbidden
         paths stay refused for the file tools.
       </p>
@@ -292,11 +355,6 @@ export function FullAccessDialog({
   );
 }
 
-const modeTooltips = {
-  plan: "Plan mode. Click to return to normal build mode",
-  build: "Default mode. Click to enter plan mode",
-};
-
 export function ComposerControls({
   bot,
   catalog,
@@ -309,9 +367,8 @@ export function ComposerControls({
   onChange: (change: EngineChange) => void;
 }) {
   const levels = findModel(catalog, bot.engineAccountId, bot.model)?.efforts ?? [];
-  const plan = bot.mode === "plan";
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-0.5">
+    <div className="flex min-w-0 flex-1 items-center gap-1">
       <ModelPicker
         accountId={bot.engineAccountId}
         model={bot.model}
@@ -325,31 +382,17 @@ export function ComposerControls({
         }}
       />
       {levels.length > 0 && (
-        <ReasoningMenu
+        <EffortMenu
+          name={bot.name}
           levels={levels}
           effort={bot.effort}
           disabled={!connected}
           onChange={(effort) => onChange({ effort })}
         />
       )}
-      <Tooltip label={modeTooltips[bot.mode]}>
-        <button
-          type="button"
-          aria-pressed={plan}
-          aria-label={modeTooltips[bot.mode]}
-          disabled={!connected}
-          className="composer-control"
-          onClick={() => onChange({ mode: plan ? "build" : "plan" })}
-        >
-          {plan ? (
-            <PencilRuler {...iconProps} />
-          ) : (
-            <BotIcon {...iconProps} className="opacity-70" />
-          )}
-          <span className="@max-[380px]:sr-only">{plan ? "Plan" : "Build"}</span>
-        </button>
-      </Tooltip>
+      <ModeMenu mode={bot.mode} disabled={!connected} onChange={(mode) => onChange({ mode })} />
       <AccessMenu
+        name={bot.name}
         access={bot.access}
         accountId={bot.engineAccountId}
         disabled={!connected}

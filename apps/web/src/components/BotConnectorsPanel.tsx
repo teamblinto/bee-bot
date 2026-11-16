@@ -5,12 +5,14 @@ import {
   type ConnectorTool,
   connectorUsable,
 } from "@beebot/contracts";
-import { useEffect, useRef, useState } from "react";
+import { Plug } from "lucide-react";
+import { useState } from "react";
 
 import { connectorStatusLine } from "../labels";
 import { postCommand } from "../serverConnection";
+import { badgeClass, checkboxClass, EmptyState, errorClass, SidePanel } from "./SidePanel";
 
-const metaClass = "text-label text-ink-faint";
+const metaClass = "text-caption text-ink-secondary";
 
 // Read vs write as the broker sees it: only the owner's mark makes a tool read-only.
 const isReadOnly = (connector: Connector, tool: ConnectorTool) =>
@@ -56,20 +58,20 @@ function ConnectorGrantRow({
     : " Its tools reach the bot once you review them on the Usage page.";
 
   return (
-    <li className="flex flex-col gap-2">
-      <div className="flex items-start gap-2">
+    <li className="flex flex-col gap-3 border-b border-edge-subtle pb-4">
+      <div className="flex items-start gap-3">
         <input
           type="checkbox"
-          className="mt-1"
+          className={checkboxClass}
           aria-label={`${connector.name} on for ${bot.name}`}
           checked={grant !== undefined}
           disabled={disabled}
           onChange={(event) => onSend({ on: event.target.checked, tools: "*", allowWrites: [] })}
         />
         <div className="min-w-0 flex-1">
-          <p className="text-name font-medium">
+          <p className="flex flex-wrap items-center gap-2 text-body-s font-medium">
             {connector.name}
-            {connector.ownerBotId && <span className={`ml-2 ${metaClass}`}>Only this bot</span>}
+            {connector.ownerBotId && <span className={badgeClass}>Only this bot</span>}
           </p>
           <p className={metaClass}>
             {connectorStatusLine(connector)}
@@ -79,7 +81,7 @@ function ConnectorGrantRow({
         {grant && tools.length > 0 && (
           <button
             type="button"
-            className="button shrink-0"
+            className="button button-sm shrink-0"
             aria-expanded={open}
             onClick={() => setOpen(!open)}
           >
@@ -88,13 +90,14 @@ function ConnectorGrantRow({
         )}
       </div>
       {grant && open && (
-        <ul className="ml-6 flex flex-col gap-2">
+        <ul className="ml-7 flex flex-col gap-2">
           {tools.map((tool) => {
             const readOnly = isReadOnly(connector, tool);
             return (
-              <li key={tool.name} className="flex items-center gap-2 text-small">
+              <li key={tool.name} className="flex min-h-8 items-center gap-3 text-body-s">
                 <input
                   type="checkbox"
+                  className="size-4 shrink-0 accent-brand-fill"
                   aria-label={`${bot.name} may use ${tool.name}`}
                   checked={chosen(tool.name)}
                   disabled={disabled}
@@ -107,7 +110,7 @@ function ConnectorGrantRow({
                   <span className={metaClass}>Reads</span>
                 ) : (
                   <select
-                    className="field w-auto shrink-0 text-ink"
+                    className="field h-7 w-auto shrink-0 py-0 text-label"
                     aria-label={`When ${bot.name} uses ${tool.name}`}
                     value={current.allowWrites.includes(tool.name) ? "allow" : "ask"}
                     disabled={disabled || !chosen(tool.name)}
@@ -137,18 +140,11 @@ export function BotConnectorsPanel({
   connected: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const visible = connectors.filter(
     ({ ownerBotId }) => ownerBotId === null || ownerBotId === bot.id,
   );
-
-  useEffect(() => {
-    if (!dialog.current?.open) {
-      dialog.current?.showModal();
-    }
-  }, []);
 
   async function send(connectorId: string, grant: Omit<ConnectorGrant, "botId"> & { on: boolean }) {
     setBusy(true);
@@ -166,24 +162,18 @@ export function BotConnectorsPanel({
   }
 
   return (
-    <dialog
-      ref={dialog}
-      aria-label={`${bot.name} connectors`}
-      className="dialog m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
+    <SidePanel
+      label={`${bot.name} connectors`}
+      botName={bot.name}
+      title="Connectors"
       onClose={onClose}
     >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-title font-semibold">Connectors</h2>
-        <button type="button" className="button" onClick={() => dialog.current?.close()}>
-          Close
-        </button>
-      </div>
-      <p className="text-small text-ink-secondary">
+      <p className="text-body-s text-ink-secondary">
         Apps this bot may use. Tools that write ask you first unless you allow them here. Add apps
         on the Usage page, under Connectors.
       </p>
-      {visible.length === 0 && <p className="text-small text-ink-secondary">No connectors yet.</p>}
-      <ul className="scroller flex min-h-0 flex-col gap-3 overflow-y-auto">
+      {visible.length === 0 && <EmptyState icon={Plug} title="No connectors yet" />}
+      <ul className="flex flex-col gap-4">
         {visible.map((connector) => (
           <ConnectorGrantRow
             key={connector.id}
@@ -195,10 +185,10 @@ export function BotConnectorsPanel({
         ))}
       </ul>
       {error && (
-        <p role="alert" className="text-small text-ink-secondary">
+        <p role="alert" className={errorClass}>
           {error}
         </p>
       )}
-    </dialog>
+    </SidePanel>
   );
 }

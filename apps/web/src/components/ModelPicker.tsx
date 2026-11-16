@@ -1,5 +1,5 @@
 import type { EngineModel, ModelCatalog } from "@beebot/contracts";
-import { Check, ChevronDown, FlaskConical, Search, Star } from "lucide-react";
+import { Check, ChevronDown, Cpu, FlaskConical, Search, Star } from "lucide-react";
 import {
   type ComponentType,
   type CSSProperties,
@@ -65,22 +65,14 @@ const showMoreKey = "show-more";
 // Pinned versions. The short aliases always follow the newest one.
 const isOlderModel = ({ id }: EngineModel) => id.startsWith("claude-");
 
-const railButtonClass =
-  "relative flex aspect-square w-full items-center justify-center rounded-field transition-colors hover:bg-raised focus-visible:bg-raised focus-visible:-outline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent";
+const tabClass =
+  "flex h-9 shrink-0 items-center gap-2 rounded-xs px-3 text-body-s font-medium text-ink-secondary transition-colors hover:text-ink focus-visible:-outline-offset-2 aria-pressed:text-ink aria-pressed:shadow-[inset_0_-2px_0_var(--color-brand-fill)] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:text-ink-secondary";
 
-// Rail geometry, so the selection marker can move with `transform` alone.
-const railPadding = 4;
-const railButton = 36;
-const railGap = 4;
-const railDivider = 1;
-const markerHeight = 20;
-const markerOffset = (index: number) => {
-  const firstProvider = railPadding + railButton + railGap + railDivider + railGap;
-  const top = index === 0 ? railPadding : firstProvider + (index - 1) * (railButton + railGap);
-  return top + railButton / 2 - markerHeight / 2;
-};
+// The composer's labelled setting: icon, label, chevron, opening a menu above.
+export const pillClass =
+  "composer-control group gap-1 rounded-full font-medium text-ink disabled:text-ink-disabled aria-expanded:bg-hover";
 
-function Rail({
+function Tabs({
   tab,
   providers,
   lockedTo,
@@ -95,17 +87,16 @@ function Rail({
 }) {
   const reasonFor = ({ id, label, disabledReason }: Provider) =>
     disabledReason ?? (lockedTo && id !== lockedTo ? lockedReason(label) : undefined);
-  const tabs = ["favorites", ...providers.map(({ id }) => id)];
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const buttons = [...event.currentTarget.querySelectorAll("button")];
     const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "ArrowRight") {
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       onFocusSearch();
-    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
       event.preventDefault();
-      const step = event.key === "ArrowDown" ? 1 : -1;
+      const step = event.key === "ArrowRight" ? 1 : -1;
       buttons[(at + step + buttons.length) % buttons.length]?.focus();
     } else if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
@@ -117,48 +108,40 @@ function Rail({
     <div
       role="toolbar"
       aria-label="Providers"
-      aria-orientation="vertical"
-      data-model-picker-rail
-      className="relative flex w-11 shrink-0 flex-col gap-1 overflow-y-auto bg-raised/30 p-1 [scrollbar-width:none]"
+      data-model-picker-tabs
+      className="flex shrink-0 gap-1 overflow-x-auto border-b border-edge-subtle [scrollbar-width:none]"
       onKeyDown={onKeyDown}
     >
-      <span
-        aria-hidden
-        className="pointer-events-none absolute top-0 right-1 z-10 h-5 w-[3px] rounded-full bg-honey-fill transition-transform duration-200"
-        style={{ transform: `translateY(${markerOffset(tabs.indexOf(tab))}px)` }}
-      />
-      <Tooltip label="Favorites" side="left" className="block w-full">
-        <button
-          type="button"
-          aria-label="Favorites"
-          aria-pressed={tab === "favorites"}
-          tabIndex={tab === "favorites" ? 0 : -1}
-          className={railButtonClass}
-          onClick={() => onSelect("favorites")}
-        >
-          <Star size={20} fill="currentColor" aria-hidden />
-        </button>
-      </Tooltip>
-      <div aria-hidden className="border-b border-edge" />
+      <button
+        type="button"
+        aria-pressed={tab === "favorites"}
+        tabIndex={tab === "favorites" ? 0 : -1}
+        aria-label="Favorites"
+        className={tabClass}
+        onClick={() => onSelect("favorites")}
+      >
+        <Star aria-hidden size={16} />
+        Favorites
+      </button>
       {providers.map((provider) => {
-        const { id, label, Logo } = provider;
+        const { id, label } = provider;
         const reason = reasonFor(provider);
         return (
-          <Tooltip key={id} label={reason ?? label} side="left" className="block w-full">
+          <Tooltip key={id} label={reason ?? label} className="flex">
             <button
               type="button"
               aria-label={reason ?? label}
               aria-pressed={tab === id}
               aria-disabled={reason !== undefined}
               tabIndex={tab === id ? 0 : -1}
-              className={railButtonClass}
+              className={tabClass}
               onClick={() => {
                 if (!reason) {
                   onSelect(id);
                 }
               }}
             >
-              <Logo aria-hidden width={20} height={20} />
+              {label}
             </button>
           </Tooltip>
         );
@@ -173,7 +156,6 @@ function ModelRow({
   active,
   selected,
   favorite,
-  starOnHover,
   onPick,
   onHover,
 }: {
@@ -182,7 +164,6 @@ function ModelRow({
   active: boolean;
   selected: boolean;
   favorite: boolean;
-  starOnHover: boolean;
   onPick: () => void;
   onHover: () => void;
 }) {
@@ -193,7 +174,7 @@ function ModelRow({
     <div
       role="none"
       data-active={active}
-      className="group flex min-h-8 items-center gap-1 rounded-row px-2 data-[active=true]:bg-raised"
+      className="flex min-h-8 items-center gap-2 rounded-row py-1 pr-1 pl-2 data-[active=true]:bg-hover"
       onMouseMove={onHover}
     >
       <div
@@ -202,35 +183,28 @@ function ModelRow({
         aria-selected={selected}
         aria-disabled={unavailable}
         tabIndex={-1}
-        className="flex min-h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 text-name aria-disabled:cursor-not-allowed"
+        className="flex min-h-6 min-w-0 flex-1 cursor-pointer items-center gap-2 aria-disabled:cursor-not-allowed"
         onClick={onPick}
       >
         <Logo aria-hidden width={16} height={16} className="shrink-0" />
-        <span className="min-w-0 truncate">
-          {label}
-          <span className="sr-only">, {providerLabel(accountId)}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-body-s text-ink">
+            {label}
+            <span className="sr-only">, {providerLabel(accountId)}</span>
+          </span>
+          {unavailable && <span className="text-caption text-ink-secondary">Unavailable</span>}
         </span>
-        {selected && <Check aria-hidden size={14} className="shrink-0" />}
-        {unavailable && <UnavailableBadge />}
+        {selected && <Check aria-hidden size={16} className="shrink-0 text-brand-icon" />}
       </div>
       <Tooltip label={starLabel}>
         <button
           type="button"
           aria-label={starLabel}
           aria-pressed={favorite}
-          className="flex size-6 items-center justify-center rounded-field text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+          className="flex size-6 shrink-0 items-center justify-center rounded-field text-ink-secondary transition-colors hover:bg-hover hover:text-ink aria-pressed:bg-brand-surface aria-pressed:text-brand-icon"
           onClick={() => toggleFavorite(favoriteKey(accountId, row.id))}
         >
-          <Star
-            aria-hidden
-            size={12}
-            fill={favorite ? "currentColor" : "none"}
-            className={`${favorite ? "text-honey" : ""} ${
-              !favorite || starOnHover
-                ? "opacity-0 group-hover:opacity-100 group-data-[active=true]:opacity-100 in-focus-visible:opacity-100 pointer-coarse:opacity-100"
-                : ""
-            }`}
-          />
+          <Star aria-hidden size={16} />
         </button>
       </Tooltip>
     </div>
@@ -239,7 +213,7 @@ function ModelRow({
 
 function UnavailableBadge() {
   return (
-    <span className="shrink-0 rounded-full border border-edge-strong px-1.5 text-micro text-ink-secondary">
+    <span className="inline-flex h-[22px] shrink-0 items-center rounded-xs bg-raised px-2 text-label font-medium text-ink">
       Unavailable
     </span>
   );
@@ -331,18 +305,10 @@ export function ModelPickerContent({
     }
   }
 
-  function focusRail(input: HTMLInputElement) {
-    input
-      .closest("[data-model-picker]")
-      ?.querySelector<HTMLElement>('[data-model-picker-rail] button[aria-pressed="true"]')
-      ?.focus();
-  }
-
   function onSearchKey(event: KeyboardEvent<HTMLInputElement>) {
     if (event.nativeEvent.isComposing || event.keyCode === 229) {
       return;
     }
-    const empty = event.currentTarget.value.length === 0;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       moveHighlight(event.key === "ArrowDown" ? 1 : -1);
@@ -354,9 +320,6 @@ export function ModelPickerContent({
       } else {
         pick(shown.find((row) => keyOf(row) === active));
       }
-    } else if ((event.key === "ArrowLeft" && empty) || (event.key === "Tab" && event.shiftKey)) {
-      event.preventDefault();
-      focusRail(event.currentTarget);
     }
   }
 
@@ -365,9 +328,30 @@ export function ModelPickerContent({
   return (
     <div
       data-model-picker
-      className="flex h-[346px] max-h-[calc(100vh-32px)] w-[min(360px,calc(100vw-32px))] flex-row overflow-hidden"
+      className="flex h-[312px] max-h-[calc(100vh-32px)] w-[min(360px,calc(100vw-32px))] flex-col gap-2 overflow-hidden p-2"
     >
-      <Rail
+      <label className="flex h-8 shrink-0 items-center gap-2 rounded-field border border-edge-strong px-2 has-[input:focus-visible]:outline-2 has-[input:focus-visible]:-outline-offset-1 has-[input:focus-visible]:outline-focus">
+        <Search aria-hidden size={16} className="shrink-0 text-ink-secondary" />
+        <input
+          ref={searchRef}
+          type="text"
+          role="combobox"
+          aria-label="Search models"
+          aria-expanded
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={active && keys.length > 0 ? optionId(active) : undefined}
+          placeholder="Search models"
+          className="w-full bg-transparent text-body-s outline-none placeholder:text-ink-faint"
+          value={query}
+          onChange={({ target }) => {
+            setQuery(target.value);
+            setHighlight(undefined);
+          }}
+          onKeyDown={onSearchKey}
+        />
+      </label>
+      <Tabs
         tab={tab}
         providers={providers}
         lockedTo={lockedTo}
@@ -379,69 +363,45 @@ export function ModelPickerContent({
           searchRef.current?.focus();
         }}
       />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col border-l border-edge bg-raised/40">
-        <div className="mx-3 mt-2.5 flex shrink-0 items-center gap-2 border-b border-edge pb-1.5 transition-colors has-[input:focus]:border-honey">
-          <Search aria-hidden size={14} className="shrink-0 text-ink-faint" />
-          <input
-            ref={searchRef}
-            type="text"
-            role="combobox"
-            aria-label="Search models"
-            aria-expanded
-            aria-controls={listId}
-            aria-autocomplete="list"
-            aria-activedescendant={active && keys.length > 0 ? optionId(active) : undefined}
-            placeholder="Search models..."
-            className="h-6 w-full bg-transparent text-name outline-none"
-            value={query}
-            onChange={({ target }) => {
-              setQuery(target.value);
-              setHighlight(undefined);
-            }}
-            onKeyDown={onSearchKey}
-          />
-        </div>
-        <div
-          id={listId}
-          role="listbox"
-          aria-label="Models"
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5"
-        >
-          {shown.map((row) => {
-            const key = keyOf(row);
-            return (
-              <ModelRow
-                key={key}
-                row={row}
-                id={optionId(key)}
-                active={key === active}
-                selected={key === selectedKey}
-                favorite={isFavorite(row)}
-                starOnHover={tab === "favorites" && !query.trim()}
-                onPick={() => pick(row)}
-                onHover={() => setHighlight(key)}
-              />
-            );
-          })}
-          {collapsible && (
-            <div
-              id={optionId(showMoreKey)}
-              role="option"
-              aria-selected={false}
-              aria-expanded={showOlder}
-              tabIndex={-1}
-              data-active={active === showMoreKey}
-              className="flex min-h-8 cursor-pointer items-center rounded-row px-2 text-name text-ink-secondary hover:text-ink data-[active=true]:bg-raised"
-              onClick={() => setShowOlder(!showOlder)}
-              onMouseMove={() => setHighlight(showMoreKey)}
-            >
-              {showOlder ? "Show less" : "Show more"}
-            </div>
-          )}
-          {shown.length === 0 && (
-            <p className="px-2 py-1.5 text-small text-ink-secondary">{empty}</p>
-          )}
-        </div>
+      <div
+        id={listId}
+        role="listbox"
+        aria-label="Models"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      >
+        {shown.map((row) => {
+          const key = keyOf(row);
+          return (
+            <ModelRow
+              key={key}
+              row={row}
+              id={optionId(key)}
+              active={key === active}
+              selected={key === selectedKey}
+              favorite={isFavorite(row)}
+              onPick={() => pick(row)}
+              onHover={() => setHighlight(key)}
+            />
+          );
+        })}
+        {collapsible && (
+          <div
+            id={optionId(showMoreKey)}
+            role="option"
+            aria-selected={false}
+            aria-expanded={showOlder}
+            tabIndex={-1}
+            data-active={active === showMoreKey}
+            className="flex min-h-8 cursor-pointer items-center rounded-row px-2 text-body-s text-ink-secondary hover:text-ink data-[active=true]:bg-hover"
+            onClick={() => setShowOlder(!showOlder)}
+            onMouseMove={() => setHighlight(showMoreKey)}
+          >
+            {showOlder ? "Show less" : "Show more"}
+          </div>
+        )}
+        {shown.length === 0 && (
+          <p className="px-2 py-1.5 text-body-s text-ink-secondary">{empty}</p>
+        )}
       </div>
     </div>
   );
@@ -483,6 +443,7 @@ export function ModelPicker({
   const search = useRef<HTMLInputElement>(null);
   const wheelLock = useRef<AbortController>(undefined);
   const [opened, setOpened] = useState(0);
+  const [open, setOpen] = useState(false);
   const id = useId();
   const anchor = `--picker-${id.replace(/[^\w-]/g, "")}`;
   const unavailable = isUnavailable(catalog, accountId, model);
@@ -493,6 +454,7 @@ export function ModelPicker({
 
   function onToggle(open: boolean) {
     wheelLock.current?.abort();
+    setOpen(open);
     if (open) {
       wheelLock.current = new AbortController();
       lockBackgroundWheel(wheelLock.current.signal);
@@ -514,16 +476,27 @@ export function ModelPicker({
           disabled={disabled}
           aria-label={`Model: ${label}${unavailable ? " (Unavailable)" : ""}`}
           aria-haspopup="dialog"
+          aria-expanded={open}
           data-model-picker-trigger
-          className={
-            field ? "field flex items-center gap-2 text-left text-ink" : "composer-control"
-          }
+          className={field ? "field flex items-center gap-2 text-left text-ink" : pillClass}
           style={{ anchorName: anchor } as CSSProperties}
         >
-          <Logo aria-hidden width={16} height={16} className="shrink-0" />
+          {field ? (
+            <Logo aria-hidden width={16} height={16} className="shrink-0" />
+          ) : (
+            <Cpu aria-hidden size={16} className="shrink-0 text-ink-secondary" />
+          )}
           <span className="min-w-0 truncate">{label}</span>
           {unavailable && <UnavailableBadge />}
-          {field && <ChevronDown aria-hidden size={16} className="ml-auto shrink-0 opacity-60" />}
+          {field ? (
+            <ChevronDown aria-hidden size={16} className="ml-auto shrink-0 opacity-60" />
+          ) : (
+            <ChevronDown
+              aria-hidden
+              size={12}
+              className="shrink-0 text-ink-secondary transition-transform group-aria-expanded:rotate-180"
+            />
+          )}
         </button>
       </Tooltip>
       <div

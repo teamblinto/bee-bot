@@ -1,5 +1,6 @@
 import type { Bot, Command, Routine, RoutineFiring } from "@beebot/contracts";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { CalendarClock, CircleX, Plus } from "lucide-react";
+import { type FormEvent, type ReactNode, useRef, useState } from "react";
 
 import {
   firingLine,
@@ -19,15 +20,53 @@ import {
   scheduleLine,
 } from "../routineSchedule";
 import { postCommand } from "../serverConnection";
+import { EmptyState, errorClass, fieldLabelClass, RowMenu, SidePanel } from "./SidePanel";
+import { iconProps } from "./ui";
 
-const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
-const metaClass = "text-label text-ink-faint";
+const metaClass = "text-caption text-ink-secondary";
 const repeatLabels: Record<Repeat, string> = {
   daily: "Every day",
   weekdays: "Weekdays",
   weekly: "One day a week",
 };
 const lateHours = [1, 2, 4, 8, 12];
+
+function FieldError({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <span id={id} className="flex items-center gap-1 text-caption font-normal text-danger">
+      <CircleX {...iconProps} size={12} />
+      {children}
+    </span>
+  );
+}
+
+function Switch({
+  label,
+  on,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  on: boolean;
+  disabled: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      className={`relative h-[18px] w-8 shrink-0 rounded-full transition-colors disabled:opacity-50 ${on ? "bg-brand-fill" : "bg-ink-secondary"}`}
+      onClick={() => onChange(!on)}
+    >
+      <span
+        className={`absolute top-0.5 size-3.5 rounded-full bg-card transition-[left] ${on ? "left-4" : "left-0.5"}`}
+      />
+    </button>
+  );
+}
 
 export function RoutinesPanel({
   bot,
@@ -42,25 +81,20 @@ export function RoutinesPanel({
   connected: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const field = useRef<HTMLInputElement>(null);
   const sending = useRef(false);
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [preset, setPreset] = useState(defaultPreset);
   const [skipIfLaterMins, setSkipIfLaterMins] = useState<number | null>(null);
-  const [editing, setEditing] = useState<Routine>();
+  const [editing, setEditing] = useState<Routine | "new">();
+  const [tried, setTried] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
-  useEffect(() => {
-    if (!dialog.current?.open) {
-      dialog.current?.showModal();
-    }
-  }, []);
-
   const disabled = busy || !connected;
+  const nameMissing = tried && !name.trim();
+  const promptMissing = tried && !prompt.trim();
 
   function clearForm() {
     setName("");
@@ -68,6 +102,7 @@ export function RoutinesPanel({
     setPreset(defaultPreset);
     setSkipIfLaterMins(null);
     setEditing(undefined);
+    setTried(false);
     setError(undefined);
   }
 
@@ -95,8 +130,8 @@ export function RoutinesPanel({
     setPreset(presetOf(routine.cron) ?? defaultPreset);
     setSkipIfLaterMins(routine.skipIfLaterMins);
     setEditing(routine);
+    setTried(false);
     setError(undefined);
-    field.current?.focus();
   }
 
   function setEnabled(routine: Routine, enabled: boolean) {
@@ -106,175 +141,150 @@ export function RoutinesPanel({
   }
 
   const remove = (routineId: string) =>
-    void send({ type: "delete-routine", routineId }, () => {
-      if (routineId === editing?.id) {
-        clearForm();
-      }
-      list.current?.focus();
-    });
+    void send({ type: "delete-routine", routineId }, () => list.current?.focus());
 
   function submit(event: FormEvent) {
     event.preventDefault();
+    if (!name.trim() || !prompt.trim() || !preset.time) {
+      setTried(true);
+      return;
+    }
     const fields = { name, prompt, cron: presetCron(preset), skipIfLaterMins };
-    const command: Command = editing
-      ? {
-          type: "update-routine",
-          routineId: editing.id,
-          timezone: editing.timezone,
-          enabled: editing.enabled,
-          ...fields,
-        }
-      : {
-          type: "create-routine",
-          botId: bot.id,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          enabled: true,
-          ...fields,
-        };
+    const command: Command =
+      editing && editing !== "new"
+        ? {
+            type: "update-routine",
+            routineId: editing.id,
+            timezone: editing.timezone,
+            enabled: editing.enabled,
+            ...fields,
+          }
+        : {
+            type: "create-routine",
+            botId: bot.id,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            enabled: true,
+            ...fields,
+          };
     void send(command, clearForm);
   }
 
-  return (
-    <dialog
-      ref={dialog}
-      aria-label={`${bot.name} routines`}
-      className="dialog m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
-      onClose={onClose}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-title font-semibold">Routines</h2>
-        <button type="button" className="button" onClick={() => dialog.current?.close()}>
-          Close
-        </button>
-      </div>
-      <p className="text-small text-ink-secondary">{routinesNotice}</p>
-      <div
-        ref={list}
-        tabIndex={-1}
-        className="scroller flex min-h-0 flex-col gap-3 overflow-y-auto outline-none"
-      >
-        {routines.length === 0 && <p className="text-small text-ink-secondary">No routines yet.</p>}
-        {routines.map((routine) => {
-          const firing = firings.find(({ routineId }) => routineId === routine.id);
-          return (
-            <article key={routine.id} aria-label={routine.name} className="flex items-start gap-2">
-              <div className="min-w-0 flex-1">
-                <p className="text-small font-medium wrap-anywhere">{routine.name}</p>
-                <p className={metaClass}>{scheduleLine(routine.cron)}</p>
-                <p className={metaClass}>{nextDueLine(routine)}</p>
-                {routine.pausedReason && (
-                  <p className="text-label text-ink-secondary">
-                    {routinePauseLines[routine.pausedReason]}
-                  </p>
-                )}
-                <p className={metaClass}>{heartbeatLine(routine)}</p>
-                {firing && <p className={metaClass}>{firingLine(firing)}</p>}
-                {firing?.retryAt && <p className={metaClass}>{retryLine(firing.retryAt)}</p>}
-              </div>
-              <button
-                type="button"
-                className="button shrink-0"
-                disabled={disabled}
-                onClick={() => setEnabled(routine, !routine.enabled)}
-              >
-                {routine.enabled ? "Turn off" : "Turn on"}
-              </button>
-              <button
-                type="button"
-                className="button shrink-0"
-                disabled={disabled}
-                onClick={() => edit(routine)}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                className="button shrink-0"
-                disabled={disabled}
-                onClick={() => remove(routine.id)}
-              >
-                Delete
-              </button>
-            </article>
-          );
-        })}
-      </div>
-      {error && (
-        <p role="alert" className="text-small text-ink-secondary">
-          {error}
-        </p>
-      )}
-      <form className="flex shrink-0 flex-col gap-2" onSubmit={submit}>
-        <label className={labelClass}>
-          {editing ? "Edit this routine" : "Add a routine"}
-          <input
-            ref={field}
-            className="field text-ink"
-            maxLength={80}
-            placeholder="Name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
-        <label className={labelClass}>
-          Prompt
-          <textarea
-            className="field resize-none text-ink"
-            maxLength={32_000}
-            rows={3}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-          />
-        </label>
-        <div className="flex flex-wrap items-end gap-2">
-          <label className={labelClass}>
-            Repeats
-            <select
-              className="field text-ink"
-              value={preset.repeat}
-              onChange={(event) =>
-                setPreset({
-                  ...preset,
-                  repeat: repeats.find((repeat) => repeat === event.target.value) ?? "daily",
-                })
-              }
+  const alert = error && (
+    <p role="alert" className={errorClass}>
+      {error}
+    </p>
+  );
+
+  if (editing) {
+    const isNew = editing === "new";
+    return (
+      <SidePanel
+        label={`${bot.name} routines`}
+        botName={bot.name}
+        title={isNew ? "New routine" : "Edit routine"}
+        onClose={onClose}
+        footer={
+          <>
+            <button type="button" className="button" onClick={clearForm}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              form="routine-form"
+              className="button button-primary"
+              disabled={disabled}
             >
-              {repeats.map((repeat) => (
-                <option key={repeat} value={repeat}>
-                  {repeatLabels[repeat]}
-                </option>
-              ))}
-            </select>
-          </label>
-          {preset.repeat === "weekly" && (
-            <label className={labelClass}>
-              Day
-              <select
-                className="field text-ink"
-                value={preset.day}
-                onChange={(event) => setPreset({ ...preset, day: Number(event.target.value) })}
-              >
-                {dayNames.map((day, index) => (
-                  <option key={day} value={index}>
-                    {day}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          <label className={labelClass}>
-            Time
+              {isNew ? "Save and turn on" : "Save"}
+            </button>
+          </>
+        }
+      >
+        <form id="routine-form" className="flex flex-col gap-4" noValidate onSubmit={submit}>
+          <label className={fieldLabelClass}>
+            Name
             <input
-              type="time"
-              className="field text-ink"
-              value={preset.time}
-              onChange={(event) => setPreset({ ...preset, time: event.target.value })}
+              autoFocus
+              className="field font-normal"
+              maxLength={80}
+              placeholder="For example, Morning PR review"
+              aria-invalid={nameMissing}
+              aria-describedby={nameMissing ? "routine-name-error" : undefined}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
             />
+            {nameMissing && (
+              <FieldError id="routine-name-error">Give the routine a name.</FieldError>
+            )}
           </label>
-          <label className={labelClass}>
+          <label className={fieldLabelClass}>
+            What {bot.name} does
+            <textarea
+              className="field resize-none font-normal"
+              maxLength={32_000}
+              rows={4}
+              aria-invalid={promptMissing}
+              aria-describedby={promptMissing ? "routine-prompt-error" : undefined}
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+            />
+            {promptMissing && (
+              <FieldError id="routine-prompt-error">Tell {bot.name} what to do.</FieldError>
+            )}
+          </label>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-end gap-3">
+              <label className={`${fieldLabelClass} min-w-40 flex-1`}>
+                Repeats
+                <select
+                  className="field font-normal"
+                  value={preset.repeat}
+                  onChange={(event) =>
+                    setPreset({
+                      ...preset,
+                      repeat: repeats.find((repeat) => repeat === event.target.value) ?? "daily",
+                    })
+                  }
+                >
+                  {repeats.map((repeat) => (
+                    <option key={repeat} value={repeat}>
+                      {repeatLabels[repeat]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {preset.repeat === "weekly" && (
+                <label className={`${fieldLabelClass} w-36`}>
+                  Day
+                  <select
+                    className="field font-normal"
+                    value={preset.day}
+                    onChange={(event) => setPreset({ ...preset, day: Number(event.target.value) })}
+                  >
+                    {dayNames.map((day, index) => (
+                      <option key={day} value={index}>
+                        {day}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label className={`${fieldLabelClass} w-30`}>
+                Time
+                <input
+                  type="time"
+                  className="field font-normal"
+                  aria-invalid={tried && !preset.time}
+                  value={preset.time}
+                  onChange={(event) => setPreset({ ...preset, time: event.target.value })}
+                />
+              </label>
+            </div>
+            {preset.time && <p className={metaClass}>{scheduleLine(presetCron(preset))}</p>}
+          </div>
+          <label className={fieldLabelClass}>
             Skip if late
             <select
-              className="field text-ink"
+              className="field font-normal"
               value={skipIfLaterMins ?? ""}
               onChange={({ target: { value } }) => setSkipIfLaterMins(value ? Number(value) : null)}
             >
@@ -285,23 +295,91 @@ export function RoutinesPanel({
                 </option>
               ))}
             </select>
+            <span className="field-help font-normal">
+              If {bot.name}'s computer was asleep when it was due, skip that run instead of running
+              late.
+            </span>
           </label>
-        </div>
-        <div className="flex justify-end gap-2">
-          {editing && (
-            <button type="button" className="button" onClick={clearForm}>
-              Cancel
-            </button>
-          )}
-          <button
-            type="submit"
-            className="button button-primary"
-            disabled={disabled || !name.trim() || !prompt.trim() || !preset.time}
-          >
-            {editing ? "Save" : "Add"}
-          </button>
-        </div>
-      </form>
-    </dialog>
+          {alert}
+        </form>
+      </SidePanel>
+    );
+  }
+
+  return (
+    <SidePanel label={`${bot.name} routines`} botName={bot.name} title="Routines" onClose={onClose}>
+      <div ref={list} tabIndex={-1} className="flex flex-col gap-4 outline-none">
+        <p className="text-body-s text-ink-secondary">{routinesNotice}</p>
+        <button
+          type="button"
+          className="button button-sm button-outline self-start"
+          disabled={disabled}
+          onClick={() => setEditing("new")}
+        >
+          <Plus {...iconProps} />
+          New routine
+        </button>
+        {routines.length === 0 && (
+          <EmptyState icon={CalendarClock} title="No routines yet">
+            <p className="text-body-s text-ink-secondary">
+              A routine asks {bot.name} to do the same thing on a schedule.
+            </p>
+          </EmptyState>
+        )}
+        {routines.map((routine) => {
+          const firing = firings.find(({ routineId }) => routineId === routine.id);
+          return (
+            <article
+              key={routine.id}
+              aria-label={routine.name}
+              className="surface flex flex-col gap-2 p-4"
+            >
+              <div className="flex items-center gap-2">
+                <h3
+                  className={`min-w-0 flex-1 text-body-s font-medium wrap-anywhere ${routine.enabled ? "" : "text-ink-secondary"}`}
+                >
+                  {routine.name}
+                </h3>
+                <Switch
+                  label={`${routine.name} on`}
+                  on={routine.enabled}
+                  disabled={disabled}
+                  onChange={(on) => setEnabled(routine, on)}
+                />
+              </div>
+              <p className={`text-body-s ${routine.enabled ? "" : "text-ink-secondary"}`}>
+                {scheduleLine(routine.cron)}
+              </p>
+              <div className="flex flex-col gap-1">
+                <p className={metaClass}>{nextDueLine(routine)}</p>
+                {routine.pausedReason && (
+                  <p className="text-caption text-waiting">
+                    {routinePauseLines[routine.pausedReason]}
+                  </p>
+                )}
+                <p className={metaClass}>{heartbeatLine(routine)}</p>
+                {firing && <p className={metaClass}>{firingLine(firing)}</p>}
+                {firing?.retryAt && <p className={metaClass}>{retryLine(firing.retryAt)}</p>}
+              </div>
+              <div className="flex justify-end">
+                <RowMenu
+                  label={`${routine.name} actions`}
+                  items={[
+                    { label: "Edit", disabled, onSelect: () => edit(routine) },
+                    {
+                      label: "Delete",
+                      danger: true,
+                      disabled,
+                      onSelect: () => remove(routine.id),
+                    },
+                  ]}
+                />
+              </div>
+            </article>
+          );
+        })}
+        {alert}
+      </div>
+    </SidePanel>
   );
 }

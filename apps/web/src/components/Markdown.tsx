@@ -27,13 +27,11 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const block = useRef<HTMLPreElement>(null);
   return (
     <div className="code-block">
-      <div className="flex items-center justify-between gap-2 pt-1 pr-1 pl-3 select-none">
-        <span className="truncate font-mono text-micro text-ink-faint">
-          {fenceLanguage(children)}
-        </span>
+      <div className="flex h-8 items-center justify-between gap-2 border-b border-edge-subtle pr-1 pl-3 select-none">
+        <span className="truncate text-caption text-ink-secondary">{fenceLanguage(children)}</span>
         <CopyButton label="Copy code" text={() => block.current?.textContent ?? ""} />
       </div>
-      <pre ref={block} tabIndex={0}>
+      <pre ref={block} tabIndex={0} className="pt-3">
         {children}
       </pre>
     </div>

@@ -1,40 +1,86 @@
 import type { Bot, ChatMessage, Room } from "@beebot/contracts";
-import { Gauge, Hexagon, Monitor, Plus, ScrollText, ShieldOff, Users } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-
-import { connectionLines, engineFix, shortTime } from "../labels";
 import {
-  type ConnectionState,
-  isActive,
-  postCommand,
-  sendCommand,
-  waitingOnOwner,
-} from "../serverConnection";
+  CirclePause,
+  Clock,
+  Gauge,
+  Inbox,
+  LoaderCircle,
+  type LucideIcon,
+  Monitor,
+  PanelLeft,
+  Plus,
+  ScrollText,
+  ShieldAlert,
+  Users,
+  X,
+} from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+
+import { shortTime } from "../labels";
+import { type WaitingItem, waitingItems, waitingKind } from "../needsYou";
+import { readSidebarCollapsed, saveSidebarCollapsed } from "../preferences";
+import { type ConnectionState, isActive, postCommand, sendCommand } from "../serverConnection";
 import { Avatar } from "./Avatar";
+import { BeeLogo } from "./BeeLogo";
+import { SidebarFooter } from "./SidebarFooter";
+import { Tooltip } from "./Tooltip";
 import { iconProps } from "./ui";
 
-function statusLine({ status, engine }: ConnectionState) {
-  if (status !== "connected") {
-    return connectionLines[status];
-  }
-  if (!engine) {
-    return "Connected";
-  }
-  return engineFix(engine)?.label ?? "Claude ready";
+const chipTones = {
+  waiting: { chip: "bg-waiting-surface px-2 text-waiting", icon: "text-waiting-status" },
+  working: { chip: "text-ink-secondary", icon: "text-success-status motion-safe:animate-spin" },
+  paused: { chip: "text-ink-secondary", icon: "text-neutral-status" },
+};
+
+function StatusChip({
+  Icon,
+  label,
+  detail,
+  tone,
+}: {
+  Icon: LucideIcon;
+  label: string;
+  detail?: string;
+  tone: keyof typeof chipTones;
+}) {
+  return (
+    <span
+      className={`flex h-[22px] max-w-full items-center gap-1 self-start rounded-full ${chipTones[tone].chip}`}
+    >
+      <Icon {...iconProps} size={12} className={`shrink-0 ${chipTones[tone].icon}`} />
+      <span className="shrink-0 text-label font-medium">{label}</span>
+      {detail && <span className="truncate text-caption">· {detail}</span>}
+    </span>
+  );
 }
 
 const previewLine = (message: ChatMessage | undefined) =>
   message?.body.replace(/[`*_~]|^[#>\s]+/gm, "").trim() ||
   (message?.attachments.length ? "Sent a file" : "");
 
+// What a bot is doing, as the sidebar shows it: undefined when it's idle.
+function botState(bot: Bot, waiting: WaitingItem | undefined, connection: ConnectionState) {
+  if (waiting) {
+    return { tone: "waiting", Icon: Clock, label: "Waiting on you" } as const;
+  }
+  if (bot.status === "paused") {
+    return { tone: "paused", Icon: CirclePause, label: "Paused" } as const;
+  }
+  return isActive(connection.chat.runs.find(({ botId }) => botId === bot.id))
+    ? ({ tone: "working", Icon: LoaderCircle, label: "Working" } as const)
+    : undefined;
+}
+
 function BotRow({
   bot,
   connection,
+  waiting,
   selected,
   onSelect,
 }: {
   bot: Bot;
   connection: ConnectionState;
+  waiting: WaitingItem | undefined;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -42,52 +88,44 @@ function BotRow({
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
   const last = messages.at(-1);
   const lastBotMessage = messages.findLast(({ author }) => author === "bot");
-  const waiting = waitingOnOwner(chat, bot.id);
   const unread = !selected && lastBotMessage && lastBotMessage.id !== lastSeen[bot.id];
-  const working = isActive(chat.runs.find(({ botId }) => botId === bot.id));
-
-  let line = previewLine(last) || "No messages yet";
-  if (waiting) {
-    line = "Waiting on you";
-  } else if (bot.status === "paused") {
-    line = "Paused";
-  } else if (working) {
-    line = "Working…";
-  }
+  const state = botState(bot, waiting, connection);
 
   return (
     <button
       type="button"
       aria-current={selected}
-      className="flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised"
+      className="flex min-h-11 w-full items-start gap-2 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised"
       onClick={onSelect}
     >
-      <Avatar seed={bot.avatarSeed} />
-      <span className="min-w-0 flex-1">
-        <span className="flex items-baseline gap-2">
-          <span className="truncate text-name font-medium">{bot.name}</span>
-          {bot.access === "full" && (
-            <span className="self-center text-danger">
-              <ShieldOff {...iconProps} size={12} />
-              <span className="sr-only">Full access</span>
-            </span>
-          )}
-          <span className="flex-1" />
+      <Avatar seed={bot.avatarSeed} tight className="size-5" />
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex items-center gap-1">
+          <span className="flex-1 truncate text-body-s font-medium">{bot.name}</span>
           {last && (
-            <span className="shrink-0 text-label text-ink-faint tabular-nums">
+            <span className="shrink-0 text-caption text-ink-secondary tabular-nums">
               {shortTime(last.createdAt)}
             </span>
           )}
-        </span>
-        <span className="flex items-center gap-2">
-          <span className="truncate text-small text-ink-secondary">{line}</span>
-          <span className="flex-1" />
-          {(waiting || unread) && (
-            <span className="size-2 shrink-0 rounded-full bg-honey">
-              <span className="sr-only">{waiting ? "Needs you" : "Unread"}</span>
+          {unread && (
+            <span className="size-2 shrink-0 rounded-full bg-brand-icon">
+              <span className="sr-only">Unread</span>
+            </span>
+          )}
+          {bot.access === "full" && (
+            <span className="shrink-0 text-danger-status">
+              <ShieldAlert {...iconProps} size={12} />
+              <span className="sr-only">Full access</span>
             </span>
           )}
         </span>
+        {state ? (
+          <StatusChip {...state} {...(waiting && { detail: waitingKind(waiting).toLowerCase() })} />
+        ) : (
+          <span className="truncate text-label text-ink-secondary">
+            {previewLine(last) || "No messages yet"}
+          </span>
+        )}
       </span>
     </button>
   );
@@ -116,26 +154,26 @@ function DeleteBotDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
         }
       }}
       aria-label={`Delete ${bot.name}`}
-      className="dialog m-auto w-[min(420px,calc(100vw-32px))] p-5 backdrop:bg-scrim"
+      className="dialog m-auto w-[min(420px,calc(100vw-32px))] p-6 backdrop:bg-scrim"
       onCancel={onClose}
     >
-      <h2 className="mb-2 text-title font-semibold">Delete {bot.name} for good?</h2>
-      <p className="mb-4 text-small text-ink-secondary">
+      <h2 className="mb-4 text-title-s font-semibold">Delete {bot.name} for good?</h2>
+      <p className="mb-4 text-body-s text-ink-secondary">
         Its chat, memory, routines, files and computer are removed and can't be brought back. What
         it said in rooms stays, marked as from a deleted bot.
       </p>
       {error && (
-        <p role="alert" className="mb-4 text-small text-danger">
+        <p role="alert" className="mb-4 text-body-s text-danger">
           {error}
         </p>
       )}
-      <div className="flex justify-end gap-1">
-        <button type="button" className="button" onClick={onClose}>
+      <div className="flex justify-end gap-2">
+        <button type="button" className="button button-outline" onClick={onClose}>
           Cancel
         </button>
         <button
           type="button"
-          className="button button-primary bg-danger"
+          className="button button-danger"
           disabled={deleting}
           onClick={() => void remove()}
         >
@@ -146,34 +184,95 @@ function DeleteBotDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
   );
 }
 
+function SectionHeader({ label, action }: { label: string; action?: ReactNode }) {
+  return (
+    <div className="mt-2 flex h-7 shrink-0 items-center gap-2 pr-1 pl-2">
+      <h2 className="flex-1 text-label font-medium text-ink-secondary">{label}</h2>
+      {action}
+    </div>
+  );
+}
+
+function IconAction({
+  label,
+  Icon,
+  className = "button button-icon button-sm",
+  disabled,
+  onClick,
+}: {
+  label: string;
+  Icon: LucideIcon;
+  className?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip label={label} side="bottom">
+      <button
+        type="button"
+        aria-label={label}
+        className={className}
+        disabled={disabled}
+        onClick={onClick}
+      >
+        <Icon {...iconProps} />
+      </button>
+    </Tooltip>
+  );
+}
+
+const countClass =
+  "flex h-5 min-w-5 items-center justify-center rounded-full bg-waiting-surface px-1 text-label font-medium text-waiting tabular-nums";
+
+const emptyClass = "px-2 py-1 text-caption text-ink-secondary";
+
 const rowClass =
-  "flex w-full items-center gap-2.5 rounded-row px-2 py-1.5 text-left transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised";
+  "flex h-8 w-full items-center gap-2 rounded-row px-2 text-left text-body-s transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:font-medium";
 
 function RoomRow({
   room,
-  connection,
   selected,
   onSelect,
 }: {
   room: Room;
-  connection: ConnectionState;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const last = connection.chat.messages.findLast(({ roomId }) => roomId === room.id);
-  const line = previewLine(last) || `${room.members.length} bots`;
   return (
     <button type="button" aria-current={selected} className={rowClass} onClick={onSelect}>
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary">
-        <Users {...iconProps} />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-name font-medium">{room.name}</span>
-        <span className="block truncate text-small text-ink-secondary">{line}</span>
-      </span>
+      <Users {...iconProps} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{room.name}</span>
     </button>
   );
 }
+
+function NavItem({
+  Icon,
+  label,
+  current,
+  onClick,
+}: {
+  Icon: LucideIcon;
+  label: string;
+  current: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" aria-current={current} className={rowClass} onClick={onClick}>
+      <Icon {...iconProps} className="shrink-0" />
+      {label}
+    </button>
+  );
+}
+
+const statusDots = {
+  waiting: "bg-waiting-status",
+  working: "bg-success-status",
+  paused: "bg-neutral-status",
+};
+
+const railButton =
+  "button button-icon relative aria-[current=true]:bg-raised aria-[current=true]:text-ink";
 
 export function Sidebar({
   connection,
@@ -182,12 +281,14 @@ export function Sidebar({
   usageOpen,
   auditOpen,
   wallOpen,
+  needsYouOpen,
   open,
   onSelect,
   onSelectRoom,
   onUsage,
   onAudit,
   onWall,
+  onNeedsYou,
   onNewBot,
   onNewRoom,
   onClose,
@@ -198,12 +299,14 @@ export function Sidebar({
   usageOpen: boolean;
   auditOpen: boolean;
   wallOpen: boolean;
+  needsYouOpen: boolean;
   open: boolean;
   onSelect: (botId: string) => void;
   onSelectRoom: (roomId: string) => void;
   onUsage: () => void;
   onAudit: () => void;
   onWall: () => void;
+  onNeedsYou: () => void;
   onNewBot: () => void;
   onNewRoom: () => void;
   onClose: () => void;
@@ -212,6 +315,14 @@ export function Sidebar({
   const bots = connection.chat.bots.filter(({ archivedAt }) => !archivedAt);
   const archived = connection.chat.bots.filter(({ archivedAt }) => archivedAt);
   const connected = connection.status === "connected";
+  const waiting = waitingItems(connection.chat);
+  const waitingFor = (botId: string) => waiting.find((item) => item.botId === botId);
+  const needsYouName =
+    waiting.length === 0
+      ? "Needs you"
+      : `Needs you, ${waiting.length} ${waiting.length === 1 ? "item needs" : "items need"} you`;
+  const count = waiting.length > 99 ? "99+" : waiting.length;
+  const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
   const [deleting, setDeleting] = useState<Bot>();
   const drawer = useRef<HTMLElement>(null);
 
@@ -222,8 +333,84 @@ export function Sidebar({
     }
   }, [open]);
 
+  function collapse(next: boolean) {
+    saveSidebarCollapsed(next);
+    setCollapsed(next);
+  }
+
+  const navItems = [
+    { Icon: Monitor, label: "Computers", current: wallOpen, onClick: onWall },
+    { Icon: Gauge, label: "Usage", current: usageOpen, onClick: onUsage },
+    { Icon: ScrollText, label: "Audit", current: auditOpen, onClick: onAudit },
+  ];
+
   return (
     <>
+      {collapsed && (
+        <nav
+          aria-label="Bots"
+          className="hidden w-14 shrink-0 flex-col items-center gap-1 border-r border-edge-subtle bg-sidebar py-2 md:flex"
+        >
+          <IconAction
+            label="Expand sidebar"
+            Icon={PanelLeft}
+            className="button button-icon mb-2"
+            onClick={() => collapse(false)}
+          />
+          <Tooltip label="Needs you" side="bottom">
+            <button
+              type="button"
+              aria-label={needsYouName}
+              aria-current={needsYouOpen}
+              className={railButton}
+              onClick={onNeedsYou}
+            >
+              <Inbox {...iconProps} />
+            </button>
+          </Tooltip>
+          {waiting.length > 0 && (
+            <span aria-hidden="true" className={`${countClass} mb-1`}>
+              {count}
+            </span>
+          )}
+          <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">
+            {bots.map((bot) => {
+              const state = botState(bot, waitingFor(bot.id), connection);
+              return (
+                <Tooltip key={bot.id} label={bot.name} side="bottom">
+                  <button
+                    type="button"
+                    aria-label={state ? `${bot.name}, ${state.label}` : bot.name}
+                    aria-current={bot.id === selectedId}
+                    className={railButton}
+                    onClick={() => onSelect(bot.id)}
+                  >
+                    <Avatar seed={bot.avatarSeed} tight className="size-5" />
+                    {state && (
+                      <span
+                        className={`absolute right-1 bottom-1 size-2 rounded-full ring-2 ring-sidebar ${statusDots[state.tone]}`}
+                      />
+                    )}
+                  </button>
+                </Tooltip>
+              );
+            })}
+          </div>
+          {navItems.map(({ Icon, label, current, onClick }) => (
+            <Tooltip key={label} label={label} side="bottom">
+              <button
+                type="button"
+                aria-label={label}
+                aria-current={current}
+                className={railButton}
+                onClick={onClick}
+              >
+                <Icon {...iconProps} />
+              </button>
+            </Tooltip>
+          ))}
+        </nav>
+      )}
       {open && (
         <button
           type="button"
@@ -240,53 +427,88 @@ export function Sidebar({
             document.querySelector<HTMLElement>("[data-composer]")?.focus();
           }
         }}
-        className={`fixed inset-y-0 left-0 z-20 flex w-[264px] shrink-0 flex-col border-r border-edge bg-sidebar px-2 md:visible md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-20 flex w-sidebar shrink-0 flex-col border-r border-edge-subtle bg-sidebar p-2 md:visible md:static md:translate-x-0 ${
+          collapsed ? "md:hidden" : ""
+        } ${
           // Visibility animates only on close: an opening drawer must be focusable at once.
           open
             ? "translate-x-0 transition-transform"
             : "invisible -translate-x-full transition-[translate,visibility]"
         }`}
       >
-        <div className="flex h-[52px] shrink-0 items-center justify-between pl-2">
-          <h1 className="flex items-center gap-2 text-name font-semibold">
-            <Hexagon {...iconProps} className="text-honey" fill="currentColor" />
+        <div className="flex h-10 shrink-0 items-center pb-2 pl-2">
+          <h1 className="flex flex-1 items-center gap-1.5 text-[16.5px] font-semibold tracking-[-0.01em]">
+            <BeeLogo />
             Bee Bot
           </h1>
-          <button type="button" aria-label="New bot" className="button !px-2" onClick={onNewBot}>
-            <Plus {...iconProps} />
-          </button>
+          <span className="md:hidden">
+            <IconAction
+              label="Close bot list"
+              Icon={X}
+              className="button button-icon"
+              onClick={onClose}
+            />
+          </span>
+          <span className="hidden md:inline-flex">
+            <IconAction
+              label="Collapse sidebar"
+              Icon={PanelLeft}
+              className="button button-icon"
+              onClick={() => collapse(true)}
+            />
+          </span>
         </div>
-        <nav aria-label="Bots" className="min-h-0 flex-1 overflow-y-auto">
+        <nav aria-label="Bots" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
+          <button
+            type="button"
+            aria-label={needsYouName}
+            aria-current={needsYouOpen}
+            className={rowClass}
+            onClick={onNeedsYou}
+          >
+            <Inbox {...iconProps} className="shrink-0" />
+            <span className="flex-1">Needs you</span>
+            {waiting.length > 0 && (
+              <span aria-hidden="true" className={countClass}>
+                {count}
+              </span>
+            )}
+          </button>
+          <SectionHeader
+            label="Bots"
+            action={<IconAction label="New bot" Icon={Plus} onClick={onNewBot} />}
+          />
+          {bots.length === 0 && <p className={emptyClass}>No bots yet</p>}
           <ul className="flex flex-col gap-0.5">
             {bots.map((bot) => (
               <li key={bot.id}>
                 <BotRow
                   bot={bot}
                   connection={connection}
+                  waiting={waitingFor(bot.id)}
                   selected={bot.id === selectedId}
                   onSelect={() => onSelect(bot.id)}
                 />
               </li>
             ))}
           </ul>
-          <div className="mt-4 flex items-center justify-between pl-2">
-            <h2 className="text-label text-ink-faint">Rooms</h2>
-            <button
-              type="button"
-              aria-label="New room"
-              className="button !px-2"
-              disabled={bots.length === 0}
-              onClick={onNewRoom}
-            >
-              <Plus {...iconProps} />
-            </button>
-          </div>
+          <SectionHeader
+            label="Rooms"
+            action={
+              <IconAction
+                label="New room"
+                Icon={Plus}
+                disabled={bots.length === 0}
+                onClick={onNewRoom}
+              />
+            }
+          />
+          {rooms.length === 0 && <p className={emptyClass}>No rooms yet</p>}
           <ul className="flex flex-col gap-0.5">
             {rooms.map((room) => (
               <li key={room.id}>
                 <RoomRow
                   room={room}
-                  connection={connection}
                   selected={room.id === selectedRoomId}
                   onSelect={() => onSelectRoom(room.id)}
                 />
@@ -294,20 +516,20 @@ export function Sidebar({
             ))}
           </ul>
           {archived.length > 0 && (
-            <details className="mt-4">
-              <summary className="cursor-default pl-2 text-label text-ink-faint">
+            <details className="mt-2">
+              <summary className="flex h-7 cursor-default items-center pl-2 text-label font-medium text-ink-secondary">
                 Archived ({archived.length})
               </summary>
-              <ul className="mt-1 flex flex-col gap-0.5">
+              <ul className="flex flex-col gap-0.5">
                 {archived.map((bot) => (
-                  <li key={bot.id} className="flex items-center gap-2 px-2 py-1">
-                    <Avatar seed={bot.avatarSeed} className="size-6 opacity-60" />
-                    <span className="min-w-0 flex-1 truncate text-small text-ink-secondary">
+                  <li key={bot.id} className="flex h-8 items-center gap-2 pl-2">
+                    <Avatar seed={bot.avatarSeed} tight className="size-5 opacity-60" />
+                    <span className="min-w-0 flex-1 truncate text-body-s text-ink-secondary">
                       {bot.name}
                     </span>
                     <button
                       type="button"
-                      className="button !min-h-7 !px-2 text-small"
+                      className="button button-sm !px-2"
                       disabled={!connected}
                       onClick={() => void sendCommand({ type: "restore-bot", botId: bot.id })}
                     >
@@ -315,7 +537,7 @@ export function Sidebar({
                     </button>
                     <button
                       type="button"
-                      className="button !min-h-7 !px-2 text-small text-danger"
+                      className="button button-sm !px-2 text-danger"
                       disabled={!connected}
                       onClick={() => setDeleting(bot)}
                     >
@@ -326,41 +548,13 @@ export function Sidebar({
               </ul>
             </details>
           )}
+          <div className="mt-2 flex flex-col gap-0.5">
+            {navItems.map((item) => (
+              <NavItem key={item.label} {...item} />
+            ))}
+          </div>
         </nav>
-        <button
-          type="button"
-          aria-current={wallOpen}
-          className="mb-1 flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-small text-ink-secondary transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:text-ink"
-          onClick={onWall}
-        >
-          <Monitor {...iconProps} />
-          Computers
-        </button>
-        <button
-          type="button"
-          aria-current={usageOpen}
-          className="mb-1 flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-small text-ink-secondary transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:text-ink"
-          onClick={onUsage}
-        >
-          <Gauge {...iconProps} />
-          Usage
-        </button>
-        <button
-          type="button"
-          aria-current={auditOpen}
-          className="mb-1 flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-left text-small text-ink-secondary transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:text-ink"
-          onClick={onAudit}
-        >
-          <ScrollText {...iconProps} />
-          Audit
-        </button>
-        <p
-          role="status"
-          data-status={connection.status}
-          className="border-t border-edge px-2 py-2.5 text-label text-ink-faint"
-        >
-          {statusLine(connection)}
-        </p>
+        <SidebarFooter connection={connection} onUsage={onUsage} />
       </aside>
       {deleting && <DeleteBotDialog bot={deleting} onClose={() => setDeleting(undefined)} />}
     </>

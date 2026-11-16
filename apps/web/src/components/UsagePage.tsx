@@ -5,15 +5,8 @@ import type {
   UsageTokens,
   UsageWindow,
 } from "@beebot/contracts";
-import {
-  Gauge,
-  type LucideIcon,
-  PanelLeft,
-  RefreshCw,
-  TrendingDown,
-  TrendingUp,
-} from "lucide-react";
-import { createElement, Fragment, useEffect, useState } from "react";
+import { PanelLeft, RefreshCw, TriangleAlert } from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import {
   cacheHitRate,
@@ -35,12 +28,14 @@ import {
   remainingPercent,
 } from "../usageLimits";
 import { iconProps } from "./ui";
+import { Avatar } from "./Avatar";
 import { BoxesPanel } from "./BoxesPanel";
 import { ConnectorsPanel } from "./ConnectorsPanel";
+import { Tooltip } from "./Tooltip";
 import { VaultPanel } from "./VaultPanel";
 
 type Metric = "tokens" | "cost";
-type View = "limits" | "usage";
+type View = "limits" | "usage" | "keys";
 
 const periods = [
   { days: 1, label: "Past 24h" },
@@ -49,16 +44,42 @@ const periods = [
   { days: 90, label: "90 days" },
 ] as const;
 
-const paceLabels: Record<LimitPace, { label: string; icon: LucideIcon }> = {
-  ahead: { label: "Ahead of pace: spending faster than the window elapses", icon: TrendingUp },
-  on: { label: "On pace with the window", icon: Gauge },
-  under: { label: "Under pace: headroom left for the rest of the window", icon: TrendingDown },
+const views: ReadonlyArray<{ value: View; label: string }> = [
+  { value: "limits", label: "Limits" },
+  { value: "usage", label: "Usage" },
+  { value: "keys", label: "Keys and boxes" },
+];
+
+const paceLabels: Record<LimitPace, string> = {
+  ahead: "Ahead of pace",
+  on: "On pace",
+  under: "Under pace",
 };
 
-const inkMix = (percent: number) =>
-  `color-mix(in oklab, var(--color-ink) ${percent}%, var(--color-background))`;
+const badgeClass =
+  "inline-flex h-[22px] items-center rounded-xs bg-raised px-2 text-label font-medium text-ink";
 
-function Toggle<T extends string | number>({
+function Tabs({ value, onChange }: { value: View; onChange: (value: View) => void }) {
+  return (
+    <div role="tablist" aria-label="View" className="flex gap-1 border-b border-edge-subtle">
+      {views.map((view) => (
+        <button
+          key={view.value}
+          type="button"
+          role="tab"
+          aria-selected={view.value === value}
+          className="group flex h-9 flex-col rounded-xs text-body-s font-medium text-ink-secondary transition-colors hover:text-ink aria-selected:text-ink"
+          onClick={() => onChange(view.value)}
+        >
+          <span className="flex flex-1 items-center px-3 whitespace-nowrap">{view.label}</span>
+          <span className="h-0.5 w-full group-aria-selected:bg-brand-fill forced-colors:group-aria-selected:bg-[CanvasText]" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Segmented<T extends string | number>({
   label,
   value,
   options,
@@ -70,13 +91,13 @@ function Toggle<T extends string | number>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div role="group" aria-label={label} className="flex rounded-row bg-raised p-0.5">
+    <div role="group" aria-label={label} className="flex rounded-field bg-raised p-0.5">
       {options.map((option) => (
         <button
           key={option.value}
           type="button"
           aria-pressed={option.value === value}
-          className="rounded-field px-2.5 py-1 text-label font-medium text-ink-secondary transition-colors hover:text-ink aria-pressed:bg-card aria-pressed:text-ink aria-pressed:shadow-composer forced-colors:aria-pressed:outline-2"
+          className="h-7 rounded-xs px-3 text-label whitespace-nowrap text-ink-secondary transition-colors hover:text-ink aria-pressed:bg-card aria-pressed:font-medium aria-pressed:text-ink aria-pressed:shadow-composer forced-colors:aria-pressed:outline-2"
           onClick={() => onChange(option.value)}
         >
           {option.label}
@@ -86,67 +107,87 @@ function Toggle<T extends string | number>({
   );
 }
 
-function PaceIcon({ pace }: { pace: LimitPace }) {
-  const { label, icon } = paceLabels[pace];
-  return (
-    <span role="img" aria-label={label} title={label} className="inline-flex text-ink-secondary">
-      {createElement(icon, { ...iconProps, size: 14 })}
-    </span>
-  );
-}
+const checkedTime = (at: string) =>
+  new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 
-function WindowBar({ window, now }: { window: UsageWindow; now: number }) {
+function Meter({
+  window,
+  now,
+  checkedAt,
+}: {
+  window: UsageWindow;
+  now: number;
+  checkedAt: string | null;
+}) {
   const remaining = remainingPercent(window);
+  const used = remaining === null ? null : 100 - remaining;
   const timeLeft = paceRemainingPercent(window, now);
+  const pace = paceOf(window, now);
   const resetsIn = formatResetsIn(window, now);
-  if (remaining === null) {
-    return <span className="text-label text-ink-faint">Not reported yet</span>;
-  }
-  const summary = `${window.label}: ${remaining}% left, ${window.usedPercent}% used${
-    timeLeft === null ? "" : `, ${timeLeft}% of the window left`
-  }${resetsIn ? `, ${resetsIn}` : ""}`;
+  const atLimit = used === 100;
+  const summary =
+    remaining === null
+      ? `${window.label}: not reported yet`
+      : `${window.label}: ${remaining}% left, ${used}% used${
+          timeLeft === null ? "" : `, ${timeLeft}% of the window left`
+        }${resetsIn ? `, ${resetsIn}` : ""}`;
+  const status =
+    used === null ? "Not reported yet" : atLimit ? "Limit reached" : pace && paceLabels[pace];
   return (
-    <div role="img" aria-label={summary} title={summary} className="relative h-6">
-      <div className="absolute inset-x-0 inset-y-1.5 rounded-full bg-raised" />
-      {remaining > 0 && (
-        <div
-          className="absolute inset-y-1.5 left-0 rounded-full bg-honey-fill forced-colors:bg-[CanvasText]"
-          style={{ width: `${remaining}%` }}
-        />
-      )}
-      {timeLeft !== null && (
-        <span
-          aria-hidden
-          className="absolute inset-y-1 w-0.5 -translate-x-1/2 rounded-full bg-ink"
-          style={{ left: `clamp(3px, ${timeLeft}%, calc(100% - 3px))` }}
-        />
-      )}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-start gap-2 text-body-s">
+        <span className="min-w-0 flex-1 font-medium">{window.label}</span>
+        <span className={`shrink-0 tabular-nums ${atLimit ? "text-danger" : ""}`}>
+          {used === null ? "—" : `${used}%`}
+        </span>
+      </div>
+      <div
+        role="img"
+        aria-label={summary}
+        title={summary}
+        className="relative h-2 rounded-full bg-raised"
+      >
+        {used !== null && used > 0 && (
+          <div
+            className={`absolute inset-y-0 left-0 rounded-full forced-colors:bg-[CanvasText] ${atLimit ? "bg-danger-status" : "bg-brand-fill"}`}
+            style={{ width: `${used}%` }}
+          />
+        )}
+        {used !== null && timeLeft !== null && (
+          <span
+            aria-hidden
+            className="absolute top-1/2 h-3.5 w-[3.6px] -translate-x-1/2 -translate-y-1/2 bg-ink"
+            style={{ left: `clamp(2px, ${100 - timeLeft}%, calc(100% - 2px))` }}
+          />
+        )}
+      </div>
+      <span
+        className={`flex items-center gap-1 text-caption tabular-nums ${atLimit ? "text-danger" : "text-ink-secondary"}`}
+      >
+        {pace === "ahead" && !atLimit && <TriangleAlert {...iconProps} size={12} />}
+        {[status, resetsIn].filter(Boolean).join(" · ")}
+      </span>
+      <span className="text-caption text-ink-secondary">
+        From your Claude plan{checkedAt ? ` · checked ${checkedTime(checkedAt)}` : ""}
+      </span>
     </div>
   );
 }
 
-export function LimitWindows({ windows, now }: { windows: UsageWindow[]; now: number }) {
+export function LimitWindows({
+  windows,
+  now,
+  checkedAt = null,
+}: {
+  windows: UsageWindow[];
+  now: number;
+  checkedAt?: string | null;
+}) {
   return (
-    <div className="grid grid-cols-[minmax(0,11rem)_minmax(0,1fr)] items-center gap-x-4 gap-y-1 sm:grid-cols-[11rem_minmax(0,1fr)_8rem]">
-      {windows.map((window) => {
-        const pace = paceOf(window, now);
-        const remaining = remainingPercent(window);
-        return (
-          <Fragment key={window.id}>
-            <span className="flex min-w-0 items-center gap-2 text-label">
-              <span className="truncate text-ink-secondary">{window.label}</span>
-              {remaining !== null && (
-                <span className="ms-auto shrink-0 font-medium tabular-nums">{remaining}% left</span>
-              )}
-            </span>
-            <WindowBar window={window} now={now} />
-            <span className="col-span-2 flex items-center gap-2 text-label whitespace-nowrap text-ink-secondary tabular-nums sm:col-span-1">
-              {pace && <PaceIcon pace={pace} />}
-              <span className="ms-auto">{formatResetsIn(window, now) ?? ""}</span>
-            </span>
-          </Fragment>
-        );
-      })}
+    <div className="flex flex-col gap-6">
+      {windows.map((window) => (
+        <Meter key={window.id} window={window} now={now} checkedAt={checkedAt} />
+      ))}
     </div>
   );
 }
@@ -155,29 +196,35 @@ function LimitsView({
   limits,
   now,
   refreshing,
+  onCheck,
 }: {
   limits: UsageLimits | undefined;
   now: number;
   refreshing: boolean;
+  onCheck: () => void;
 }) {
   const notice = limits ? limitsNotice(limits) : undefined;
   return (
-    <section aria-label="Limits" className="flex flex-col gap-4">
+    <section aria-label="Limits" className="flex flex-col gap-6">
       {!limits && refreshing && <LimitSkeleton />}
       {!limits && !refreshing && (
-        <p className="text-small text-ink-secondary">Limits haven't been checked yet.</p>
+        <div className="flex flex-col gap-2">
+          <div className="h-2 rounded-full bg-raised" />
+          <span className="flex items-center gap-4 text-caption text-ink-secondary">
+            Not checked yet
+            <button type="button" className="button button-sm" onClick={onCheck}>
+              Check now
+            </button>
+          </span>
+        </div>
       )}
-      {notice && <p className="text-small text-ink-secondary">{notice}</p>}
-      {limits && !notice && <LimitWindows windows={limits.windows} now={now} />}
-      <p className="text-label text-ink-faint">
-        {limits?.checkedAt
-          ? `Last checked ${new Date(limits.checkedAt).toLocaleString([], {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}.`
-          : "Not checked yet."}{" "}
-        Your Claude Code reports these. Bee Bot checks when you open this page, when you refresh and
-        after a turn, at most once a minute.
+      {notice && <p className="text-body-s text-ink-secondary">{notice}</p>}
+      {limits && !notice && (
+        <LimitWindows windows={limits.windows} now={now} checkedAt={limits.checkedAt} />
+      )}
+      <p className="text-caption text-ink-secondary">
+        Bee Bot checks when you open this page, when you refresh, and after a turn, at most once a
+        minute.
       </p>
     </section>
   );
@@ -187,72 +234,113 @@ const skeletonBar = "animate-pulse rounded-field bg-raised";
 
 function LimitSkeleton() {
   return (
-    <div className="flex flex-col gap-3" aria-hidden>
-      <div className={`h-3 w-full ${skeletonBar}`} />
-      <div className={`h-3 w-full ${skeletonBar}`} />
+    <div className="flex flex-col gap-6" aria-hidden>
+      {[0, 1].map((key) => (
+        <div key={key} className="flex flex-col gap-2">
+          <div className={`h-5 w-40 ${skeletonBar}`} />
+          <div className={`h-2 w-full ${skeletonBar}`} />
+          <div className={`h-4 w-48 ${skeletonBar}`} />
+        </div>
+      ))}
     </div>
   );
 }
 
 function UsageSkeleton() {
   return (
-    <div role="status" aria-label="Reading transcripts" className="flex flex-col gap-6">
-      <div className={`h-9 w-40 ${skeletonBar}`} />
-      <div className={`h-2 w-full ${skeletonBar}`} />
-      <div className={`h-40 w-full ${skeletonBar}`} />
+    <div role="status" aria-label="Reading transcripts" className="flex flex-col gap-8">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        {[0, 1, 2, 3].map((key) => (
+          <div key={key} className={`h-[72px] ${skeletonBar}`} />
+        ))}
+      </div>
+      <div className={`h-32 w-full ${skeletonBar}`} />
+      <div className={`h-48 w-full ${skeletonBar}`} />
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  detail,
+  badge,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  badge?: string;
+}) {
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-label text-ink-secondary">{label}</span>
-      <span className="text-title font-medium tabular-nums">{value}</span>
+    <div className="flex min-w-0 flex-col">
+      <span className="truncate text-caption text-ink-secondary">{label}</span>
+      <span className="flex items-center gap-2 py-1">
+        <span className="text-heading font-semibold tabular-nums">{value}</span>
+        {badge && <span className={badgeClass}>{badge}</span>}
+      </span>
+      <span className="truncate text-caption text-ink-secondary">{detail}</span>
     </div>
   );
 }
 
-function ShareBar({ tokens }: { tokens: UsageTokens }) {
-  const segments = [
-    { label: "Input", value: tokens.input, color: inkMix(60) },
-    { label: "Cache read", value: tokens.cacheRead, color: inkMix(30) },
-    { label: "Cache write", value: tokens.cacheWrite, color: inkMix(76) },
-    { label: "Output", value: tokens.output, color: inkMix(100) },
+type Bar = { key: string; name: string; icon?: ReactNode; value: number; text: string };
+
+function BarList({ title, bars }: { title: string; bars: Bar[] }) {
+  const peak = Math.max(...bars.map(({ value }) => value), 0);
+  if (bars.length === 0) {
+    return null;
+  }
+  return (
+    <section aria-label={title} className="flex min-w-0 flex-col gap-2">
+      <h3 className="text-body-s font-medium">{title}</h3>
+      <ul className="flex flex-col">
+        {bars.map(({ key, name, icon, value, text }) => (
+          <li key={key} className="flex h-10 items-center gap-4 text-body-s">
+            <span className="flex w-36 min-w-0 shrink-0 items-center gap-2" title={name}>
+              {icon}
+              <span className="truncate">{name}</span>
+            </span>
+            <span aria-hidden className="h-2 min-w-0 flex-1">
+              {peak > 0 && value > 0 && (
+                <span
+                  className="block h-full min-w-2 rounded-full bg-brand-fill forced-colors:bg-[CanvasText]"
+                  style={{ width: `${(value / peak) * 100}%` }}
+                />
+              )}
+            </span>
+            <span className="shrink-0 text-right text-caption text-ink-secondary tabular-nums">
+              {text}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function TokenTypes({ tokens }: { tokens: UsageTokens }) {
+  const types = [
+    { name: "Input", value: tokens.input },
+    { name: "Cache read", value: tokens.cacheRead },
+    { name: "Cache write", value: tokens.cacheWrite },
+    { name: "Output", value: tokens.output },
   ].filter(({ value }) => value > 0);
-  const total = segments.reduce((sum, { value }) => sum + value, 0);
+  const total = types.reduce((sum, { value }) => sum + value, 0);
   if (total <= 0) {
     return null;
   }
   return (
-    <div className="flex min-w-0 flex-col gap-2.5">
-      <h3 className="text-name font-medium">Token types</h3>
-      <div
-        role="img"
-        aria-label={`Token types: ${segments
-          .map(({ label, value }) => `${label} ${formatTokens(value)}`)
-          .join(", ")}`}
-        className="flex h-2 gap-0.5"
-      >
-        {segments.map(({ label, value, color }) => (
-          <div
-            key={label}
-            title={`${label} · ${formatTokens(value)} · ${formatPercent(value / total)}`}
-            className="h-full min-w-1 rounded-xs first:rounded-l-full last:rounded-r-full"
-            style={{ flex: `${value} 1 0`, backgroundColor: color }}
-          />
-        ))}
-      </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-label">
-        {segments.map(({ label, value, color }) => (
-          <span key={label} className="flex items-center gap-1.5">
-            <span aria-hidden className="size-2 rounded-xs" style={{ backgroundColor: color }} />
-            <span className="text-ink-secondary">{label}</span>
-            <span className="tabular-nums">{formatTokens(value)}</span>
-          </span>
-        ))}
-      </div>
-    </div>
+    <BarList
+      title="Token types"
+      bars={types
+        .map(({ name, value }) => ({
+          key: name,
+          name,
+          value,
+          text: `${formatTokens(value)} · ${formatPercent(value / total, 0)}`,
+        }))
+        .toSorted((a, b) => b.value - a.value)}
+    />
   );
 }
 
@@ -263,6 +351,33 @@ function formatMetric(row: UsageRow, metric: Metric) {
   return row.unpricedTokens > 0 && row.costUsd === 0 ? "No estimate" : formatUsd(row.costUsd);
 }
 
+function breakdown(
+  rows: Array<{
+    key: string;
+    name: string;
+    icon?: ReactNode;
+    row: UsageRow;
+    extra?: string | undefined;
+  }>,
+  metric: Metric,
+): Bar[] {
+  const total = rows.reduce((sum, { row }) => sum + usageRowValue(row, metric), 0);
+  return rows.map(({ row, extra, ...rest }) => {
+    const value = usageRowValue(row, metric);
+    return {
+      ...rest,
+      value,
+      text: [
+        extra,
+        formatMetric(row, metric),
+        total > 0 ? formatPercent(value / total, 0) : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  });
+}
+
 type Series = Extract<UsageSummary, { status: "ok" }>["series"];
 
 function UsageChart({ series, metric }: { series: Series; metric: Metric }) {
@@ -270,87 +385,72 @@ function UsageChart({ series, metric }: { series: Series; metric: Metric }) {
   if (peak <= 0) {
     return null;
   }
+  const format = metric === "tokens" ? formatTokens : formatUsd;
+  const labelEach = series.length <= 14;
   return (
-    <div className="flex min-w-0 flex-col gap-2">
-      <h3 className="text-name font-medium">
+    <section className="flex min-w-0 flex-col gap-3">
+      <h3 className="text-body-s font-medium">
         {metric === "tokens" ? "Tokens over time" : "API-equivalent estimate over time"}
       </h3>
-      <div className="flex h-40 items-end gap-0.5 border-b border-edge">
-        {series.map((row) => {
-          const value = usageRowValue(row, metric);
-          const label = `${seriesLabel(row.start)} · ${formatMetric(row, metric)}`;
-          return (
-            // The whole column is the hit target: a short bar would be hard to reach.
-            <div
-              key={row.start}
-              title={label}
-              className="flex h-full min-w-0 flex-1 items-end hover:bg-hover"
+      <div className="flex flex-col gap-2 pl-12">
+        <div className="relative flex h-48 items-end gap-1 border-b border-edge">
+          {[0, 50].map((top) => (
+            <span
+              key={top}
+              aria-hidden
+              className="absolute inset-x-0 border-t border-edge-subtle"
+              style={{ top: `${top}%` }}
+            />
+          ))}
+          {[
+            { top: 0, value: peak },
+            { top: 50, value: peak / 2 },
+            { top: 100, value: 0 },
+          ].map(({ top, value }) => (
+            <span
+              key={top}
+              aria-hidden
+              className="absolute -left-12 -translate-y-1/2 text-caption text-ink-secondary tabular-nums"
+              style={{ top: `${top}%` }}
             >
-              {value > 0 && (
-                <div
-                  className="w-full rounded-t-[4px] bg-honey-fill forced-colors:bg-[CanvasText]"
-                  style={{ height: `${Math.max((value / peak) * 100, 1)}%` }}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div className="flex justify-between text-label text-ink-faint tabular-nums">
-        <span>{seriesLabel(series[0]?.start ?? "")}</span>
-        <span>Peak {metric === "tokens" ? formatTokens(peak) : formatUsd(peak)}</span>
-        <span>{seriesLabel(series.at(-1)?.start ?? "")}</span>
-      </div>
-    </div>
-  );
-}
-
-function Breakdown({
-  title,
-  rows,
-  metric,
-  showCache = false,
-}: {
-  title: string;
-  rows: Array<{ key: string; label: string; row: UsageRow }>;
-  metric: Metric;
-  showCache?: boolean;
-}) {
-  const peak = Math.max(...rows.map(({ row }) => usageRowValue(row, metric)), 0);
-  if (rows.length === 0) {
-    return null;
-  }
-  return (
-    <section aria-label={title} className="flex min-w-0 flex-col gap-2">
-      <h3 className="text-name font-medium">{title}</h3>
-      <ul className="flex flex-col">
-        {rows.map(({ key, label, row }) => {
-          const rate = cacheHitRate(row);
-          return (
-            <li key={key} className="flex min-h-7 items-center gap-3 text-small">
-              <span className="w-40 min-w-0 shrink-0 truncate" title={label}>
-                {label}
-              </span>
-              <span aria-hidden className="h-1 min-w-0 flex-1 rounded-full bg-raised">
-                {peak > 0 && (
+              {value === 0 ? "0" : format(value)}
+            </span>
+          ))}
+          {series.map((row) => {
+            const value = usageRowValue(row, metric);
+            return (
+              // The whole column is the hit target: a short bar would be hard to reach.
+              <Tooltip
+                key={row.start}
+                label={`${seriesLabel(row.start)} · ${formatMetric(row, metric)}`}
+                className="relative flex h-full min-w-0 flex-1 items-end justify-center rounded-t-xs hover:bg-hover"
+              >
+                {value > 0 && (
                   <span
-                    className="block h-full rounded-full bg-honey-fill forced-colors:bg-[CanvasText]"
-                    style={{ width: `${(usageRowValue(row, metric) / peak) * 100}%` }}
+                    className="w-full max-w-10 rounded-t-xs bg-brand-fill forced-colors:bg-[CanvasText]"
+                    style={{ height: `${Math.max((value / peak) * 100, 1)}%` }}
                   />
                 )}
+              </Tooltip>
+            );
+          })}
+        </div>
+        <div className="flex gap-1 text-caption text-ink-secondary tabular-nums">
+          {labelEach ? (
+            series.map((row) => (
+              <span key={row.start} className="min-w-0 flex-1 truncate text-center">
+                {seriesLabel(row.start)}
               </span>
-              {showCache && (
-                <span className="w-24 shrink-0 text-right text-label text-ink-secondary tabular-nums">
-                  {rate === null ? "" : `${formatPercent(rate, 0)} cached`}
-                </span>
-              )}
-              <span className="w-20 shrink-0 text-right font-medium tabular-nums">
-                {formatMetric(row, metric)}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
+            ))
+          ) : (
+            <>
+              <span>{seriesLabel(series[0]?.start ?? "")}</span>
+              <span className="flex-1" />
+              <span>{seriesLabel(series.at(-1)?.start ?? "")}</span>
+            </>
+          )}
+        </div>
+      </div>
     </section>
   );
 }
@@ -359,7 +459,7 @@ function CoverageNotice({ summary }: { summary: Extract<UsageSummary, { status: 
   const { totals, unreadableFiles, skippedLines, oldestAt } = summary;
   const unpriced = totals.unpricedTokens / Math.max(totalTokens(totals), 1);
   return (
-    <div className="flex flex-col gap-1 border-t border-edge pt-3 text-label text-ink-faint">
+    <div className="flex flex-col gap-1 border-t border-edge-subtle pt-4 text-caption text-ink-secondary">
       <span>
         History covers this computer only. Claude Code deletes old transcripts, about 30 days by
         default
@@ -386,59 +486,82 @@ function CoverageNotice({ summary }: { summary: Extract<UsageSummary, { status: 
 function HistoryView({
   summary,
   metric,
-  botName,
+  period,
+  bot,
 }: {
   summary: Extract<UsageSummary, { status: "ok" }>;
   metric: Metric;
-  botName: (botId: string | null) => string;
+  period: string;
+  bot: (botId: string | null) => { name: string; avatarSeed?: number };
 }) {
   const { totals } = summary;
-  const byValue = (a: { row: UsageRow }, b: { row: UsageRow }) =>
-    usageRowValue(b.row, metric) - usageRowValue(a.row, metric);
+  const byValue = (a: Bar, b: Bar) => b.value - a.value;
   const rate = cacheHitRate(totals);
   return (
-    <div className="flex flex-col gap-6">
-      <section className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <span className="text-[36px] leading-10 font-semibold tabular-nums">
-            {metric === "tokens" ? formatTokens(totalTokens(totals)) : formatUsd(totals.costUsd)}
-          </span>
-          <span className="text-label text-ink-secondary">
-            {formatCount(totals.sessions)} {totals.sessions === 1 ? "session" : "sessions"}
-            {metric === "cost" && " · API-equivalent estimate"}
-          </span>
-        </div>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Stat label="Tokens" value={formatTokens(totalTokens(totals))} />
-          <Stat label="API-equivalent estimate" value={formatUsd(totals.costUsd)} />
-          <Stat label="Output" value={formatTokens(totals.output)} />
-          <Stat label="Cache hit rate" value={rate === null ? "None" : formatPercent(rate, 0)} />
-        </div>
+    <div className="flex flex-col gap-8">
+      <section aria-label="Totals" className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-4">
+        <Stat
+          label={`Tokens · ${period}`}
+          value={formatTokens(totalTokens(totals))}
+          detail={`${formatCount(totals.sessions)} ${totals.sessions === 1 ? "session" : "sessions"}`}
+        />
+        <Stat
+          label={`Cost · ${period}`}
+          value={formatUsd(totals.costUsd)}
+          badge="Estimate"
+          detail="API-equivalent estimate"
+        />
+        <Stat label="Output" value={formatTokens(totals.output)} detail="Tokens the bots wrote" />
+        <Stat
+          label="Cache hit rate"
+          value={rate === null ? "None" : formatPercent(rate, 0)}
+          detail="Read from cache, so cheaper"
+        />
       </section>
-      <ShareBar tokens={totals} />
+      <TokenTypes tokens={totals} />
       <UsageChart series={summary.series} metric={metric} />
-      <Breakdown
-        title="By model"
-        metric={metric}
-        showCache
-        rows={summary.models
-          .map(({ model, ...row }) => ({ key: model, label: model, row }))
-          .toSorted(byValue)}
-      />
-      <Breakdown
+      <BarList
         title="By bot"
-        metric={metric}
-        rows={summary.bots
-          .map(({ botId, ...row }) => ({ key: botId ?? "outside", label: botName(botId), row }))
-          .toSorted(byValue)}
+        bars={breakdown(
+          summary.bots.map(({ botId, ...row }) => {
+            const { name, avatarSeed } = bot(botId);
+            return {
+              key: botId ?? "outside",
+              name,
+              icon:
+                avatarSeed === undefined ? undefined : (
+                  <Avatar seed={avatarSeed} className="size-5" />
+                ),
+              row,
+            };
+          }),
+          metric,
+        ).toSorted(byValue)}
       />
-      <Breakdown
+      <BarList
+        title="By model"
+        bars={breakdown(
+          summary.models.map(({ model, ...row }) => {
+            const cached = cacheHitRate(row);
+            return {
+              key: model,
+              name: model,
+              row,
+              extra: cached === null ? undefined : `${formatPercent(cached, 0)} cached`,
+            };
+          }),
+          metric,
+        ).toSorted(byValue)}
+      />
+      <BarList
         title="By time"
-        metric={metric}
-        rows={summary.series
-          .filter((row) => totalTokens(row) > 0)
-          .map(({ start, ...row }) => ({ key: start, label: seriesLabel(start), row }))
-          .toReversed()}
+        bars={breakdown(
+          summary.series
+            .filter((row) => totalTokens(row) > 0)
+            .map(({ start, ...row }) => ({ key: start, name: seriesLabel(start), row }))
+            .toReversed(),
+          metric,
+        )}
       />
       <CoverageNotice summary={summary} />
     </div>
@@ -495,36 +618,39 @@ export function UsagePage({
     };
   }, [days, historyKey]);
 
-  const botName = (botId: string | null) =>
-    botId === null
-      ? "Outside Bee"
-      : (chat.bots.find(({ id }) => id === botId)?.name ?? "Removed bot");
-  const busy = view === "limits" ? refreshing : loading;
+  function bot(botId: string | null) {
+    if (botId === null) {
+      return { name: "Outside Bee Bot" };
+    }
+    const found = chat.bots.find(({ id }) => id === botId);
+    return found ? { name: found.name, avatarSeed: found.avatarSeed } : { name: "Removed bot" };
+  }
+  const busy = view === "usage" ? loading : refreshing;
 
   return (
     <section className="flex min-w-0 flex-1 flex-col" aria-label="Usage">
-      <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-edge px-3">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-edge-subtle px-3 md:px-6">
         <button
           type="button"
           aria-label="Open bot list"
-          className="button !px-2 md:hidden"
+          className="button button-icon md:hidden"
           onClick={onOpenDrawer}
         >
           <PanelLeft {...iconProps} />
         </button>
-        <h2 className="text-name font-medium">Usage</h2>
+        <h2 className="text-title-s font-semibold">Usage</h2>
         <span className="flex-1" />
         <button
           type="button"
           aria-label="Refresh"
-          className="button !px-2"
+          className="button button-icon"
           disabled={busy}
           onClick={() => {
             setNow(Date.now());
-            if (view === "limits") {
-              refresh();
-            } else {
+            if (view === "usage") {
               setRevision(revision + 1);
+            } else {
+              refresh();
             }
           }}
         >
@@ -532,54 +658,55 @@ export function UsagePage({
         </button>
       </header>
       <div className="scroller min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-[56rem] flex-col gap-6 px-4 py-6">
-          <div className="flex flex-wrap items-center gap-2">
-            <Toggle
-              label="View"
-              value={view}
-              options={[
-                { value: "limits", label: "Limits" },
-                { value: "usage", label: "Usage" },
-              ]}
-              onChange={setView}
-            />
-            {view === "usage" && (
-              <>
-                <span className="flex-1" />
-                <Toggle
-                  label="Period"
-                  value={days}
-                  options={periods.map(({ days: value, label }) => ({ value, label }))}
-                  onChange={setDays}
-                />
-                <Toggle
-                  label="Metric"
-                  value={metric}
-                  options={[
-                    { value: "tokens", label: "Tokens" },
-                    { value: "cost", label: "Estimate" },
-                  ]}
-                  onChange={setMetric}
-                />
-              </>
-            )}
-          </div>
-          <p role="status" className="text-label text-ink-faint empty:hidden">
+        <div className="mx-auto flex w-full max-w-[calc(var(--container-transcript)+2rem)] flex-col gap-6 px-4 pt-6 pb-10">
+          <Tabs value={view} onChange={setView} />
+          {view === "usage" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Segmented
+                label="Period"
+                value={days}
+                options={periods.map(({ days: value, label }) => ({ value, label }))}
+                onChange={setDays}
+              />
+              <span className="flex-1" />
+              <Segmented
+                label="Metric"
+                value={metric}
+                options={[
+                  { value: "tokens", label: "Tokens" },
+                  { value: "cost", label: "Estimate" },
+                ]}
+                onChange={setMetric}
+              />
+            </div>
+          )}
+          <p role="status" className="text-caption text-ink-secondary empty:hidden">
             {view === "limits" ? refreshNote : ""}
           </p>
-          {view === "limits" && <LimitsView limits={limits} now={now} refreshing={refreshing} />}
-          {view === "limits" && <VaultPanel chat={chat} />}
-          {view === "limits" && <BoxesPanel />}
-          {view === "limits" && <ConnectorsPanel chat={chat} />}
+          {view === "limits" && (
+            <LimitsView limits={limits} now={now} refreshing={refreshing} onCheck={refresh} />
+          )}
+          {view === "keys" && (
+            <div className="flex flex-col gap-10">
+              <VaultPanel chat={chat} />
+              <BoxesPanel />
+              <ConnectorsPanel chat={chat} />
+            </div>
+          )}
           {view === "usage" && loading && !summary && <UsageSkeleton />}
           {view === "usage" && summary?.status === "unavailable" && (
-            <p className="text-small text-ink-secondary">
+            <p className="py-10 text-center text-body-s text-ink-secondary">
               No Claude Code history was found on this computer.
             </p>
           )}
           {view === "usage" && summary?.status === "ok" && (
             <div aria-busy={loading} className={loading ? "opacity-60" : undefined}>
-              <HistoryView summary={summary} metric={metric} botName={botName} />
+              <HistoryView
+                summary={summary}
+                metric={metric}
+                period={days === 1 ? "past 24h" : `last ${days} days`}
+                bot={bot}
+              />
             </div>
           )}
         </div>

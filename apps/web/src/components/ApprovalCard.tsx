@@ -5,10 +5,18 @@ import {
   type Continuation,
   type PendingApproval,
 } from "@beebot/contracts";
-import { useEffect, useRef, useState } from "react";
+import { Clock } from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
 import { postCommand } from "../serverConnection";
+import { iconProps } from "./ui";
+
+const cardClass =
+  "flex flex-col gap-3 rounded-card border border-waiting-edge bg-card p-4 text-body-s";
+const blockClass =
+  "rounded-field bg-sidebar p-3 font-mono text-code wrap-anywhere whitespace-pre-wrap";
+const noteClass = "text-caption text-ink-secondary";
 
 function ChangeLines({ removed, added }: { removed: string; added: string }) {
   const removedLines = changeLines("- ", removed);
@@ -16,7 +24,7 @@ function ChangeLines({ removed, added }: { removed: string; added: string }) {
   return (
     <>
       {removedLines && <span className="block text-danger">{removedLines}</span>}
-      {addedLines && <span className="block text-honey">{addedLines}</span>}
+      {addedLines && <span className="block text-brand">{addedLines}</span>}
     </>
   );
 }
@@ -26,16 +34,14 @@ function ProposedChange({ change }: { change: ApprovalChange }) {
   const { action, removed, added, files = [] } = change;
   return (
     <>
-      {note && <p className="text-small text-ink-secondary">{note}</p>}
-      {action !== "patch" && !added && removed === null && (
-        <p className="text-small text-ink-secondary">Empty file</p>
-      )}
+      {note && <p className={noteClass}>{note}</p>}
+      {action !== "patch" && !added && removed === null && <p className={noteClass}>Empty file</p>}
       {(files.length > 0 || removed || added) && (
         <pre
           role="region"
           tabIndex={0}
           aria-label="Proposed change"
-          className="max-h-[30dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
+          className={`${blockClass} max-h-[30dvh] overflow-y-auto overscroll-contain`}
           // On the transcript, a wheel up raises Jump to latest over this card's buttons.
           onWheel={(event) => event.stopPropagation()}
         >
@@ -57,19 +63,48 @@ function ProposedChange({ change }: { change: ApprovalChange }) {
   );
 }
 
-function TimeLeft({ expiresAt }: { expiresAt: string }) {
+function TimeLeft({ createdAt, expiresAt }: { createdAt: string; expiresAt: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const seconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - now) / 1000));
+  const end = Date.parse(expiresAt);
+  const seconds = Math.max(0, Math.ceil((end - now) / 1000));
+  const lastMinute = seconds <= 60;
+  const share = Math.min(1, (seconds * 1000) / Math.max(1, end - Date.parse(createdAt)));
   return (
-    // `timer` is not announced on each tick, even inside the transcript's live region.
-    <span role="timer" aria-live="off" className="text-label text-ink-faint tabular-nums">
-      {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")} left
+    <span className={`flex shrink-0 flex-col gap-1 ${lastMinute ? "w-[120px]" : ""}`}>
+      {/* `timer` is not announced on each tick, even inside the transcript's live region. */}
+      <span
+        role="timer"
+        aria-live="off"
+        className={`flex items-center gap-1 tabular-nums ${
+          lastMinute ? "text-body-s font-medium text-waiting" : "text-caption text-ink-secondary"
+        }`}
+      >
+        {lastMinute && <Clock {...iconProps} className="text-waiting-status" />}
+        {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")} left
+      </span>
+      {lastMinute && (
+        <span aria-hidden className="h-0.5 overflow-hidden rounded-full bg-raised">
+          <span className="block h-full bg-waiting-status" style={{ width: `${share * 100}%` }} />
+        </span>
+      )}
     </span>
+  );
+}
+
+function CardHeader({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Clock {...iconProps} className="shrink-0 text-waiting-status" />
+      <h3 className="max-h-[40dvh] min-w-0 flex-1 overflow-y-auto font-medium wrap-anywhere">
+        {title}
+      </h3>
+      {children}
+    </div>
   );
 }
 
@@ -112,30 +147,20 @@ export function ApprovalCard({
   const disabled = busy || !connected;
   const hiddenChars = pending.change?.hiddenChars ?? 0;
   return (
-    <article
-      ref={card}
-      aria-label={approvalTitle(name, approval.tool)}
-      className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
-    >
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-name font-medium">{approvalTitle(name, approval.tool)}</h3>
-        <TimeLeft expiresAt={pending.expiresAt} />
-      </div>
-      <pre
-        aria-label="Exact request"
-        className="rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
-      >
+    <article ref={card} aria-label={approvalTitle(name, approval.tool)} className={cardClass}>
+      <CardHeader title={approvalTitle(name, approval.tool)}>
+        <TimeLeft createdAt={approval.createdAt} expiresAt={pending.expiresAt} />
+      </CardHeader>
+      <pre aria-label="Exact request" className={blockClass}>
         {visibleDetail(pending.detail)}
       </pre>
       {pending.change && <ProposedChange change={pending.change} />}
-      {error && <p className="text-small text-ink-secondary">{error}</p>}
-      {hiddenChars > 0 && (
-        <p className="text-small text-ink-secondary">{hiddenCharsLine(hiddenChars)}</p>
-      )}
-      <div className="flex flex-wrap justify-end gap-1">
+      {error && <p className="text-danger">{error}</p>}
+      {hiddenChars > 0 && <p className={noteClass}>{hiddenCharsLine(hiddenChars)}</p>}
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="button button-outline"
+          className="button button-sm button-outline"
           disabled={disabled}
           onClick={() => void decide("deny")}
         >
@@ -143,7 +168,7 @@ export function ApprovalCard({
         </button>
         <button
           type="button"
-          className="button button-primary"
+          className="button button-sm button-primary"
           disabled={disabled}
           onClick={() => void decide("allow")}
         >
@@ -152,7 +177,7 @@ export function ApprovalCard({
         {pending.canAlwaysAllow && (
           <button
             type="button"
-            className="button button-outline"
+            className="button button-sm"
             disabled={disabled}
             onClick={() => void decide("always")}
           >
@@ -220,20 +245,13 @@ export function ContinuationCard({
         : `${name} wants to run ${continuation.tool}`;
   const disabled = busy || !connected;
   return (
-    <article
-      ref={card}
-      aria-label={worded ? `${name}: ${title}` : title}
-      className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
-    >
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="max-h-[40dvh] overflow-y-auto text-name font-medium wrap-anywhere">
-          {title}
-        </h3>
-        <TimeLeft expiresAt={continuation.expiresAt} />
-      </div>
+    <article ref={card} aria-label={worded ? `${name}: ${title}` : title} className={cardClass}>
+      <CardHeader title={title}>
+        <TimeLeft createdAt={continuation.createdAt} expiresAt={continuation.expiresAt} />
+      </CardHeader>
       {worded ? (
         exact.length > 0 && (
-          <p className="font-mono text-label wrap-anywhere whitespace-pre-wrap text-ink-faint">
+          <p className="font-mono text-caption wrap-anywhere whitespace-pre-wrap text-ink-secondary">
             {visibleDetail(exact.join("\n"))}
           </p>
         )
@@ -242,22 +260,22 @@ export function ContinuationCard({
           role="region"
           tabIndex={0}
           aria-label="Exact request"
-          className="max-h-[40dvh] overflow-y-auto overscroll-contain rounded-row border border-edge bg-code px-3 py-2 font-mono text-small wrap-anywhere whitespace-pre-wrap"
+          className={`${blockClass} max-h-[40dvh] overflow-y-auto overscroll-contain`}
           onWheel={(event) => event.stopPropagation()}
         >
           {visibleDetail(connector ? exact.join("\n") : continuation.shown)}
         </pre>
       )}
-      <p className="text-small text-ink-secondary">
+      <p className={noteClass}>
         {handOff
           ? `Bee never does this itself. If you want it done, do it yourself, then tell ${name}.`
           : `Bee runs exactly this, once, then tells ${name} how it went.`}
       </p>
-      {error && <p className="text-small text-ink-secondary">{error}</p>}
-      <div className="flex flex-wrap justify-end gap-1">
+      {error && <p className="text-danger">{error}</p>}
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="button button-outline"
+          className={`button button-sm ${handOff ? "order-last" : "button-outline"}`}
           disabled={disabled}
           onClick={() => void decide("deny")}
         >
@@ -265,7 +283,7 @@ export function ContinuationCard({
         </button>
         <button
           type="button"
-          className="button button-primary"
+          className="button button-sm button-primary"
           disabled={disabled}
           onClick={() => void decide("approve")}
         >
@@ -274,7 +292,7 @@ export function ContinuationCard({
         {connector && (
           <button
             type="button"
-            className="button button-outline"
+            className="button button-sm"
             disabled={disabled}
             onClick={() => void decide("always")}
           >

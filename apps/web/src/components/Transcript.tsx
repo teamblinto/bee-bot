@@ -1,6 +1,16 @@
 import type { Bot } from "@beebot/contracts";
-import { ArrowDown } from "lucide-react";
 import {
+  Ban,
+  Bot as BotIcon,
+  Check,
+  ChevronDown,
+  CirclePause,
+  LoaderCircle,
+  RotateCcw,
+  User,
+} from "lucide-react";
+import {
+  type ReactNode,
   type UIEvent,
   type WheelEvent,
   useEffect,
@@ -9,12 +19,13 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { answeredLine, liveStatusLine, workedLine } from "../labels";
+import { answeredLine, liveStatusLine, shortTime, workedLine } from "../labels";
 import { getConnectionState, type LiveTool, subscribeToConnection } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
 import { isOpenItem, isOutcomeMessage, itemKey, type TranscriptItem } from "../transcript";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { MessageAttachments } from "./Attachments";
+import { Avatar } from "./Avatar";
 import { Markdown } from "./Markdown";
 import { RoutineCard } from "./RoutineCard";
 import { TimelineMinimap } from "./TimelineMinimap";
@@ -32,29 +43,75 @@ const namedTools = (names: string[]) =>
     status: "done",
   }));
 
+const answeredIcons = { allowed: Check, denied: Ban, expired: CirclePause, pending: Check };
+
+function Face({ seed }: { seed: number | undefined }) {
+  return seed === undefined ? (
+    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary">
+      <BotIcon {...iconProps} size={14} />
+    </span>
+  ) : (
+    <Avatar seed={seed} className="size-6 rounded-full" />
+  );
+}
+
+function Byline({ face, name, at }: { face: ReactNode; name: string; at?: string }) {
+  return (
+    <p className="-ml-8 flex items-center gap-2">
+      {face}
+      <span className="font-medium">{name}</span>
+      {at && <time className="text-caption text-ink-secondary">{shortTime(at)}</time>}
+    </p>
+  );
+}
+
+// A sender's first message carries their name; the rest of a run of messages sits under it.
+const startsRun = (item: TranscriptItem, previous: TranscriptItem | undefined) =>
+  item.kind === "message" &&
+  !isOutcomeMessage(item.message) &&
+  !(
+    previous?.kind === "message" &&
+    !isOutcomeMessage(previous.message) &&
+    previous.message.author === item.message.author &&
+    previous.message.botId === item.message.botId
+  );
+
 function Item({
   item,
   bot,
   connected,
   finishedTools,
   authorName,
+  byline,
 }: {
   item: TranscriptItem;
   bot: Pick<Bot, "name">;
   connected: boolean;
   finishedTools: Record<string, LiveTool[]>;
   authorName: ((botId: string) => string | undefined) | undefined;
+  byline: boolean;
 }) {
   const connectors = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().chat.connectors,
   );
+  const bots = useSyncExternalStore(subscribeToConnection, () => getConnectionState().chat.bots);
   if (item.kind === "approval") {
     const { approval, pending } = item;
-    return pending ? (
-      <ApprovalCard name={bot.name} approval={approval} pending={pending} connected={connected} />
-    ) : (
-      <p className="text-small text-ink-secondary">{answeredLine(approval)}</p>
+    if (pending) {
+      return (
+        <ApprovalCard name={bot.name} approval={approval} pending={pending} connected={connected} />
+      );
+    }
+    const Icon = answeredIcons[approval.status];
+    return (
+      <p className="flex items-center gap-2 py-1 text-ink-secondary">
+        <Icon
+          {...iconProps}
+          className={`shrink-0 ${approval.status === "allowed" ? "text-success-status" : ""}`}
+        />
+        {answeredLine(approval)}
+      </p>
     );
   }
   if (item.kind === "continuation") {
@@ -69,16 +126,25 @@ function Item({
   // Bee's record of the outcome, not words the owner typed.
   if (isOutcomeMessage(message)) {
     return (
-      <p className="text-small wrap-anywhere whitespace-pre-wrap text-ink-secondary">
-        {message.body}
-      </p>
+      <p className="pl-8 wrap-anywhere whitespace-pre-wrap text-ink-secondary">{message.body}</p>
     );
   }
   if (message.author === "human") {
     return (
-      <div className="ml-auto flex max-w-[80%] flex-col items-end gap-1">
+      <div className="flex flex-col gap-1 pl-8">
+        {byline && (
+          <Byline
+            face={
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-inverse text-ink-inverse">
+                <User {...iconProps} size={14} />
+              </span>
+            }
+            name="You"
+            at={message.createdAt}
+          />
+        )}
         {message.body && (
-          <p className="w-fit rounded-bubble bg-message px-3.5 py-2 wrap-anywhere whitespace-pre-wrap">
+          <p className="rounded-bubble bg-message px-3 py-2 text-body wrap-anywhere whitespace-pre-wrap">
             {message.body}
           </p>
         )}
@@ -87,12 +153,18 @@ function Item({
     );
   }
   // Only rooms name authors. A bot that was deleted left its messages behind with no bot.
-  const author =
-    authorName &&
-    ((message.botId === null ? undefined : authorName(message.botId)) ?? "Deleted bot");
+  const author = authorName
+    ? ((message.botId === null ? undefined : authorName(message.botId)) ?? "Deleted bot")
+    : bot.name;
   return (
-    <div className="flex flex-col gap-2">
-      {author && <p className="text-label font-medium text-ink-secondary">{author}</p>}
+    <div className="flex flex-col gap-1 pl-8">
+      {byline && (
+        <Byline
+          face={<Face seed={bots.find(({ id }) => id === message.botId)?.avatarSeed} />}
+          name={author}
+          at={message.createdAt}
+        />
+      )}
       {message.tools.length > 0 && (
         <WorkGroup
           label={workedLine(message.workedMs, message.tools.length)}
@@ -100,7 +172,9 @@ function Item({
           connectors={connectors}
         />
       )}
-      <Markdown text={message.body} />
+      <div className="text-body">
+        <Markdown text={message.body} />
+      </div>
     </div>
   );
 }
@@ -119,7 +193,7 @@ export function Transcript({
   onContinue,
   authorName,
 }: {
-  bot: Pick<Bot, "name">;
+  bot: Pick<Bot, "name"> & { avatarSeed?: number };
   items: TranscriptItem[];
   connected: boolean;
   finishedTools: Record<string, LiveTool[]>;
@@ -151,6 +225,13 @@ export function Transcript({
   const [away, setAway] = useState(false);
   const settledItems = items.filter((item) => !isOpenItem(item));
   const pendingItems = items.filter(isOpenItem);
+  const endedTools = !workingSince && endedWork !== undefined && liveTools.length > 0;
+  const botLive = thought !== undefined || Boolean(workingSince) || endedTools || Boolean(draft);
+  const lastSettled = settledItems.at(-1);
+  const continuesBot =
+    lastSettled?.kind === "message" &&
+    lastSettled.message.author === "bot" &&
+    !isOutcomeMessage(lastSettled.message);
 
   function follow(on: boolean) {
     following.current = on;
@@ -241,7 +322,12 @@ export function Transcript({
           <ol>
             {settledItems.map((item, index) => {
               const previous = settledItems[index - 1];
-              const gap = !previous ? "" : previous.sender === item.sender ? "mt-1" : "mt-6";
+              const byline = startsRun(item, previous);
+              const gap = !previous
+                ? ""
+                : byline || previous.sender !== item.sender
+                  ? "mt-6"
+                  : "mt-2";
               return (
                 <li
                   key={itemKey(item)}
@@ -255,28 +341,43 @@ export function Transcript({
                     connected={connected}
                     finishedTools={finishedTools}
                     authorName={authorName}
+                    byline={byline}
                   />
                 </li>
               );
             })}
           </ol>
           {/* The finished reply is announced as a message; each delta shouldn't be. */}
-          <div aria-live="off" className="mt-6 flex flex-col gap-2 empty:hidden">
-            {thought !== undefined && <ThinkingRow text={thought} />}
-            {workingSince && (
-              <WorkGroup
-                live
-                label={<WorkingLabel startedAt={workingSince} />}
-                tools={liveTools}
-                connectors={connectors}
-              />
-            )}
-            {!workingSince && endedWork !== undefined && liveTools.length > 0 && (
-              <WorkGroup
-                label={workedLine(endedWork, liveTools.length)}
-                tools={liveTools}
-                connectors={connectors}
-              />
+          <div aria-live="off" className="mt-6 flex flex-col gap-3 empty:hidden">
+            {botLive && (
+              <div className="flex flex-col gap-1 pl-8">
+                {!continuesBot && <Byline face={<Face seed={bot.avatarSeed} />} name={bot.name} />}
+                {thought !== undefined && <ThinkingRow text={thought} />}
+                {workingSince && (
+                  <WorkGroup
+                    live
+                    label={<WorkingLabel startedAt={workingSince} />}
+                    tools={liveTools}
+                    connectors={connectors}
+                  />
+                )}
+                {endedTools && (
+                  <WorkGroup
+                    label={workedLine(endedWork ?? null, liveTools.length)}
+                    tools={liveTools}
+                    connectors={connectors}
+                  />
+                )}
+                {draft && (
+                  <div className="text-body">
+                    <Markdown text={draft} streaming />
+                    <LoaderCircle
+                      {...iconProps}
+                      className="mt-1 text-ink-secondary motion-safe:animate-spin"
+                    />
+                  </div>
+                )}
+              </div>
             )}
             {pendingItems.map((item) => (
               <Item
@@ -286,20 +387,21 @@ export function Transcript({
                 connected={connected}
                 finishedTools={finishedTools}
                 authorName={authorName}
+                byline={false}
               />
             ))}
-            {draft && <Markdown text={draft} streaming />}
             {/* Last on purpose: `runs` only has the latest run, and it ended after all of this. */}
             {systemLine && (
-              <p className="flex items-center gap-2 text-small text-ink-secondary">
+              <p className="flex flex-wrap items-center gap-2 text-ink-secondary">
                 {systemLine}
                 {onContinue && (
                   <button
                     type="button"
-                    className="button button-outline"
+                    className="button button-sm button-outline"
                     disabled={!connected}
                     onClick={onContinue}
                   >
+                    <RotateCcw {...iconProps} />
                     Continue
                   </button>
                 )}
@@ -325,11 +427,11 @@ export function Transcript({
       {away && (
         <button
           type="button"
-          className="button button-outline absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full! shadow-menu"
+          className="button button-sm button-outline absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full! shadow-menu"
           onClick={jumpToLatest}
         >
-          <ArrowDown {...iconProps} />
           Jump to latest
+          <ChevronDown {...iconProps} />
         </button>
       )}
     </div>

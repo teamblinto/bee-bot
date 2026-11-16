@@ -62,8 +62,8 @@ function renderPicker(
 
 const search = () => host.querySelector<HTMLInputElement>('[role="combobox"]') as HTMLInputElement;
 const rows = () => [...host.querySelectorAll('[role="option"]')].map((row) => row.textContent);
-const rail = (name: string) =>
-  host.querySelector<HTMLButtonElement>(`[data-model-picker-rail] button[aria-label^="${name}"]`);
+const tab = (name: string) =>
+  host.querySelector<HTMLButtonElement>(`[data-model-picker-tabs] button[aria-label^="${name}"]`);
 const press = (target: Element, key: string, init: KeyboardEventInit = {}) =>
   act(() => {
     target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
@@ -131,11 +131,11 @@ it("keeps favorites across renders and opens on them when the model is one", () 
   expect(localStorage.getItem("beebot.modelFavorites")).toBe('["claude:sonnet"]');
   expect(rows()[0]).toContain("Sonnet 5.5");
 
-  act(() => rail("Favorites")?.click());
+  act(() => tab("Favorites")?.click());
   expect(rows()).toEqual(["Sonnet 5.5, Claude"]);
   act(() => root.render(null));
   renderPicker();
-  expect(rail("Favorites")?.getAttribute("aria-pressed")).toBe("true");
+  expect(tab("Favorites")?.getAttribute("aria-pressed")).toBe("true");
   expect(onPick).not.toHaveBeenCalled();
 
   act(() =>
@@ -167,14 +167,15 @@ it("moves with the arrow keys, wraps, picks with Enter and stops the form submit
   expect(onClose).toHaveBeenCalled();
 });
 
-it("walks between the rail and the search box", () => {
+it("walks the tabs with the arrow keys and returns to the search box", () => {
   const searchRef = createRef<HTMLInputElement>();
   renderPicker({}, searchRef);
-  press(search(), "ArrowLeft");
-  expect(document.activeElement).toBe(rail("Claude"));
-  press(rail("Claude") as Element, "ArrowUp");
-  expect(document.activeElement).toBe(rail("Favorites"));
-  press(rail("Favorites") as Element, "ArrowRight");
+  act(() => tab("Claude")?.focus());
+  press(tab("Claude") as Element, "ArrowLeft");
+  expect(document.activeElement).toBe(tab("Favorites"));
+  press(tab("Favorites") as Element, "ArrowLeft");
+  expect(document.activeElement?.getAttribute("aria-label")).toContain("Codex");
+  press(document.activeElement as Element, "ArrowUp");
   expect(document.activeElement).toBe(search());
 });
 
@@ -189,7 +190,7 @@ it.each([
   ["not loaded", undefined],
 ])("shows Codex as disabled, reachable and doing nothing while it's %s", (_, models) => {
   renderPicker({ catalog: models });
-  const codex = rail("Codex");
+  const codex = tab("Codex");
   expect(codex?.getAttribute("aria-label")).not.toBe("Codex");
   expect(codex?.getAttribute("aria-disabled")).toBe("true");
   expect(codex?.disabled).toBe(false);
@@ -199,8 +200,8 @@ it.each([
 
 it("offers Codex's models once the catalog has them, named as Codex's", () => {
   const { onPick } = renderPicker({ catalog: withCodex });
-  expect(rail("Codex")?.getAttribute("aria-disabled")).toBe("false");
-  act(() => rail("Codex")?.click());
+  expect(tab("Codex")?.getAttribute("aria-disabled")).toBe("false");
+  act(() => tab("Codex")?.click());
   expect(rows()).toEqual(["GPT-5.5, Codex"]);
   press(search(), "Enter");
   expect(onPick).toHaveBeenCalledWith("codex", "gpt-5.5");
@@ -209,13 +210,13 @@ it("offers Codex's models once the catalog has them, named as Codex's", () => {
 it("keeps a Codex bot on Codex", () => {
   renderPicker({ catalog: withCodex, accountId: "codex", model: "gpt-5.5", locked: true });
   expect(rows()).toEqual(["GPT-5.5, Codex"]);
-  expect(rail("Claude")?.getAttribute("aria-disabled")).toBe("true");
+  expect(tab("Claude")?.getAttribute("aria-disabled")).toBe("true");
 });
 
 it("locks other providers once the bot exists", () => {
   renderPicker({ locked: true });
-  expect(rail("Test engine")?.getAttribute("aria-disabled")).toBe("true");
-  expect(rail("Claude")?.getAttribute("aria-disabled")).toBe("false");
+  expect(tab("Test engine")?.getAttribute("aria-disabled")).toBe("true");
+  expect(tab("Claude")?.getAttribute("aria-disabled")).toBe("false");
 });
 
 it("shows a saved model missing from the catalog as unavailable, and won't pick it", () => {
@@ -265,8 +266,8 @@ function renderControls(current: Bot) {
 }
 
 const levels = () =>
-  [...host.querySelectorAll('[aria-label="Reasoning"] [role="menuitemradio"]')].map(
-    (item) => item.textContent,
+  [...host.querySelectorAll('[aria-label="Effort"] [role="menuitemradio"]')].map((item) =>
+    item.getAttribute("aria-label"),
   );
 
 it("offers only the levels the model supports", () => {
@@ -275,22 +276,18 @@ it("offers only the levels the model supports", () => {
   renderControls(bot("claude-opus-4-6"));
   expect(levels()).toEqual(["Default", "Low", "Medium", "High", "Max"]);
   renderControls(bot("claude-haiku-4-5"));
-  expect(host.querySelector('[aria-label^="Reasoning"]')).toBeNull();
+  expect(host.querySelector('[aria-label^="Effort"]')).toBeNull();
 });
 
 it("clears the level, flips Build and Plan, and names every access level", () => {
   const onChange = renderControls(bot("opus", "high"));
   const item = (name: string) =>
     [...host.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
-      (node) => node.textContent === name || node.getAttribute("aria-label") === name,
+      (node) => node.getAttribute("aria-label") === name,
     );
   act(() => item("Default")?.click());
   expect(onChange).toHaveBeenLastCalledWith({ effort: null });
-  act(() =>
-    host
-      .querySelector<HTMLButtonElement>('[aria-label="Default mode. Click to enter plan mode"]')
-      ?.click(),
-  );
+  act(() => item("Plan")?.click());
   expect(onChange).toHaveBeenLastCalledWith({ mode: "plan" });
   act(() => item("Auto-accept edits")?.click());
   expect(onChange).toHaveBeenLastCalledWith({ access: "auto-edits" });

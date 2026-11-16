@@ -102,19 +102,19 @@ export function Composer({
   }
 
   return (
-    <div className="pb-4">
+    <div className="pt-2 pb-6">
       {error && (
-        <p role="alert" className="mb-2 text-small text-ink-secondary">
+        <p role="alert" className="mb-2 text-label text-ink-secondary">
           {error}
         </p>
       )}
       {nextTurnOnly && (
-        <p role="status" className="mb-2 text-small text-ink-secondary">
-          Model, reasoning and mode apply to the next turn.
+        <p role="status" className="mb-2 text-label text-ink-secondary">
+          Model, effort and mode apply to the next turn.
         </p>
       )}
       <form
-        className="@container relative flex flex-col gap-1 rounded-composer border border-edge bg-card/80 p-1.5 shadow-composer backdrop-blur-md backdrop-saturate-[1.14] transition-[border-color] has-[textarea:focus-visible]:border-edge-strong"
+        className="@container relative flex flex-col gap-2 rounded-composer border border-edge-strong bg-card p-3 shadow-menu transition-shadow has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-focus"
         onSubmit={(event) => {
           event.preventDefault();
           void send();
@@ -129,7 +129,7 @@ export function Composer({
           data-composer
           // The composer is the one place focus belongs when a chat opens.
           autoFocus
-          className="max-h-40 min-h-8 resize-none bg-transparent px-2.5 py-1 field-sizing-content outline-none"
+          className="max-h-40 min-h-7 resize-none bg-transparent px-1 pt-1 text-body field-sizing-content outline-none placeholder:text-ink-faint"
           aria-label={`Message ${bot.name}`}
           {...mentions.textBoxProps}
           placeholder={
@@ -149,7 +149,7 @@ export function Composer({
           onKeyDown={onKeyDown}
           onPaste={files.onPaste}
         />
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
           <AttachButton disabled={!canSend} onFiles={files.add} />
           <ComposerControls
             bot={bot}
@@ -167,7 +167,7 @@ export function Composer({
               disabled={!connected}
               onClick={() => void sendCommand({ type: "stop-bot", botId: bot.id })}
             >
-              <Square {...iconProps} fill="currentColor" />
+              <Square {...iconProps} />
             </button>
           ) : (
             <button

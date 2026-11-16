@@ -38,7 +38,7 @@ export function EffortGlyph({ count, filled }: { count: number; filled: number }
       width={width}
       height={glyphHeight}
       viewBox={`0 0 ${width} ${glyphHeight}`}
-      className="shrink-0"
+      className="shrink-0 text-ink-secondary"
     >
       {effortBarHeights(count, maxBar).map((height, index) => (
         <rect

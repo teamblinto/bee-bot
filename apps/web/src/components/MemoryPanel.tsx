@@ -1,13 +1,31 @@
 import { type Bot, type Command, type MemoryItem, MemoryType } from "@beebot/contracts";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { Brain, Inbox, Plus } from "lucide-react";
+import { type FormEvent, useRef, useState } from "react";
 
-import { memoryLine, memoryNotice, memoryReview, memoryTypeLabels, visibleDetail } from "../labels";
+import { memoryNotice, memoryReview, memoryTypeLabels, shortTime, visibleDetail } from "../labels";
 import { postCommand } from "../serverConnection";
+import {
+  badgeClass,
+  ConfirmDialog,
+  EmptyState,
+  errorClass,
+  fieldLabelClass,
+  RowMenu,
+  SidePanel,
+} from "./SidePanel";
+import { iconProps } from "./ui";
 
-const labelClass = "flex flex-col gap-1 text-label text-ink-secondary";
-const headingClass = "text-label text-ink-secondary";
-const textClass = "text-small wrap-anywhere whitespace-pre-wrap";
-const metaClass = "text-label text-ink-faint";
+const textClass = "text-body-s wrap-anywhere whitespace-pre-wrap";
+const rowClass = "flex flex-col gap-2 border-b border-edge-subtle pb-4";
+
+function MemoryMeta({ item }: { item: MemoryItem }) {
+  return (
+    <p className="flex flex-wrap items-center gap-2 text-caption text-ink-secondary">
+      <span className={badgeClass}>{memoryTypeLabels[item.type]}</span>
+      {item.source === "user" ? "You" : "Bot"} · {shortTime(item.created)}
+    </p>
+  );
+}
 
 export function MemoryPanel({
   bot,
@@ -20,31 +38,26 @@ export function MemoryPanel({
   connected: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const field = useRef<HTMLTextAreaElement>(null);
   const sending = useRef(false);
-  const [text, setText] = useState("");
-  const [memoryType, setMemoryType] = useState<MemoryType>("user");
-  const [correcting, setCorrecting] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-
-  useEffect(() => {
-    if (!dialog.current?.open) {
-      dialog.current?.showModal();
-    }
-  }, []);
-
   const pending = memories.filter(({ status }) => status === "pending");
   const active = memories
     .filter(({ status }) => status === "active")
     .toSorted((a, b) => b.created.localeCompare(a.created));
+  const [tab, setTab] = useState<"review" | "active">(pending.length > 0 ? "review" : "active");
+  const [text, setText] = useState("");
+  const [memoryType, setMemoryType] = useState<MemoryType>("user");
+  const [adding, setAdding] = useState(false);
+  const [correcting, setCorrecting] = useState<string>();
+  const [forgetting, setForgetting] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
   const disabled = busy || !connected;
 
   function clearForm() {
     setText("");
     setMemoryType("user");
+    setAdding(false);
     setCorrecting(undefined);
     setError(undefined);
   }
@@ -82,162 +95,208 @@ export function MemoryPanel({
   function correct(item: MemoryItem) {
     setText(item.text);
     setMemoryType(item.type);
+    setAdding(false);
     setCorrecting(item.id);
     setError(undefined);
-    field.current?.focus();
+  }
+
+  function startAdding() {
+    clearForm();
+    setAdding(true);
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
     void send(
       { type: "add-memory", botId: bot.id, text, memoryType, supersedes: correcting },
-      () => {
-        clearForm();
-        field.current?.focus();
-      },
+      clearForm,
     );
   }
 
-  return (
-    <dialog
-      ref={dialog}
-      aria-label={`${bot.name} memory`}
-      className="dialog m-auto max-h-[80dvh] w-[min(560px,calc(100vw-32px))] flex-col gap-3 p-5 backdrop:bg-scrim open:flex"
-      onClose={onClose}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-title font-semibold">Memory</h2>
-        <button type="button" className="button" onClick={() => dialog.current?.close()}>
-          Close
+  const form = (title: string) => (
+    <form className="flex flex-col gap-2" onSubmit={submit}>
+      <label className={fieldLabelClass}>
+        {title}
+        <textarea
+          autoFocus
+          className="field resize-none font-normal"
+          maxLength={2000}
+          rows={3}
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+        />
+      </label>
+      <label className="flex items-center gap-2 text-caption text-ink-secondary">
+        Type
+        <select
+          className="field h-7 w-auto py-0 text-label text-ink"
+          value={memoryType}
+          onChange={(event) => setMemoryType(MemoryType.parse(event.target.value))}
+        >
+          {MemoryType.options.map((option) => (
+            <option key={option} value={option}>
+              {memoryTypeLabels[option]}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          className="button button-sm button-primary"
+          disabled={disabled || !text.trim()}
+        >
+          Save
+        </button>
+        <button type="button" className="button button-sm" onClick={clearForm}>
+          Cancel
         </button>
       </div>
-      <p className="text-small text-ink-secondary">{memoryNotice}</p>
-      <div
-        ref={list}
-        tabIndex={-1}
-        className="scroller flex min-h-0 flex-col gap-4 overflow-y-auto outline-none"
-      >
-        {pending.length > 0 && (
-          <section className="flex flex-col gap-2" aria-label="Review">
-            <h3 className={headingClass}>Review ({pending.length})</h3>
-            {pending.map((item) => {
-              const { title, lines } = memoryReview(item, memories);
-              return (
-                <article
-                  key={item.id}
-                  aria-label={title}
-                  className="surface flex flex-col gap-2 p-3.5"
-                >
-                  <h4 className="text-name font-medium">{title}</h4>
-                  {lines.map(({ label, text: line }) => (
-                    <div key={label}>
-                      <p className={metaClass}>{label}</p>
-                      <p className={textClass}>{visibleDetail(line)}</p>
+    </form>
+  );
+
+  const forgettingItem = active.find(({ id }) => id === forgetting);
+
+  return (
+    <SidePanel
+      label={`${bot.name} memory`}
+      botName={bot.name}
+      title="Memory"
+      tabs={[
+        { id: "review", label: "Review", count: pending.length },
+        { id: "active", label: "Active", count: active.length },
+      ]}
+      tab={tab}
+      onTab={setTab}
+      onClose={onClose}
+    >
+      <div ref={list} tabIndex={-1} className="flex flex-col gap-4 outline-none">
+        {tab === "review" ? (
+          pending.length === 0 ? (
+            <EmptyState icon={Inbox} title="Nothing to review">
+              <p className="text-body-s text-ink-secondary">
+                When {bot.name} wants to remember something, it waits here for you.
+              </p>
+            </EmptyState>
+          ) : (
+            <section className="flex flex-col gap-4" aria-label="Review">
+              <p className="text-body-s text-ink-secondary">
+                {bot.name} wants to remember these. Nothing is kept until you say so.
+              </p>
+              {pending.map((item) => {
+                const { title, lines } = memoryReview(item, memories);
+                return (
+                  <article key={item.id} aria-label={title} className={rowClass}>
+                    <h3 className="text-body-s font-medium">{title}</h3>
+                    {lines.map(({ label, text: line }) => (
+                      <div key={label}>
+                        <p className="text-caption text-ink-secondary">{label}</p>
+                        <p className={textClass}>{visibleDetail(line)}</p>
+                      </div>
+                    ))}
+                    <MemoryMeta item={item} />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="button button-sm button-outline"
+                        disabled={disabled}
+                        onClick={() => decide(item.id, "approve")}
+                      >
+                        Keep
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-sm"
+                        disabled={disabled}
+                        onClick={() => decide(item.id, "reject")}
+                      >
+                        Don't keep
+                      </button>
                     </div>
-                  ))}
-                  <p className={metaClass}>{memoryLine(item)}</p>
-                  <div className="flex flex-wrap justify-end gap-1">
-                    <button
-                      type="button"
-                      className="button button-outline"
-                      disabled={disabled}
-                      onClick={() => decide(item.id, "reject")}
-                    >
-                      Reject
-                    </button>
-                    <button
-                      type="button"
-                      className="button button-primary"
-                      disabled={disabled}
-                      onClick={() => decide(item.id, "approve")}
-                    >
-                      Approve
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
+                  </article>
+                );
+              })}
+            </section>
+          )
+        ) : (
+          <section className="flex flex-col gap-4" aria-label="Active">
+            {adding ? (
+              <div className={rowClass}>{form("Add memory")}</div>
+            ) : active.length === 0 ? (
+              <EmptyState icon={Brain} title={`${bot.name} doesn't remember anything yet`}>
+                <p className="max-w-80 text-body-s text-ink-secondary">
+                  Things {bot.name} learns show up in Review first. You can also add one yourself.
+                </p>
+                <button
+                  type="button"
+                  className="button button-sm button-primary mt-2"
+                  disabled={disabled}
+                  onClick={startAdding}
+                >
+                  <Plus {...iconProps} />
+                  Add memory
+                </button>
+              </EmptyState>
+            ) : (
+              <button
+                type="button"
+                className="button button-sm self-start"
+                disabled={disabled}
+                onClick={startAdding}
+              >
+                <Plus {...iconProps} />
+                Add memory
+              </button>
+            )}
+            <ul className="flex flex-col gap-4">
+              {active.map((item) =>
+                item.id === correcting ? (
+                  <li key={item.id} className={rowClass}>
+                    {form("Correct memory")}
+                    <MemoryMeta item={item} />
+                  </li>
+                ) : (
+                  <li key={item.id} className={rowClass}>
+                    <div className="flex items-start gap-2">
+                      <p className={`${textClass} min-w-0 flex-1`}>{visibleDetail(item.text)}</p>
+                      <RowMenu
+                        label={`Memory actions: ${item.text.slice(0, 40)}`}
+                        items={[
+                          { label: "Correct", disabled, onSelect: () => correct(item) },
+                          {
+                            label: "Forget",
+                            danger: true,
+                            disabled,
+                            onSelect: () => setForgetting(item.id),
+                          },
+                        ]}
+                      />
+                    </div>
+                    <MemoryMeta item={item} />
+                  </li>
+                ),
+              )}
+            </ul>
           </section>
         )}
-        <section className="flex flex-col gap-2" aria-label="Active">
-          <h3 className={headingClass}>Active</h3>
-          {active.length === 0 && (
-            <p className="text-small text-ink-secondary">Nothing saved yet.</p>
-          )}
-          <ul className="flex flex-col gap-3">
-            {active.map((item) => (
-              <li key={item.id} className="flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <p className={textClass}>{visibleDetail(item.text)}</p>
-                  <p className={metaClass}>{memoryLine(item)}</p>
-                </div>
-                <button
-                  type="button"
-                  className="button shrink-0"
-                  disabled={disabled}
-                  onClick={() => correct(item)}
-                >
-                  Correct
-                </button>
-                <button
-                  type="button"
-                  className="button shrink-0"
-                  disabled={disabled}
-                  onClick={() => forget(item.id)}
-                >
-                  Forget
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
+        {error && (
+          <p role="alert" className={errorClass}>
+            {error}
+          </p>
+        )}
+        <p className="text-caption text-ink-secondary">{memoryNotice}</p>
       </div>
-      {error && (
-        <p role="alert" className="text-small text-ink-secondary">
-          {error}
-        </p>
+      {forgettingItem && (
+        <ConfirmDialog
+          title="Forget this memory?"
+          confirmLabel="Forget"
+          onConfirm={() => forget(forgettingItem.id)}
+          onClose={() => setForgetting(undefined)}
+        >
+          {bot.name} won't remember it in new chats. You can't undo this, but you can add it again
+          by hand.
+        </ConfirmDialog>
       )}
-      <form className="flex shrink-0 flex-col gap-2" onSubmit={submit}>
-        <label className={labelClass}>
-          {correcting ? "Correct this memory" : "Add a memory"}
-          <textarea
-            ref={field}
-            className="field resize-none text-ink"
-            maxLength={2000}
-            rows={3}
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-          />
-        </label>
-        <div className="flex items-end gap-2">
-          <label className={`${labelClass} flex-1`}>
-            Type
-            <select
-              className="field text-ink"
-              value={memoryType}
-              onChange={(event) => setMemoryType(MemoryType.parse(event.target.value))}
-            >
-              {MemoryType.options.map((option) => (
-                <option key={option} value={option}>
-                  {memoryTypeLabels[option]}
-                </option>
-              ))}
-            </select>
-          </label>
-          {correcting && (
-            <button type="button" className="button" onClick={clearForm}>
-              Cancel
-            </button>
-          )}
-          <button
-            type="submit"
-            className="button button-primary"
-            disabled={disabled || !text.trim()}
-          >
-            {correcting ? "Save" : "Add"}
-          </button>
-        </div>
-      </form>
-    </dialog>
+    </SidePanel>
   );
 }

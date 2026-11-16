@@ -50,27 +50,27 @@ export function RoutineCard({
     <article
       ref={card}
       aria-label={title}
-      className="surface flex max-w-[560px] flex-col gap-3 p-3.5"
+      className="surface flex max-w-[560px] flex-col gap-2 p-4"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-name font-medium wrap-anywhere">{title}</h3>
-        <span className="shrink-0 text-label text-ink-faint">{dayAndTime(firing.slot)}</span>
+        <h3 className="text-body-s font-medium wrap-anywhere">{title}</h3>
+        <span className="shrink-0 text-caption text-ink-secondary">{dayAndTime(firing.slot)}</span>
       </div>
-      <p className="line-clamp-3 text-small wrap-anywhere whitespace-pre-wrap text-ink-secondary">
+      <p className="line-clamp-3 text-body-s wrap-anywhere whitespace-pre-wrap text-ink-secondary">
         {visibleDetail(routine.prompt)}
       </p>
-      {firing.attempts > 0 && <p className="text-small text-ink-secondary">{retryCardLine}</p>}
+      {firing.attempts > 0 && <p className="text-caption text-ink-secondary">{retryCardLine}</p>}
       {firing.reason === "catch_up" && (
-        <p className="text-small text-ink-secondary">{catchUpLine}</p>
+        <p className="text-caption text-ink-secondary">{catchUpLine}</p>
       )}
       {firing.missedBefore > 0 && (
-        <p className="text-small text-ink-secondary">{missedLine(firing.missedBefore)}</p>
+        <p className="text-caption text-ink-secondary">{missedLine(firing.missedBefore)}</p>
       )}
-      {error && <p className="text-small text-ink-secondary">{error}</p>}
-      <div className="flex flex-wrap justify-end gap-1">
+      {error && <p className="text-caption text-ink-secondary">{error}</p>}
+      <div className="flex flex-wrap justify-end gap-2 pt-1">
         <button
           type="button"
-          className="button button-outline"
+          className="button button-sm button-outline"
           disabled={disabled}
           onClick={() => void decide({ type: "skip-firing", firingId: firing.id })}
         >
@@ -78,7 +78,7 @@ export function RoutineCard({
         </button>
         <button
           type="button"
-          className="button button-primary"
+          className="button button-sm button-primary"
           disabled={disabled}
           onClick={() => void decide({ type: "start-firing", firingId: firing.id })}
         >

@@ -1,6 +1,26 @@
 import type { Bot } from "@beebot/contracts";
-import { Ellipsis, Folder, Monitor, PanelLeft, ShieldOff } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  Archive,
+  Bot as BotIcon,
+  Box,
+  Brain,
+  CalendarClock,
+  Ellipsis,
+  Folder,
+  Info,
+  LogIn,
+  type LucideIcon,
+  Monitor,
+  PanelLeft,
+  Pause,
+  Pencil,
+  Play,
+  Plug,
+  ShieldAlert,
+  Sparkles,
+  Square,
+} from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { connectionLines, folderName, pauseLine, runLine } from "../labels";
 import {
@@ -24,7 +44,40 @@ import { columnClass, iconProps } from "./ui";
 import { useWorkspace, Workspace } from "./Workspace";
 
 const menuItemClass =
-  "w-full rounded-field px-2.5 py-1.5 text-left text-small transition-colors hover:bg-hover disabled:text-ink-faint";
+  "flex h-8 w-full items-center gap-2 rounded-row px-2 text-left text-body-s transition-colors hover:bg-hover disabled:text-ink-disabled";
+const badgeClass =
+  "flex h-[22px] shrink-0 items-center gap-1 rounded-xs px-2 text-label font-medium";
+
+function MenuItem({
+  icon: Icon,
+  danger = false,
+  disabled,
+  onClick,
+  children,
+}: {
+  icon: LucideIcon;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      popoverTarget="bot-menu"
+      popoverTargetAction="hide"
+      className={`${menuItemClass} ${danger ? "text-danger" : ""}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <Icon {...iconProps} className={`shrink-0 ${danger ? "" : "text-ink-secondary"}`} />
+      {children}
+    </button>
+  );
+}
+
+const setPaused = (bot: Bot, paused: boolean) =>
+  void sendCommand({ type: "set-bot-paused", botId: bot.id, paused });
 
 function BotMenu({
   bot,
@@ -49,7 +102,6 @@ function BotMenu({
   onLogin: () => void;
   onArchive: () => void;
 }) {
-  const hide = { popoverTarget: "bot-menu", popoverTargetAction: "hide" } as const;
   return (
     <>
       <button
@@ -58,75 +110,62 @@ function BotMenu({
           pendingMemories > 0 ? `Bot menu, ${pendingMemories} to review in memory` : "Bot menu"
         }
         popoverTarget="bot-menu"
-        className="button !px-2 [anchor-name:--bot-menu]"
+        className="button button-icon relative [anchor-name:--bot-menu]"
       >
         <Ellipsis {...iconProps} />
-        {pendingMemories > 0 && <span className="size-2 shrink-0 rounded-full bg-honey" />}
+        {pendingMemories > 0 && (
+          <span className="absolute top-1 right-1 size-2 rounded-full bg-brand-fill" />
+        )}
       </button>
       <div
         id="bot-menu"
         popover="auto"
-        className="menu m-0 mt-1 w-40 p-1 [position-anchor:--bot-menu] [position-area:bottom_span-left]"
+        className="menu m-0 mt-1 w-60 p-1 [position-anchor:--bot-menu] [position-area:bottom_span-left]"
       >
-        <button type="button" {...hide} className={menuItemClass} onClick={onMemory}>
-          Memory{pendingMemories > 0 && ` (${pendingMemories})`}
-        </button>
-        <button type="button" {...hide} className={menuItemClass} onClick={onRoutines}>
+        <MenuItem icon={Brain} onClick={onMemory}>
+          <span className="flex-1">Memory</span>
+          {pendingMemories > 0 && (
+            <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-raised px-1.5 text-label font-medium text-ink-secondary">
+              {pendingMemories}
+            </span>
+          )}
+        </MenuItem>
+        <MenuItem icon={CalendarClock} onClick={onRoutines}>
           Routines
-        </button>
-        <button type="button" {...hide} className={menuItemClass} onClick={onSkills}>
+        </MenuItem>
+        <MenuItem icon={Sparkles} onClick={onSkills}>
           Skills
-        </button>
-        <button type="button" {...hide} className={menuItemClass} onClick={onConnectors}>
+        </MenuItem>
+        <MenuItem icon={Plug} onClick={onConnectors}>
           Connectors
-        </button>
+        </MenuItem>
         {bot.boundary === "box" && bot.engineAccountId !== "fake" && (
-          <button
-            type="button"
-            {...hide}
-            className={menuItemClass}
-            disabled={!connected}
-            onClick={onLogin}
-          >
+          <MenuItem icon={LogIn} disabled={!connected} onClick={onLogin}>
             Log in
-          </button>
+          </MenuItem>
         )}
-        <button type="button" {...hide} className={menuItemClass} onClick={onEdit}>
-          Edit
-        </button>
-        <button
-          type="button"
-          {...hide}
-          className={menuItemClass}
+        <MenuItem icon={Pencil} onClick={onEdit}>
+          Edit bot
+        </MenuItem>
+        <MenuItem
+          icon={bot.status === "ready" ? Pause : Play}
           disabled={!connected}
-          onClick={() =>
-            void sendCommand({
-              type: "set-bot-paused",
-              botId: bot.id,
-              paused: bot.status === "ready",
-            })
-          }
+          onClick={() => setPaused(bot, bot.status === "ready")}
         >
-          {bot.status === "ready" ? "Pause" : "Resume"}
-        </button>
-        <button
-          type="button"
-          {...hide}
-          className={menuItemClass}
-          disabled={!connected}
-          onClick={onArchive}
-        >
+          {bot.status === "ready" ? `Pause ${bot.name}` : `Resume ${bot.name}`}
+        </MenuItem>
+        <MenuItem icon={Archive} disabled={!connected} onClick={onArchive}>
           Archive
-        </button>
-        <button
-          type="button"
-          {...hide}
-          className={`${menuItemClass} text-danger`}
+        </MenuItem>
+        <hr className="my-1 border-edge-subtle" />
+        <MenuItem
+          icon={Square}
+          danger
           disabled={!connected}
           onClick={() => void sendCommand({ type: "stop-all" })}
         >
           Stop all
-        </button>
+        </MenuItem>
       </div>
     </>
   );
@@ -196,9 +235,11 @@ export function ChatView({
   }, [bot.id, lastBotMessageId, seenId]);
 
   const empty = items.length === 0 && !active && !systemLine;
+  const pauseNotice =
+    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane);
   const notices = [
     status !== "connected" && connectionLines[status],
-    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane),
+    pauseNotice,
     commandError,
     archiveError,
   ].filter((line) => typeof line === "string");
@@ -206,48 +247,47 @@ export function ChatView({
   return (
     <section className="relative flex min-w-0 flex-1" aria-label={`Chat with ${bot.name}`}>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-edge px-3">
+        <header className="flex h-14 shrink-0 items-center gap-2 border-b border-edge-subtle pr-4 pl-2 md:pl-6">
           <button
             type="button"
             aria-label="Open bot list"
-            className="button !px-2 md:hidden"
+            className="button button-icon md:hidden"
             onClick={onOpenDrawer}
           >
             <PanelLeft {...iconProps} />
           </button>
-          <Avatar seed={bot.avatarSeed} className="size-7" />
-          <h2 className="truncate text-name font-medium">{bot.name}</h2>
-          <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
+          <Avatar seed={bot.avatarSeed} className="size-6 rounded-full" />
+          <h2 className="truncate text-title-s font-semibold">{bot.name}</h2>
+          <span className={`${badgeClass} bg-raised text-ink`}>
+            {bot.boundary === "box" && <Box {...iconProps} size={12} />}
             {bot.boundary === "box" ? "In a box" : "Attended only"}
           </span>
           {bot.projectPath && (
             <span
               title={bot.projectPath}
-              className="flex min-w-0 items-center gap-1 rounded-full border border-edge px-2 py-px text-micro text-ink-faint"
+              className={`${badgeClass} min-w-0 shrink bg-raised text-ink`}
             >
               <Folder {...iconProps} size={12} className="shrink-0" />
               <span className="truncate">{folderName(bot.projectPath)}</span>
             </span>
           )}
           {bot.access === "full" && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full border border-danger/40 bg-danger-surface px-2 py-px text-micro text-danger">
-              <ShieldOff {...iconProps} size={12} />
+            <span className={`${badgeClass} bg-danger-surface text-danger`}>
+              <ShieldAlert {...iconProps} size={12} />
               Full access
             </span>
           )}
           {bot.engineAccountId === "fake" && (
-            <span className="shrink-0 rounded-full border border-edge px-2 py-px text-micro text-ink-faint">
-              Test engine
-            </span>
+            <span className={`${badgeClass} bg-brand-surface text-brand`}>Test engine</span>
           )}
           <span className="flex-1" />
           {workspace.liveTab && !workspace.open && (
             <button
               type="button"
-              className="button button-outline !min-h-7 shrink-0 rounded-full"
+              className="button button-sm button-outline shrink-0 rounded-full!"
               onClick={() => workspace.show(workspace.liveTab)}
             >
-              <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-honey-fill" />
+              <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-brand-fill" />
               Watch
             </button>
           )}
@@ -255,7 +295,7 @@ export function ChatView({
             type="button"
             aria-label="Computer"
             aria-pressed={workspace.open}
-            className="button !px-2"
+            className="button button-icon aria-pressed:bg-hover"
             onClick={() => (workspace.open ? workspace.close() : workspace.show())}
           >
             <Monitor {...iconProps} />
@@ -278,11 +318,16 @@ export function ChatView({
           />
         </header>
         {empty ? (
-          <div className={`${columnClass} flex flex-1 flex-col justify-center gap-1 text-center`}>
-            <p className="text-empty">{bot.name}</p>
-            {bot.summary && (
-              <p className="line-clamp-3 text-small text-ink-secondary">{bot.summary}</p>
-            )}
+          <div
+            className={`${columnClass} flex flex-1 flex-col items-center justify-center text-center`}
+          >
+            <span className="mb-4 flex size-12 items-center justify-center rounded-full bg-sidebar text-ink-secondary">
+              <BotIcon {...iconProps} size={20} />
+            </span>
+            <p className="text-heading font-semibold">Ask {bot.name} for something</p>
+            <p className="mt-2 line-clamp-3 max-w-[420px] text-ink-secondary">
+              {bot.summary || "Describe the task the way you'd brief a teammate."}
+            </p>
           </div>
         ) : (
           <Transcript
@@ -310,9 +355,23 @@ export function ChatView({
         <div className={columnClass}>
           <div role="status">
             {notices.map((notice) => (
-              <p key={notice} className="mb-2 text-small text-ink-secondary">
-                {notice}
-              </p>
+              <div
+                key={notice}
+                className="mb-2 flex items-center gap-2 rounded-card border border-edge-subtle bg-sidebar py-2 pr-2 pl-3"
+              >
+                <Info {...iconProps} className="shrink-0 text-ink-secondary" />
+                <p className="flex-1 py-1">{notice}</p>
+                {notice === pauseNotice && (
+                  <button
+                    type="button"
+                    className="button button-sm button-outline shrink-0"
+                    disabled={!connected}
+                    onClick={() => setPaused(bot, false)}
+                  >
+                    Resume
+                  </button>
+                )}
+              </div>
             ))}
           </div>
           <Composer

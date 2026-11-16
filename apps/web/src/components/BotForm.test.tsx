@@ -166,7 +166,7 @@ it("keeps the form open with the refusal when the mode can't change yet", async 
   act(() => radio("browser")?.click());
   act(() =>
     [...host.querySelectorAll("label")]
-      .find(({ textContent }) => textContent === "Any site")
+      .find(({ textContent }) => textContent === "Only these sites")
       ?.querySelector("input")
       ?.click(),
   );
@@ -312,7 +312,7 @@ it("narrows a bot with a browser but no box from any site to its own list", asyn
   expect(host.querySelector('input[aria-label="Site to allow"]')).toBeNull();
   act(() =>
     [...host.querySelectorAll("label")]
-      .find(({ textContent }) => textContent === "Any site")
+      .find(({ textContent }) => textContent === "Only these sites")
       ?.querySelector("input")
       ?.click(),
   );

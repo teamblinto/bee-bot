@@ -119,7 +119,7 @@ export function UploadChips({
       {uploads.map(({ key, name, progress, attachment, error }) => (
         <li
           key={key}
-          className={`flex max-w-56 items-center gap-1 rounded-field border px-2 py-0.5 text-micro ${
+          className={`flex max-w-56 items-center gap-1 rounded-field border px-2 py-0.5 text-caption ${
             error ? "border-danger/40 text-danger" : "border-edge text-ink-secondary"
           }`}
           title={error}
@@ -149,11 +149,11 @@ export function UploadChips({
 
 export function MessageAttachments({ attachments }: { attachments: AttachmentRef[] }) {
   return (
-    <ul aria-label="Attachments" className="flex flex-wrap justify-end gap-1">
+    <ul aria-label="Attachments" className="flex flex-wrap gap-1">
       {attachments.map(({ id, name, size }) => (
         <li
           key={id}
-          className="flex max-w-56 items-center gap-1 rounded-field border border-edge px-2 py-0.5 text-micro text-ink-secondary"
+          className="flex max-w-56 items-center gap-1 rounded-field border border-edge px-2 py-0.5 text-caption text-ink-secondary"
         >
           <FileText {...iconProps} size={12} className="shrink-0" />
           <span className="truncate">{name}</span>

@@ -354,11 +354,11 @@ function Minimap({
                 onMouseMove={(event) => event.stopPropagation()}
               >
                 <span className="menu block rounded-card p-3 text-left">
-                  <span className="block max-w-full truncate text-name font-medium">
+                  <span className="block max-w-full truncate text-body-s font-medium">
                     {preview.userText || "User message"}
                   </span>
                   {preview.assistantText && (
-                    <span className="mt-1 line-clamp-3 max-h-[3.75rem] overflow-hidden text-name text-ink-secondary">
+                    <span className="mt-1 line-clamp-3 max-h-[3.75rem] overflow-hidden text-body-s text-ink-secondary">
                       {preview.assistantText}
                     </span>
                   )}

@@ -123,10 +123,12 @@ async function show(
 
 const query = <T extends Element>(selector: string) => host.querySelector<T>(selector);
 
-const button = (name: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+const button = (name: string, within = "") =>
+  [...host.querySelectorAll<HTMLButtonElement>(`${within} button`)].find(
     (each) => each.textContent?.trim().startsWith(name) || each.getAttribute("aria-label") === name,
   );
+
+const option = (name: string) => button(name, 'section[aria-label="Where Ada works"]');
 
 it("waits for the desktop on the Screen tab, and shows the page on the Browser tab", async () => {
   postCommand.mockResolvedValue({ ok: false, message: "no" });
@@ -184,9 +186,8 @@ it("takes the desktop from the bot, and hands it back from the banner", async ()
 
   lease({ holder: "human", mine: true, leaseId });
   expect(button("Take control")).toBeUndefined();
-  expect(host.textContent).toContain("You're in control");
-  expect(host.textContent).toContain("Ada's clicks and keystrokes are refused");
-  act(() => button("Hand control back")?.click());
+  expect(host.textContent).toContain("You have control · Ada is waiting");
+  act(() => button("Hand back")?.click());
   expect(sockets[0]?.sent).toEqual([{ type: "take" }, { type: "give" }]);
 
   lease({ holder: "human", mine: false, leaseId: null });
@@ -201,6 +202,18 @@ it("drops the last frame and the lease once the browser is gone", async () => {
   receive({ type: "unavailable" });
   expect(query("img")).toBeNull();
   expect(host.textContent).not.toContain("Take control");
+});
+
+it("says when the connection drops, and reconnects on request", async () => {
+  postCommand.mockResolvedValue({ ok: false, message: "no" });
+  await show();
+  lease({ leaseId: null });
+  act(() => sockets[0]?.onclose?.());
+  expect(host.textContent).toContain("Lost connection to Ada's computer.");
+  expect(button("Take control")).toBeUndefined();
+  await act(async () => button("Reconnect")?.click());
+  expect(sockets).toHaveLength(2);
+  expect(host.textContent).not.toContain("Lost connection");
 });
 
 it("navigates from the address bar only while the owner holds control", async () => {
@@ -264,11 +277,11 @@ it("switches where a bot works from its panel, and asks consent there before thi
   expect(sockets).toHaveLength(0);
   expect(postCommand).not.toHaveBeenCalled();
   expect(host.textContent).toContain("Ada has no screen.");
-  expect(button("Off")?.getAttribute("aria-pressed")).toBe("true");
-  expect(button("This PC")?.disabled).toBe(true);
+  expect(option("Off")?.getAttribute("aria-pressed")).toBe("true");
+  expect(option("This PC")?.disabled).toBe(true);
 
   postCommand.mockResolvedValue({ ok: true, body: {} });
-  await act(async () => button("Private desktop")?.click());
+  await act(async () => option("Private desktop")?.click());
   expect(postCommand).toHaveBeenCalledWith({
     type: "set-bot-control",
     botId: bot.id,
@@ -293,7 +306,7 @@ it("switches where a bot works from its panel, and asks consent there before thi
       ),
     );
   await showOff("supervised");
-  await act(async () => button("This PC")?.click());
+  await act(async () => option("This PC")?.click());
   expect(postCommand).not.toHaveBeenCalled();
   expect(host.textContent).toContain("Let Ada use this PC?");
   expect(host.textContent).not.toContain("Full access");
@@ -302,9 +315,9 @@ it("switches where a bot works from its panel, and asks consent there before thi
   expect(postCommand).not.toHaveBeenCalled();
 
   await showOff("full");
-  await act(async () => button("This PC")?.click());
+  await act(async () => option("This PC")?.click());
   expect(host.textContent).toContain("With Full access it won't ask before each click.");
-  await act(async () => button("Use this PC")?.click());
+  await act(async () => option("Use this PC")?.click());
   expect(postCommand).toHaveBeenCalledWith({
     type: "set-bot-control",
     botId: bot.id,
@@ -314,7 +327,7 @@ it("switches where a bot works from its panel, and asks consent there before thi
   expect(host.textContent).not.toContain("Let Ada use this PC?");
 
   postCommand.mockResolvedValue({ ok: false, message: "This bot is working." });
-  await act(async () => button("Browser")?.click());
+  await act(async () => option("Browser")?.click());
   expect(host.textContent).toContain("This bot is working.");
 });
 
@@ -414,7 +427,7 @@ it("shows only the tabs the bot's control mode has", async () => {
   expect(postCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "display-ticket" }));
 
   await showHost({ available: true, problem: null, held: false });
-  expect(tabNames()).toEqual(["Screen"]);
+  expect(tabNames()).toEqual(["Your screen"]);
 
   await show("computer", { ...bot, control: "none" });
   expect(tabNames()).toEqual(["Screen"]);
@@ -478,8 +491,8 @@ it("takes the owner's computer back from bots, and hands it back", async () => {
   expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: true });
 
   await showHost({ available: true, problem: null, held: true });
-  expect(host.textContent).toContain("You're in control");
-  await act(async () => button("Hand control back")?.click());
+  expect(host.textContent).toContain("You have control");
+  await act(async () => button("Hand back")?.click());
   expect(postCommand).toHaveBeenCalledWith({ type: "host-hold", held: false });
 });
 

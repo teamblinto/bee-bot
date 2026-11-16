@@ -5,7 +5,7 @@ import {
   type HostPlatform,
   setupCommand,
 } from "@beebot/contracts";
-import { Check, LoaderCircle, X } from "lucide-react";
+import { CircleCheck, CircleX, LoaderCircle } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { connectionLines, engineFix } from "../labels";
@@ -23,22 +23,31 @@ import { RedactedText } from "./RedactedText";
 import { SetupProgress } from "./SetupProgress";
 import { iconProps } from "./ui";
 
-function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
+function Step({
+  number,
+  title,
+  description,
+  children,
+}: {
+  number: number;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
   return (
-    <main className="flex min-h-dvh items-center justify-center p-6">
-      <section className="surface flex w-full max-w-[520px] flex-col gap-5 p-6">
-        <div className="flex flex-col gap-2">
-          <div aria-hidden className="flex gap-1">
-            {[1, 2].map((step) => (
-              <span
-                key={step}
-                className={`h-1 flex-1 rounded-full ${step <= number ? "bg-honey-fill" : "bg-raised"}`}
-              />
-            ))}
-          </div>
-          <p className="text-label text-ink-faint">Step {number} of 2</p>
-          <h1 className="text-heading font-semibold">{title}</h1>
+    <main className="flex min-h-dvh items-center justify-center bg-background p-6">
+      <section className="flex w-full max-w-[520px] flex-col gap-4 rounded-dialog border border-edge-subtle bg-card p-6 shadow-menu">
+        <div aria-hidden className="flex gap-1">
+          {[1, 2].map((step) => (
+            <span
+              key={step}
+              className={`h-1 flex-1 rounded-[2px] ${step <= number ? "bg-brand-fill" : "bg-raised"}`}
+            />
+          ))}
         </div>
+        <p className="text-caption text-ink-secondary">Step {number} of 2</p>
+        <h1 className="text-title-s font-semibold">{title}</h1>
+        <p className="text-body-s">{description}</p>
         {children}
       </section>
     </main>
@@ -72,7 +81,7 @@ function Dependency({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [opened, setOpened] = useState(false);
-  const Icon = state === "ok" ? Check : state === "checking" ? LoaderCircle : X;
+  const Icon = state === "ok" ? CircleCheck : state === "checking" ? LoaderCircle : CircleX;
 
   async function run(command: Command) {
     setBusy(true);
@@ -87,19 +96,33 @@ function Dependency({
   }
 
   return (
-    <div className="flex flex-col gap-3 rounded-row border border-edge p-3">
-      <div className="flex items-center gap-3">
-        <Icon {...iconProps} className={state === "checking" ? "animate-spin" : undefined} />
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start gap-2">
+        <span className="flex h-5 shrink-0 items-center">
+          <Icon
+            {...iconProps}
+            className={
+              state === "ok"
+                ? "text-success-status"
+                : state === "checking"
+                  ? "animate-spin text-success-status"
+                  : "text-danger-status"
+            }
+          />
+        </span>
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="font-medium">{name}</span>
-          <span role="status" className="flex min-w-0 gap-1 text-small text-ink-secondary">
+          <span className="text-body-s font-medium">{name}</span>
+          <span
+            role="status"
+            className="flex min-w-0 flex-wrap gap-1 text-body-s text-ink-secondary"
+          >
             {line}
           </span>
         </div>
         {action && (
           <button
             type="button"
-            className="button button-primary"
+            className="button button-sm button-outline shrink-0"
             disabled={busy}
             onClick={() => void run(action.command)}
           >
@@ -109,18 +132,18 @@ function Dependency({
       </div>
       {children}
       {opened && (
-        <p className="text-small text-ink-secondary">
+        <p className="text-caption text-ink-secondary">
           Finish in the terminal window, then come back here.
         </p>
       )}
       {error && (
-        <p role="alert" className="text-small text-ink-secondary">
+        <p role="alert" className="text-body-s">
           {error}
         </p>
       )}
       {command === null && (
         <a
-          className="text-small text-ink-secondary underline underline-offset-2"
+          className="text-caption text-ink-secondary underline underline-offset-2"
           href="https://podman.io/docs/installation"
           target="_blank"
           rel="noreferrer noopener"
@@ -129,15 +152,18 @@ function Dependency({
         </a>
       )}
       {command && (
-        <div className="flex flex-col gap-1 rounded-row border border-edge bg-code p-3">
-          <p className="text-label text-ink-faint">
-            {action ? "Or run this in a terminal:" : "Run this in a terminal:"}
-          </p>
-          <div className="flex items-center justify-between gap-2">
-            <code className="font-mono text-small wrap-anywhere">{command}</code>
-            <CopyButton label="Copy command" text={() => command} />
+        <div className="flex flex-col gap-2">
+          <div className="overflow-hidden rounded-card border border-edge-subtle bg-sidebar">
+            <div className="flex h-8 items-center border-b border-edge-subtle pr-1 pl-3">
+              <span className="flex-1 text-caption text-ink-secondary">Terminal</span>
+              <CopyButton label="Copy command" text={() => command} />
+            </div>
+            <code className="block p-3 font-mono text-code wrap-anywhere">{command}</code>
           </div>
-          {hint && <p className="text-label text-ink-faint">{hint}</p>}
+          <p className="text-caption text-ink-secondary">
+            {action ? "Or run this in a terminal" : "Run this in a terminal"}, then Check again.
+            {hint && ` ${hint}`}
+          </p>
         </div>
       )}
     </div>
@@ -211,7 +237,7 @@ function ClaudeRow({
       command={host && fix.command}
     >
       {step !== "claude-install" && engine.auth !== "unauthenticated" && (
-        <p className="text-small text-ink-secondary">{fix.text}</p>
+        <p className="text-body-s text-ink-secondary">{fix.text}</p>
       )}
     </Dependency>
   );
@@ -321,15 +347,19 @@ function SetupStep({
   }, []);
 
   return (
-    <Step number={1} title="Set up Bee Bot">
-      <div className="flex flex-col gap-3">
+    <Step
+      number={1}
+      title="Set up Bee Bot"
+      description="Bee Bot checks this computer for Claude Code and for the computers your bots work on."
+    >
+      <div className="flex flex-col gap-4">
         <ClaudeRow connection={connection} host={host} />
         <BoxesRow boxes={boxAvailability} host={host} />
       </div>
-      <div className="flex items-center justify-end gap-1">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
-          className="button button-outline"
+          className="button mr-auto"
           disabled={engineChecking}
           onClick={recheck}
         >
@@ -373,7 +403,11 @@ export function Onboarding({
     return <SetupStep connection={connection} onContinue={() => setSetUp(true)} />;
   }
   return (
-    <Step number={2} title="Create your first bot">
+    <Step
+      number={2}
+      title="Create your first bot"
+      description="Give your bot a name and a look. You can change both later."
+    >
       <BotForm
         bot={undefined}
         submitLabel="Create bot"
@@ -382,11 +416,7 @@ export function Onboarding({
           onCreated(bot);
         }}
       >
-        <button
-          type="button"
-          className="px-3 text-small text-ink-secondary underline underline-offset-2"
-          onClick={onNotNow}
-        >
+        <button type="button" className="button" onClick={onNotNow}>
           Not now
         </button>
       </BotForm>
