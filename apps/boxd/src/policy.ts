@@ -302,9 +302,10 @@ export function volumeArgs(name: string, labels: Record<string, string>) {
   return ["volume", "create", ...labelArgs(labels), name];
 }
 
-// `podman exec` runs the process as its own session leader, and killing the podman client leaves
-// that process running. So each exec records its process group in the box's /tmp, and a kill
-// signals the whole group from inside the box.
+// Killing the podman client leaves an exec's process running. So each exec records its process
+// group in the box's /tmp, and a kill signals the whole group from inside the box. Whether `podman
+// exec` makes the process a group leader depends on the Podman version (4.9 leaves it in conmon's
+// group, outside the box), so setsid makes one; -w keeps the exit code when setsid has to fork.
 const execDir = "/tmp/.beebot-exec";
 const execWrap = `mkdir -p ${execDir} && echo $$ > ${execDir}/"$0"; "$@"; c=$?; rm -f ${execDir}/"$0"; exit $c`;
 // The box's sh is dash, whose kill refuses `--`: the signal goes first, then the negative group.
@@ -321,6 +322,8 @@ export function execArgs(
     "-i",
     ...(cwd === undefined ? [] : ["--workdir", cwd]),
     container,
+    "setsid",
+    "-w",
     "sh",
     "-c",
     execWrap,
