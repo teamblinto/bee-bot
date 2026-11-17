@@ -79,6 +79,27 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+        env:
+          BEEBOT_POSTHOG_KEY: ${{ secrets.BEEBOT_POSTHOG_KEY }}
+          BEEBOT_POSTHOG_HOST: ${{ vars.BEEBOT_POSTHOG_HOST || 'https://eu.i.posthog.com' }}
+      # Inject must change the JS before it is packaged. Chunk ids are content hashes, so every OS
+      # uploads its own maps: identical chunks overwrite one symbol set, differing ones get their own.
+      - name: Upload source maps to PostHog
+        shell: bash
+        env:
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST || 'https://eu.posthog.com' }}
+        run: |
+          if [ -z "$POSTHOG_CLI_API_KEY" ]; then
+            echo "POSTHOG_CLI_API_KEY is not set, skipping"
+            exit 0
+          fi
+          version=$(node -p 'require("./apps/desktop/package.json").version')
+          for dir in apps/server/dist apps/desktop/dist-electron apps/web/dist; do
+            npx -y @posthog/cli@0.20.0 sourcemap inject --directory "$dir" --release-name bee-bot --release-version "$version"
+            npx -y @posthog/cli@0.20.0 sourcemap upload --directory "$dir" --release-name bee-bot --release-version "$version"
+          done
       - if: runner.os == 'Windows'
         run: node scripts/prepare-cua-driver.ts
       - name: Package and upload to the draft

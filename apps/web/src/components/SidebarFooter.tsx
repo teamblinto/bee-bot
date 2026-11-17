@@ -13,7 +13,7 @@ import { useState } from "react";
 import { useDesktopUpdate } from "../desktop";
 import { connectionLines, engineFix } from "../labels";
 import { readTheme, saveTheme, type Theme } from "../preferences";
-import type { ConnectionState } from "../serverConnection";
+import { type ConnectionState, sendCommand } from "../serverConnection";
 import { remainingPercent } from "../usageLimits";
 import { Tooltip } from "./Tooltip";
 import { iconProps } from "./ui";
@@ -147,6 +147,18 @@ export function SidebarFooter({
       </p>
       <UpdateLine />
       <PlanMeter connection={connection} onUsage={onUsage} />
+      <label className="flex cursor-pointer items-center justify-between gap-2 text-caption text-ink-secondary">
+        Share usage data
+        <input
+          type="checkbox"
+          role="switch"
+          className="relative h-[18px] w-8 shrink-0 cursor-pointer appearance-none rounded-full bg-edge-strong transition-colors before:absolute before:top-0.5 before:left-0.5 before:size-3.5 before:rounded-full before:bg-card before:transition-transform checked:bg-brand-fill checked:before:translate-x-3.5"
+          checked={connection.chat.usageData === true}
+          onChange={(event) =>
+            void sendCommand({ type: "set-usage-data", on: event.target.checked })
+          }
+        />
+      </label>
       <ThemeSwitch />
     </div>
   );

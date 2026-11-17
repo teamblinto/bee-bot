@@ -19,7 +19,7 @@ import {
 } from "electron";
 
 import { watchNotices } from "./notices.ts";
-import { sendIdle, sendPower, startServer, stopServer } from "./server.ts";
+import { sendError, sendIdle, sendPower, sendUsage, startServer, stopServer } from "./server.ts";
 import { checkForUpdates, quitAndInstall, startUpdates, updateState } from "./updates.ts";
 import { loadVaultKey } from "./vault.ts";
 
@@ -41,6 +41,7 @@ if (process.platform === "win32") {
 // Takes this PC back from whatever bot is using it, like the panel's Take control. Three modifiers
 // and a letter: on every keyboard, reserved by nothing in Windows, and unlikely to clash with apps.
 const stopShortcut = "Ctrl+Alt+Shift+X";
+const foregroundReportMs = 30 * 60_000;
 
 let connection: Awaited<ReturnType<typeof startServer>>;
 let serverStopped = false;
@@ -50,8 +51,31 @@ let mainWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let stopNotices: (() => void) | undefined;
 let idleTimer: NodeJS.Timeout | undefined;
+let foregroundReportedAt = -Infinity;
 // Electron drops a notification's click handler once nothing holds the notification.
 const shownNotifications = new Set<Notification>();
+
+// Listening replaces Electron's own dialog for an uncaught main-process error, so this shows one.
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  sendError(error);
+  dialog.showErrorBox(
+    "Bee Bot hit an error",
+    "Something went wrong. Restart Bee Bot if it stops working.",
+  );
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+  sendError(reason);
+});
+
+function reportForeground() {
+  if (Date.now() - foregroundReportedAt < foregroundReportMs) {
+    return;
+  }
+  foregroundReportedAt = Date.now();
+  sendUsage("app_foregrounded", {});
+}
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -70,6 +94,8 @@ function createWindow() {
   mainWindow = window;
 
   window.once("ready-to-show", () => window.show());
+  window.on("show", reportForeground);
+  window.on("focus", reportForeground);
   window.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
@@ -220,6 +246,11 @@ app.on("before-quit", (event) => {
     return;
   }
   event.preventDefault();
+  const update = updateState();
+  // autoInstallOnAppQuit installs a downloaded update on any quit. The server flushes this as it stops.
+  if (update.status === "ready") {
+    sendUsage("update_installed", { from_version: app.getVersion(), to_version: update.version });
+  }
   stopNotices?.();
   clearInterval(idleTimer);
   // The installer force-kills every running Bee Bot.exe, the server included, so it starts only
@@ -242,6 +273,18 @@ async function start() {
     "cua-driver.exe",
   );
   const hasCuaDriver = process.platform === "win32" && NodeFS.existsSync(cuaDriver);
+  const vault = await loadVaultKey(
+    safeStorage,
+    NodePath.join(app.getPath("userData"), "vault-key"),
+  );
+  // Both are inlined at build time. A dev build or a build without a key never sends anything.
+  const telemetryKey = process.env.BEEBOT_POSTHOG_KEY;
+  const telemetryHost = process.env.BEEBOT_POSTHOG_HOST;
+  const telemetry =
+    app.isPackaged && telemetryKey && telemetryHost && process.env.BEEBOT_TELEMETRY !== "0"
+      ? { key: telemetryKey, host: telemetryHost, appVersion: app.getVersion() }
+      : undefined;
+  const startedAt = Date.now();
   try {
     connection = await startServer({
       entry: NodePath.join(
@@ -251,14 +294,16 @@ async function start() {
       dataDir: NodePath.join(app.getPath("userData"), "server"),
       allowedOrigins: [devServerUrl ? new URL(devServerUrl).origin : "file://"],
       fakeEngine: Boolean(devServerUrl),
-      vault: await loadVaultKey(safeStorage, NodePath.join(app.getPath("userData"), "vault-key")),
+      vault,
       hostControl,
       ...(hasCuaDriver && { cuaDriver }),
+      ...(telemetry && { telemetry }),
     });
   } catch {
     app.quit();
     return;
   }
+  sendUsage("app_launched", { server_ready_ms: Date.now() - startedAt });
   powerMonitor.on("suspend", () => sendPower("suspend"));
   powerMonitor.on("resume", () => sendPower("resume"));
   if (process.platform === "win32") {

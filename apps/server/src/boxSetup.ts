@@ -18,6 +18,7 @@ import {
   type SetupProgress,
   step,
 } from "./setupProgress.ts";
+import { track } from "./analytics.ts";
 
 // Bee's own machine, so creating and starting it never touches one the owner made.
 export const defaultBoxMachine = "beebot";
@@ -276,11 +277,14 @@ export function createBoxService({
       await old.close();
     }
     set({ machine: name, settingUp: setUp, available: host !== undefined });
+    const begun = Date.now();
+    let stage: "podman" | "machine" | "image" | "host" = "podman";
     let found = await probe(name);
     let problem: string | null = null;
     try {
       const recover = found.found && setUpBefore(name);
       if (!found.running && !found.podmanProblem && (setUp || recover)) {
+        stage = "machine";
         if (!found.found) {
           progress(step("Downloading the Linux machine"));
           await initMachine(name, progress);
@@ -292,12 +296,14 @@ export function createBoxService({
         found = await probe(name);
       }
       if ((setUp || recover) && found.running && !found.imageBuilt) {
+        stage = "image";
         set({ machineFound: true });
         progress(step("Preparing the computer's software"));
         await buildImage(name, progress);
         found.imageBuilt = true;
       }
       if (!host && found.running && found.imageBuilt && (setUp || recover || found.boxdInstalled)) {
+        stage = "host";
         set({ machineFound: true, imageBuilt: true });
         progress(step("Starting the computer service"));
         const started = await startDaemon(name);
@@ -327,6 +333,14 @@ ${started.stderr()}`);
       }
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error);
+    }
+    if (setUp) {
+      const duration_ms = Date.now() - begun;
+      if (host) {
+        track("box_setup_completed", { duration_ms });
+      } else {
+        track("box_setup_failed", { duration_ms, stage });
+      }
     }
     set({
       podmanFound: !found.podmanProblem,

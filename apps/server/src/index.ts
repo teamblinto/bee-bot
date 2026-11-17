@@ -5,12 +5,21 @@ import * as NodeReadline from "node:readline";
 
 import {
   Bootstrap,
+  DesktopError,
+  DesktopUsage,
   type EngineLane,
   IdleSignal,
   noRestartExitCodes,
   PowerSignal,
 } from "@beebot/contracts";
 
+import {
+  captureError,
+  reportError,
+  shutdownAnalytics,
+  startAnalytics,
+  trackUnchecked,
+} from "./analytics.ts";
 import { boxLayout } from "./boxEngine.ts";
 import { startBoxHost, windowsPodman } from "./boxHost.ts";
 import { createBoxService, defaultBoxMachine, podmanMachine } from "./boxSetup.ts";
@@ -24,6 +33,7 @@ import { spawnHostDriver } from "./hostScreen.ts";
 import { setupPath } from "./hostSetup.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
+import { engineChecked, trackUsage } from "./usageEvents.ts";
 import { openEventStore } from "./store.ts";
 import { openVault, readVaultKeyFile } from "./vaultStore.ts";
 import { createAwakeClock } from "./watchdog.ts";
@@ -64,6 +74,23 @@ function parseIdle(line: string) {
   }
 }
 
+// The desktop's usage events and main-process errors, sent on only if the owner allowed it.
+function forwardDesktop(line: string) {
+  try {
+    const json: unknown = JSON.parse(line);
+    const usage = DesktopUsage.safeParse(json).data?.usage;
+    if (usage) {
+      trackUnchecked(usage.event, usage.properties);
+    }
+    const error = DesktopError.safeParse(json).data?.error;
+    if (error) {
+      reportError(error);
+    }
+  } catch {
+    // Not JSON: nothing to forward.
+  }
+}
+
 function openStore(dataDir: string) {
   try {
     const store = openEventStore(dataDir);
@@ -89,6 +116,13 @@ function wipeRuntime(dataDir: string) {
 
 async function boot(bootstrap: Bootstrap) {
   const store = openStore(bootstrap.dataDir);
+  if (bootstrap.telemetry) {
+    startAnalytics({
+      ...bootstrap.telemetry,
+      environmentId: store.environmentId,
+      consent: () => store.usageData() === true,
+    });
+  }
   const { claudeCommand = ["claude"], codexCommand = ["codex"], dataDir } = bootstrap;
   wipeRuntime(dataDir);
   const clock = createAwakeClock();
@@ -159,7 +193,11 @@ async function boot(bootstrap: Bootstrap) {
     }
     return turn.launch.engineAccountId === "codex" ? host.codex(turn) : host.claude(turn);
   };
-  const probe = (lane: EngineLane) => probeEngine(claudeCommand, dataDir, lane);
+  const probe = async (lane: EngineLane) => {
+    const status = await probeEngine(claudeCommand, dataDir, lane);
+    trackUsage(engineChecked("claude", status));
+    return status;
+  };
   const hostControl = bootstrap.hostControl === true && process.platform === "win32";
   const { cuaDriver } = bootstrap;
   if (hostControl && !cuaDriver) {
@@ -213,9 +251,24 @@ async function boot(bootstrap: Bootstrap) {
       clearInterval(pruning);
       await server.close();
       await boxes.close();
+      await shutdownAnalytics();
       store.close();
     },
   };
+}
+
+async function crash(error: unknown) {
+  captureError(error);
+  await shutdownAnalytics();
+  process.exit(1);
+}
+
+// Node would print the error and exit 1 by itself; the report goes out first. The desktop restarts us.
+for (const event of ["uncaughtException", "unhandledRejection"] as const) {
+  process.on(event, (error: unknown) => {
+    console.error(error);
+    void crash(error);
+  });
 }
 
 function start(bootstrap: Bootstrap | undefined) {
@@ -223,9 +276,9 @@ function start(bootstrap: Bootstrap | undefined) {
     exitWith(noRestartExitCodes.invalidBootstrap, "invalid bootstrap");
   }
   const running = boot(bootstrap);
-  running.catch((error: unknown) => {
+  running.catch(async (error: unknown) => {
     console.error(error);
-    process.exit(1);
+    await crash(error);
   });
   return running;
 }
@@ -259,6 +312,8 @@ if (fileFlag === -1) {
       if (idle) {
         void running.then((server) => server.idle(idle.idleSeconds));
       }
+      // After boot, so the owner's setting has been read.
+      void running.then(() => forwardDesktop(line));
       return;
     }
     clearTimeout(bootstrapTimer);

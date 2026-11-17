@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { createMemoryHistory } from "@tanstack/react-router";
 import { expect, it } from "vite-plus/test";
 

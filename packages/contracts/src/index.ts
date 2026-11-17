@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 37;
+export const protocolVersion = 38;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -47,6 +47,16 @@ export const Bootstrap = z.object({
   // Sent only by the desktop app when it ships trycua's cua-driver: host control then acts in
   // the background through it, with its own cursor, instead of moving the owner's pointer.
   cuaDriver: z.string().min(1).optional(),
+  // Sent only by a packaged desktop app built with a PostHog key. Without it nothing is ever sent.
+  // A bad one turns usage data off instead of refusing the whole bootstrap.
+  telemetry: z
+    .object({
+      key: z.string().min(1).max(200),
+      host: z.url({ protocol: /^https$/ }),
+      appVersion: z.string().regex(/^\d+\.\d+\.\d+[\w.+-]{0,40}$/),
+    })
+    .optional()
+    .catch(undefined),
 });
 export type Bootstrap = z.infer<typeof Bootstrap>;
 
@@ -898,6 +908,8 @@ export const ChatState = z.object({
   vault: VaultStatus,
   // The owner was told the vendor's automated-access terms bind them for unattended bots (R7).
   automatedAccessAcknowledgedAt: z.string().nullable(),
+  // Null until the owner answers the usage-data question. Off unless they turned it on.
+  usageData: z.boolean().nullable(),
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -927,6 +939,7 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("continuation.changed"), continuation: Continuation }),
   z.object({ type: z.literal("vault.changed"), vault: VaultStatus }),
   z.object({ type: z.literal("automated-access.acknowledged"), acknowledgedAt: z.string() }),
+  z.object({ type: z.literal("usage-data.changed"), on: z.boolean() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -1009,6 +1022,209 @@ export const ServerMessage = z.discriminatedUnion("type", [
   }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
+
+// Usage data (product analytics), sent to PostHog only when the owner turned it on. Each event
+// lists exactly the properties it may carry, and the strict schemas refuse any other. Never add
+// a free-form string: no message text, names, paths, URLs, hosts, tool names or error messages.
+const Count = z.number().int().min(0).max(1_000_000);
+const Ms = z
+  .number()
+  .int()
+  .min(0)
+  .max(30 * 24 * 60 * 60_000);
+// An error's `name` or `code`, such as `TypeError` or `ENOENT`. Never its message.
+export const ErrorName = z.string().regex(/^[A-Za-z_]\w{0,63}$/);
+const Version = z.string().regex(/^\d+\.\d+\.\d+[\w.+-]{0,40}$/);
+
+export const UsageEvents = {
+  app_launched: z.strictObject({ server_ready_ms: Ms }),
+  app_foregrounded: z.strictObject({}),
+  onboarding_viewed: z.strictObject({}),
+  engine_checked: z.strictObject({
+    engine: EngineAccountId,
+    cli_found: z.boolean(),
+    auth: z.enum(["authenticated", "unauthenticated", "unknown"]),
+    pause_reason: PauseReason.nullable(),
+  }),
+  box_setup_completed: z.strictObject({ duration_ms: Ms }),
+  box_setup_failed: z.strictObject({
+    duration_ms: Ms,
+    stage: z.enum(["podman", "machine", "image", "host"]),
+  }),
+  bot_created: z.strictObject({
+    engine: EngineAccountId,
+    boundary: BotBoundary,
+    control: BotControl,
+    access: BotAccess,
+    has_project_folder: z.boolean(),
+    first: z.boolean(),
+  }),
+  bot_works_on_changed: z.strictObject({ boundary: BotBoundary, control: BotControl }),
+  bot_engine_changed: z.strictObject({
+    engine: EngineAccountId,
+    model_changed: z.boolean(),
+    effort: Effort.nullable(),
+    mode: BotMode,
+    access: BotAccess,
+  }),
+  connector_added: z.strictObject({
+    transport: z.enum(["http", "stdio"]),
+    auth: z.enum(["none", "bearer", "headers", "oauth"]),
+    source: z.enum(["url", "import"]),
+    bot_only: z.boolean(),
+  }),
+  connector_oauth_completed: z.strictObject({ ok: z.boolean() }),
+  routine_created: z.strictObject({ enabled: z.boolean(), has_skip_window: z.boolean() }),
+  routine_fired: z.strictObject({
+    status: z.enum(["ran", "skipped", "missed"]),
+    reason: FiringReason.nullable(),
+    missed_before: Count,
+  }),
+  message_sent: z.strictObject({
+    room: z.enum(["dm", "group"]),
+    chars: Count,
+    attachments: Count,
+    mentions: Count,
+    is_reply: z.boolean(),
+  }),
+  run_started: z.strictObject({
+    engine: EngineAccountId,
+    boundary: BotBoundary,
+    source: WakeSource,
+    attended: z.boolean(),
+    queued_ms: Ms,
+  }),
+  run_finished: z.strictObject({
+    engine: EngineAccountId,
+    boundary: BotBoundary,
+    status: RunStatus,
+    reason: RunReason.nullable(),
+    duration_ms: Ms,
+  }),
+  approval_requested: z.strictObject({ kind: z.enum(["tool", "action", "hand_off"]) }),
+  approval_decided: z.strictObject({
+    kind: z.enum(["tool", "action", "hand_off"]),
+    decision: z.enum(["allow", "deny", "always", "expired"]),
+    wait_ms: Ms,
+  }),
+  browser_handoff_requested: z.strictObject({
+    reason: z.enum(["human_only", "challenge", "other"]),
+  }),
+  quota_limited: z.strictObject({ engine: EngineAccountId, lane: EngineLane }),
+  command_failed: z.strictObject({
+    command: z.lazy(() => CommandType),
+    status: z.number().int().min(400).max(599),
+    code: ErrorName,
+  }),
+  server_crashed: z.strictObject({
+    exit_code: z.number().int().nullable(),
+    signal: ErrorName.nullable(),
+    uptime_ms: Ms,
+    will_restart: z.boolean(),
+  }),
+  update_installed: z.strictObject({ from_version: Version, to_version: Version }),
+  update_failed: z.strictObject({
+    stage: z.enum(["check", "download"]),
+    code: ErrorName.nullable(),
+  }),
+};
+export type UsageEventName = keyof typeof UsageEvents;
+export type UsageProperties<E extends UsageEventName> = z.input<(typeof UsageEvents)[E]>;
+
+// The only events the web app may send.
+export const WebUsageEvent = z.enum(["onboarding_viewed"]);
+
+// A stack frame with no path: only the file's base name, which the release's source maps resolve.
+export const ErrorFrame = z.strictObject({
+  filename: z.string().regex(/^[\w.-]{1,120}$/),
+  // An identifier path such as `Object.<anonymous>`, never words.
+  function: z.string().regex(/^(?:(?:async|new) )?[\w$.<>[\]]{0,120}$/),
+  lineno: z.number().int().min(0),
+  colno: z.number().int().min(0),
+  chunk_id: z
+    .string()
+    .regex(/^[\w-]{1,80}$/)
+    .optional(),
+});
+export type ErrorFrame = z.infer<typeof ErrorFrame>;
+
+// An exception's type and frames. Never its message, which can quote the owner's content.
+export const ErrorReport = z.strictObject({
+  source: z.enum(["server", "desktop", "web"]),
+  name: ErrorName,
+  frames: z.array(ErrorFrame).max(50),
+});
+export type ErrorReport = z.infer<typeof ErrorReport>;
+
+const stackLine = /^\s*at (?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/;
+const baseName = (location: string) => location.split(/[\\/]/).at(-1)?.split(/[?#]/)[0] ?? "";
+
+// Reads V8's stack format, which Node, Electron and Chromium all use. The stack starts with the
+// message, which can quote another program's stack, so its lines are skipped, not parsed.
+export function toErrorReport(error: unknown, source: ErrorReport["source"]): ErrorReport {
+  const value = error instanceof Error ? error : undefined;
+  const code = (value as { code?: unknown } | undefined)?.code;
+  const name =
+    [code, value?.name].find(
+      (candidate): candidate is string => ErrorName.safeParse(candidate).success,
+    ) ?? "Error";
+  const chunks = chunkIds();
+  const messageLines = (value?.message ?? "").split("\n").length;
+  const frames = (value?.stack ?? "")
+    .split("\n")
+    .slice(messageLines)
+    .flatMap((line) => {
+      const match = stackLine.exec(line);
+      if (!match) {
+        return [];
+      }
+      const [, fn = "", location = "", lineno, colno] = match;
+      const filename = baseName(location);
+      const chunk = chunks.get(filename);
+      const frame = ErrorFrame.safeParse({
+        filename,
+        function: ErrorFrame.shape.function.safeParse(fn).success ? fn : "",
+        lineno: Number(lineno),
+        colno: Number(colno),
+        ...(chunk !== undefined && { chunk_id: chunk }),
+      });
+      return frame.success ? [frame.data] : [];
+    });
+  return { source, name, frames: frames.slice(0, 50) };
+}
+
+// `posthog-cli sourcemap inject` keys each bundle's chunk ID by a stack taken inside that bundle.
+function chunkIds() {
+  const ids = (globalThis as { _posthogChunkIds?: Record<string, string> })._posthogChunkIds ?? {};
+  const byFile = new Map<string, string>();
+  for (const [stack, id] of Object.entries(ids)) {
+    const location = stack
+      .split("\n")
+      .map((line) => stackLine.exec(line)?.[2])
+      .find((found) => found !== undefined);
+    if (location) {
+      byFile.set(baseName(location), id);
+    }
+  }
+  return byFile;
+}
+
+// Each later stdin line may also be one of these, from the desktop's main process.
+export const DesktopUsage = z.object({
+  usage: z.object({
+    event: z.enum([
+      "app_launched",
+      "app_foregrounded",
+      "server_crashed",
+      "update_installed",
+      "update_failed",
+    ]),
+    properties: z.record(z.string(), z.unknown()),
+  }),
+});
+export type DesktopUsage = z.infer<typeof DesktopUsage>;
+export const DesktopError = z.object({ error: ErrorReport });
+export type DesktopError = z.infer<typeof DesktopError>;
 
 const botFields = {
   name: z.string().trim().min(1).max(80),
@@ -1235,8 +1451,14 @@ export const Command = z.discriminatedUnion("type", [
     hosts: EgressHosts,
   }),
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
+  z.object({ type: z.literal("set-usage-data"), on: z.boolean() }),
+  // From the web app, which never talks to PostHog itself. Dropped unless usage data is on.
+  z.object({ type: z.literal("track"), event: WebUsageEvent }),
+  z.object({ type: z.literal("report-error"), error: ErrorReport }),
 ]);
 export type Command = z.infer<typeof Command>;
+const commandTypes = new Set<string>(Command.options.map((option) => option.shape.type.value));
+const CommandType = z.string().refine((type) => commandTypes.has(type));
 
 // Strict, because the probe reads output holding the owner's organization and more. The email goes
 // only to the owner's own screen, and is never logged or stored.

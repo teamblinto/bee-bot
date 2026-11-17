@@ -43,6 +43,7 @@ import type {
 import type { DesktopControl } from "./display.ts";
 import type { EventStore } from "./store.ts";
 import { type Takeover, takeoverTtlMs } from "./takeovers.ts";
+import { handoffRequested, trackUsage } from "./usageEvents.ts";
 
 const text = { type: "string" };
 const ref = { type: "string", description: "An element ref from your latest snapshot" };
@@ -292,6 +293,7 @@ export function createBrowserBroker(deps: BrowserDeps) {
 
   function requestHandoff(run: BrowserRun, tab: Tab, reason: HandoffReason, note: string | null) {
     tab.requested = { reason, note };
+    trackUsage(handoffRequested(reason, note));
     deps.setPaused(run.botId, true);
     deps.notify(run, notices[reason](note ?? "A site"));
     broadcastLease(tab);

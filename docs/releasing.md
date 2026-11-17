@@ -42,3 +42,19 @@ Optional signing. Builds succeed unsigned without them.
 
 Unsigned macOS builds cannot auto-update, and unsigned Windows installers show a SmartScreen
 warning.
+
+Optional usage data and crash reports (PostHog). Without `BEEBOT_POSTHOG_KEY` the app never sends
+anything; without `POSTHOG_CLI_API_KEY` the source map upload is skipped.
+
+| Secret or variable                  | Value                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------- |
+| `BEEBOT_POSTHOG_KEY` (secret)       | The PostHog project API key (`phc_...`), built into the app                     |
+| `BEEBOT_POSTHOG_HOST` (variable)    | Ingestion host, defaults to `https://eu.i.posthog.com`                          |
+| `POSTHOG_CLI_API_KEY` (secret)      | Personal API key with the "error tracking write" and "organization read" scopes |
+| `POSTHOG_CLI_PROJECT_ID` (variable) | The PostHog project ID                                                          |
+| `POSTHOG_CLI_HOST` (variable)       | App host for the source map upload, defaults to `https://eu.posthog.com`        |
+
+The release injects chunk ids into the built JS and uploads its source maps with
+`@posthog/cli`, so crash stacks unminify in PostHog. The maps themselves never ship in the app.
+
+In the PostHog project settings, turn on "Discard client IP data" so events keep no IP address.

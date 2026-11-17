@@ -23,15 +23,71 @@ import { RedactedText } from "./RedactedText";
 import { SetupProgress } from "./SetupProgress";
 import { iconProps } from "./ui";
 
+function UsageDataQuestion() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function answer(on: boolean) {
+    setBusy(true);
+    setError(undefined);
+    const result = await postCommand({ type: "set-usage-data", on });
+    // The view itself was reported before the owner answered, when nothing could be sent.
+    if (result.ok && on) {
+      void postCommand({ type: "track", event: "onboarding_viewed" });
+    }
+    // On success this unmounts when the changed event arrives.
+    if (!result.ok) {
+      setBusy(false);
+      setError(result.message);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-card border border-edge-subtle bg-sidebar p-3 text-body-s">
+      <p className="font-medium">Share usage data?</p>
+      <p className="text-ink-secondary">
+        Bee Bot can send anonymous counts of which features you use, the app version and your
+        operating system, and the type of any crash. Never your messages, names, files, URLs or
+        keys. It stays off unless you turn it on.
+      </p>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="button button-sm button-outline"
+          disabled={busy}
+          onClick={() => void answer(true)}
+        >
+          Turn on
+        </button>
+        <button
+          type="button"
+          className="button button-sm"
+          disabled={busy}
+          onClick={() => void answer(false)}
+        >
+          No thanks
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Step({
   number,
   title,
   description,
+  askUsageData,
   children,
 }: {
   number: number;
   title: string;
   description: string;
+  askUsageData: boolean;
   children: ReactNode;
 }) {
   return (
@@ -48,6 +104,7 @@ function Step({
         <p className="text-caption text-ink-secondary">Step {number} of 2</p>
         <h1 className="text-title-s font-semibold">{title}</h1>
         <p className="text-body-s">{description}</p>
+        {askUsageData && <UsageDataQuestion />}
         {children}
       </section>
     </main>
@@ -351,6 +408,7 @@ function SetupStep({
       number={1}
       title="Set up Bee Bot"
       description="Bee Bot checks this computer for Claude Code and for the computers your bots work on."
+      askUsageData={connection.chat.usageData === null}
     >
       <div className="flex flex-col gap-4">
         <ClaudeRow connection={connection} host={host} />
@@ -399,6 +457,10 @@ export function Onboarding({
 }) {
   const [setUp, setSetUp] = useState(false);
 
+  useEffect(() => {
+    void postCommand({ type: "track", event: "onboarding_viewed" });
+  }, []);
+
   if (!setUp) {
     return <SetupStep connection={connection} onContinue={() => setSetUp(true)} />;
   }
@@ -407,6 +469,7 @@ export function Onboarding({
       number={2}
       title="Create your first bot"
       description="Give your bot a name and a look. You can change both later."
+      askUsageData={connection.chat.usageData === null}
     >
       <BotForm
         bot={undefined}

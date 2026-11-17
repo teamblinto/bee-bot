@@ -65,14 +65,18 @@ const ready: BoxAvailability = {
   problem: null,
 };
 
-async function show(engine: EngineStatus, boxAvailability: BoxAvailability = ready) {
+async function show(
+  engine: EngineStatus,
+  boxAvailability: BoxAvailability = ready,
+  usageData: boolean | null = false,
+) {
   const initial = getConnectionState();
   const state: ConnectionState = {
     ...initial,
     status: "connected",
     engine,
     boxAvailability,
-    chat: { ...initial.chat, vault: { apiKeys: ["claude"] } },
+    chat: { ...initial.chat, usageData, vault: { apiKeys: ["claude"] } },
   };
   current.state = state;
   await act(async () =>
@@ -123,7 +127,7 @@ it("looks for Podman again when the owner comes back from installing it", async 
 it("doesn't start setup on focus when Podman is already there", async () => {
   await show(healthy, { ...ready, available: false, problem: "Not set up yet" });
   await act(async () => window.dispatchEvent(new Event("focus")));
-  expect(postCommand).not.toHaveBeenCalled();
+  expect(postCommand).not.toHaveBeenCalledWith({ type: "set-up-boxes" });
 });
 
 it("lets the owner skip computers once Claude works, and continue only with both", async () => {
@@ -138,4 +142,21 @@ it("lets the owner skip computers once Claude works, and continue only with both
   expect(button("Skip for now")).toBeUndefined();
   act(() => button("Continue")?.click());
   expect(host.textContent).toContain("Create your first bot");
+});
+
+it("asks about usage data once and hides the question after the answer", async () => {
+  await show(healthy, ready, null);
+  expect(postCommand).toHaveBeenCalledWith({ type: "track", event: "onboarding_viewed" });
+  await act(async () => button("No thanks")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "set-usage-data", on: false });
+
+  await show(healthy, ready, false);
+  expect(button("No thanks")).toBeUndefined();
+  expect(button("Turn on")).toBeUndefined();
+});
+
+it("turns usage data on from the question", async () => {
+  await show(healthy, ready, null);
+  await act(async () => button("Turn on")?.click());
+  expect(postCommand).toHaveBeenCalledWith({ type: "set-usage-data", on: true });
 });

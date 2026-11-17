@@ -25,7 +25,7 @@ import {
   Run,
   type RunReason,
   ServerEvent,
-  type WakeSource,
+  WakeSource,
   UsageLimits,
   UsageWindow,
 } from "@beebot/contracts";
@@ -809,6 +809,11 @@ export const migrations: Array<{
       );
     },
   },
+  {
+    name: "usage_data",
+    // Null until the owner answers: nothing is sent before they turn it on.
+    sql: "ALTER TABLE settings ADD COLUMN usage_data INTEGER",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1322,6 +1327,9 @@ export function openEventStore(dataDir: string) {
     "SELECT id FROM wakes WHERE scope_id = ? AND status = 'pending'",
   );
   const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
+  const selectRunWake = db.prepare(
+    "SELECT w.source, w.attended FROM runs r JOIN wakes w ON w.id = r.wake_id WHERE r.id = ?",
+  );
   // A run carries the chain of the task input it answers, even when a human's wake started it,
   // and works on the one open task its bot owns.
   const selectOrigin = db.prepare(
@@ -1439,6 +1447,8 @@ export function openEventStore(dataDir: string) {
   const selectAutomatedAccess = db.prepare(
     "SELECT automated_access_acknowledged_at AS acknowledgedAt FROM settings",
   );
+  const selectUsageData = db.prepare("SELECT usage_data AS value FROM settings");
+  const updateUsageData = db.prepare("UPDATE settings SET usage_data = ?");
   const selectBoxMachine = db.prepare("SELECT box_machine AS machine FROM settings");
   const updateBoxMachine = db.prepare("UPDATE settings SET box_machine = ?");
   const selectBoxMachineSetUp = db.prepare("SELECT box_machine_set_up AS machine FROM settings");
@@ -2320,6 +2330,10 @@ export function openEventStore(dataDir: string) {
   const continuations = openContinuations(db, tx);
   const takeovers = openTakeovers(db, tx);
   const { vaultStatus } = openVaultEntries(db);
+  const usageData = () => {
+    const { value } = z.object({ value: z.number().nullable() }).parse(selectUsageData.get());
+    return value === null ? null : value === 1;
+  };
   const automatedAccessAt = () =>
     z.object({ acknowledgedAt: z.string().nullable() }).parse(selectAutomatedAccess.get())
       .acknowledgedAt;
@@ -2453,7 +2467,15 @@ export function openEventStore(dataDir: string) {
       continuations: continuations.waitingContinuations(),
       vault: vaultStatus(),
       automatedAccessAcknowledgedAt: automatedAccessAt(),
+      usageData: usageData(),
     }),
+
+    usageData,
+    setUsageData: (on: boolean) =>
+      transaction(() => {
+        updateUsageData.run(on ? 1 : 0);
+        emit({ type: "usage-data.changed", on });
+      }),
 
     automatedAccessAt,
     // R7, for a box bot: the lane an unattended run may take, or null when the owner allowed none.
@@ -2778,6 +2800,10 @@ export function openEventStore(dataDir: string) {
         .parse(selectBots.all())
         .map(({ id }) => id),
     botStatus: (id: string) => getBot(id)?.status,
+    runWake: (runId: string) =>
+      z
+        .object({ source: WakeSource, attended: z.number().transform(Boolean) })
+        .safeParse(selectRunWake.get(runId)).data,
 
     wakeContext: (wake: Wake, now: string) => {
       const bot = BotRow.parse(selectBot.get(wake.botId));

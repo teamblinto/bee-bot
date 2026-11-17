@@ -30,7 +30,20 @@ import { type WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 
 import serverPackage from "../package.json" with { type: "json" };
+import { reportError, track } from "./analytics.ts";
 import { createApprovals, type Execute } from "./approvals.ts";
+import {
+  botCreated,
+  botEngineChanged,
+  commandFailed,
+  connectorAdded,
+  engineChecked,
+  messageSent,
+  routineCreated,
+  trackUsage,
+  usageOf,
+  worksOnChanged,
+} from "./usageEvents.ts";
 import {
   attachmentMime,
   attachmentName,
@@ -463,6 +476,22 @@ export async function startServer({
   // The boot's index rebuild emits nothing, so a cursor from before it can't be caught up by replay.
   const bootSeq = store.bounds().latest;
   store.onEvent((event) => broadcast({ type: "event", event }));
+  // Filled for the length of an owner's "always" decision, which the event alone can't tell.
+  const answeredAlways = new Set<string>();
+  store.onEvent((event) => {
+    try {
+      trackUsage(
+        usageOf(event, {
+          bot: store.getBot,
+          wake: store.runWake,
+          lane: store.accountLane,
+          always: answeredAlways,
+        }),
+      );
+    } catch {
+      // Usage data never breaks Bee Bot.
+    }
+  });
   boxes?.onChange((availability) => broadcast({ type: "box-availability", availability }));
   const approvals = createApprovals({
     store,
@@ -685,6 +714,7 @@ export async function startServer({
       return refused;
     }
     void connectorHub.refresh(added.id);
+    trackUsage(connectorAdded(added, "url"));
     return { status: 200, body: store.connectors.connectorChanged(added.id) };
   }
 
@@ -724,6 +754,7 @@ export async function startServer({
         continue;
       }
       void connectorHub.refresh(connector.id);
+      trackUsage(connectorAdded(connector, "import"));
       added.push(store.connectors.connectorChanged(connector.id) ?? connector);
     }
     return { status: 200, body: { added, refused } };
@@ -851,6 +882,7 @@ export async function startServer({
     const state = url.searchParams.get("state");
     const code = url.searchParams.get("code");
     if (!state || !code) {
+      track("connector_oauth_completed", { ok: false });
       sendPage(response, 400, "The sign-in didn't finish. Go back to Bee Bot and try again.");
       return;
     }
@@ -860,6 +892,7 @@ export async function startServer({
     } catch (error) {
       console.error(`beebotd: connector sign-in failed: ${(error as Error)?.name}`);
     }
+    track("connector_oauth_completed", { ok: connector !== undefined });
     if (!connector) {
       sendPage(response, 400, "This sign-in link has expired. Go back to Bee Bot and try again.");
       return;
@@ -925,6 +958,7 @@ export async function startServer({
         if (folder.refused) {
           return folder.refused;
         }
+        const first = store.botIds().length === 0;
         const bot = store.createBot({
           name,
           personality,
@@ -934,6 +968,7 @@ export async function startServer({
           ...(avatarSeed !== undefined && { avatarSeed }),
         });
         writeSummary(bot.id);
+        trackUsage(botCreated(bot, first));
         return { status: 200, body: bot };
       }
       case "update-bot": {
@@ -973,6 +1008,7 @@ export async function startServer({
         const { model, effort } = choice;
         const { mode = current.mode, access = current.access } = command;
         const bot = store.setBotEngine(command.botId, { model, effort, mode, access });
+        trackUsage(bot && botEngineChanged(current, bot));
         return { status: 200, body: bot };
       }
       case "set-bot-paused": {
@@ -990,6 +1026,10 @@ export async function startServer({
           ...(attachmentIds && { attachmentIds }),
           ...(mentions && { mentions }),
         });
+        if (result === "sent") {
+          const room = store.rooms.getRoom(roomId);
+          trackUsage(room && messageSent(command, room.kind));
+        }
         if (result === "sent" || result === "duplicate") {
           return ok;
         }
@@ -1087,9 +1127,19 @@ export async function startServer({
         return result === "continued" ? ok : { status: 409, body: { code: result } };
       }
       case "decide-approval":
-        return approvals.decide(command);
-      case "decide-continuation":
-        return approvals.decideContinuation(command);
+      case "decide-continuation": {
+        const id = command.type === "decide-approval" ? command.approvalId : command.continuationId;
+        if (command.decision === "always") {
+          answeredAlways.add(id);
+        }
+        try {
+          return command.type === "decide-approval"
+            ? approvals.decide(command)
+            : approvals.decideContinuation(command);
+        } finally {
+          answeredAlways.delete(id);
+        }
+      }
       case "acknowledge-notice":
         store.acknowledgeNotice();
         return ok;
@@ -1107,9 +1157,12 @@ export async function startServer({
           return notFound;
         }
         const problem = scheduleProblem(command, new Date().toISOString());
-        return problem
-          ? { status: 400, body: { code: problem } }
-          : { status: 200, body: store.createRoutine(command) };
+        if (problem) {
+          return { status: 400, body: { code: problem } };
+        }
+        const routine = store.createRoutine(command);
+        trackUsage(routineCreated(routine));
+        return { status: 200, body: routine };
       }
       case "update-routine": {
         const problem = scheduleProblem(command, new Date().toISOString());
@@ -1244,6 +1297,9 @@ export async function startServer({
           return { status: 409, body: { code: "bot_busy" } };
         }
         const bot = store.policy.setBotBoundary(botId, boundary);
+        if (bot && boundary !== current.boundary) {
+          trackUsage(worksOnChanged(bot));
+        }
         if (boundary === "box") {
           boxes?.prepare(botId).catch((error: unknown) => {
             console.error(`beebotd: box for ${botId} didn't come up: ${(error as Error)?.message}`);
@@ -1262,6 +1318,15 @@ export async function startServer({
         }
         return applyEgress(bot);
       }
+      case "set-usage-data":
+        store.setUsageData(command.on);
+        return ok;
+      case "track":
+        track(command.event, {});
+        return ok;
+      case "report-error":
+        reportError(command.error);
+        return ok;
       case "set-bot-unattended-lane": {
         if (command.lane === "subscription" && !store.automatedAccessAt()) {
           return { status: 409, body: { code: "automated_access_unacknowledged" } };
@@ -1291,6 +1356,9 @@ export async function startServer({
         computer.interrupt(botId);
         const consentAt = control === "host" ? new Date().toISOString() : null;
         const bot = store.policy.setBotControl(botId, control, consentAt);
+        if (bot) {
+          trackUsage(worksOnChanged(bot));
+        }
         if ((control === "browser" || control === "computer") && boxes?.ready()) {
           boxes.prepare(botId).catch((error: unknown) => {
             console.error(`beebotd: box for ${botId} didn't come up: ${(error as Error)?.message}`);
@@ -1420,10 +1488,12 @@ export async function startServer({
     }
     try {
       const { status, body } = await runCommand(command);
+      trackUsage(commandFailed(command.type, status, body));
       sendJson(response, status, body);
       supervisor.pump();
     } catch (error) {
       console.error(error);
+      trackUsage(commandFailed(command.type, 500, undefined));
       sendJson(response, 500, { code: "storage_failed" });
     }
   }
@@ -1531,9 +1601,11 @@ export async function startServer({
     }
     codexProbing = true;
     try {
-      const { pauseReason } = EngineStatus.parse(
+      const status = EngineStatus.parse(
         await probeCodex(store.accountLane("codex"), setCodexModels),
       );
+      trackUsage(engineChecked("codex", status));
+      const { pauseReason } = status;
       if (pauseReason) {
         console.error(`beebotd: Codex bots paused: ${pauseReason}`);
         store.pauseReadyBots("codex", pauseReason);

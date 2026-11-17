@@ -7,6 +7,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { getConnectionState } from "../serverConnection";
 import { SidebarFooter } from "./SidebarFooter";
 
+const { sendCommand } = vi.hoisted(() => ({ sendCommand: vi.fn() }));
+vi.mock("../serverConnection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../serverConnection")>()),
+  sendCommand,
+}));
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 let root: Root;
@@ -61,4 +67,17 @@ it("follows pushed update state and restarts into a ready update", async () => {
   );
   act(() => restart?.click());
   expect(install).toHaveBeenCalledOnce();
+});
+
+it("turns usage data on and off from its switch", async () => {
+  const chat = { ...getConnectionState().chat, usageData: true };
+  await act(async () =>
+    root.render(
+      <SidebarFooter connection={{ ...getConnectionState(), chat }} onUsage={() => {}} />,
+    ),
+  );
+  const toggle = host.querySelector<HTMLInputElement>('input[role="switch"]');
+  expect(toggle?.checked).toBe(true);
+  act(() => toggle?.click());
+  expect(sendCommand).toHaveBeenCalledWith({ type: "set-usage-data", on: false });
 });

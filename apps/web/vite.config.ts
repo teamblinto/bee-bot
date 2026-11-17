@@ -15,6 +15,7 @@ export default defineConfig({
   },
   // Production loads via file://, so asset URLs must be relative.
   base: "./",
+  build: { sourcemap: "hidden" },
   plugins: [tanstackRouter({ autoCodeSplitting: true }), react({ compiler: true }), tailwindcss()],
   server: {
     host: process.env.HOST?.trim() || "localhost",

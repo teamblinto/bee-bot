@@ -8,6 +8,7 @@ import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
 import { inboundText } from "./tasks.ts";
+import { routineCreated, trackUsage } from "./usageEvents.ts";
 
 const text = { type: "string" };
 const activityRows = 10;
@@ -322,6 +323,7 @@ export function callBotTool(
         createdByRunId: run.id,
         approvedAt: approved ? now : null,
       });
+      trackUsage(routineCreated(routine));
       return approved
         ? answer({ status: "created", routine_id: routine.id })
         : answer({

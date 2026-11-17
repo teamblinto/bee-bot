@@ -1,6 +1,8 @@
-import type { DesktopUpdateState } from "@beebot/contracts";
+import { type DesktopUpdateState, ErrorName } from "@beebot/contracts";
 import { app, dialog } from "electron";
 import { autoUpdater } from "electron-updater";
+
+import { sendUsage } from "./server.ts";
 
 const firstCheckDelayMs = 10_000;
 const checkIntervalMs = 4 * 60 * 60 * 1000;
@@ -42,10 +44,15 @@ export function startUpdates(onChange: (state: DesktopUpdateState) => void) {
   autoUpdater.on("update-downloaded", (info) => set({ status: "ready", version: info.version }));
   autoUpdater.on("error", (error) => {
     console.error("Update failed:", error);
-    const message =
-      state.status === "downloading"
-        ? "The update couldn't be downloaded."
-        : "Couldn't check for updates.";
+    const downloading = state.status === "downloading";
+    const code = ErrorName.safeParse((error as NodeJS.ErrnoException).code);
+    sendUsage("update_failed", {
+      stage: downloading ? "download" : "check",
+      code: code.success ? code.data : null,
+    });
+    const message = downloading
+      ? "The update couldn't be downloaded."
+      : "Couldn't check for updates.";
     // A background check that fails, offline most often, just waits for the next one.
     set({ status: "idle" });
     if (checkedByUser) {

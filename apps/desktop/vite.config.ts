@@ -38,6 +38,11 @@ export default defineConfig({
     {
       ...packShared,
       entry: ["src/main.ts"],
+      // Set by the release build. Without a key the app never turns usage data on.
+      env: {
+        BEEBOT_POSTHOG_KEY: process.env.BEEBOT_POSTHOG_KEY ?? "",
+        BEEBOT_POSTHOG_HOST: process.env.BEEBOT_POSTHOG_HOST || "https://eu.i.posthog.com",
+      },
       ...(shouldLaunchElectronAfterPack ? { onSuccess: "node scripts/dev-electron.mjs" } : {}),
     },
     { ...packShared, entry: ["src/preload.ts"] },

@@ -192,6 +192,8 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     }
     case "notice.acknowledged":
       return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
+    case "usage-data.changed":
+      return { ...state, chat: { ...chat, usageData: event.on } };
     case "routine.changed":
       return { ...state, chat: { ...chat, routines: upsert(chat.routines, event.routine) } };
     case "routine.deleted": {
@@ -397,6 +399,7 @@ let state: ConnectionState = {
 
     tasks: [],
     noticeAcknowledgedAt: null,
+    usageData: null,
     boxes: [],
     continuations: [],
     vault: { apiKeys: [] },
