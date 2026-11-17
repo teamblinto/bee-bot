@@ -272,7 +272,13 @@ async function startBeebotd() {
       done = true;
     });
     const roomId = store.getBot(botId)?.roomId ?? "";
-    store.sendMessage({ id: crypto.randomUUID(), roomId, body: "go", attended: true });
+    const sent = await command({
+      type: "send-message",
+      messageId: crypto.randomUUID(),
+      roomId,
+      body: "go",
+    });
+    expect(sent.status).toBe(200);
     await vi.waitFor(() => expect(done).toBe(true), { timeout: 10_000 });
   };
   return { store, vault, base, command, turn, results, launches, stop };
