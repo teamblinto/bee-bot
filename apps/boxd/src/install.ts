@@ -8,9 +8,12 @@ const nodeSums = {
 };
 
 export const nodeBin = "node/bin/node";
+export const nodeLibDir = "lib";
 
 export function machineInstallScript(
   installDir: string,
+  // Already built in the machine, as setup builds it before boxd starts.
+  boxImage: string,
   files: (readonly [name: string, content: Uint8Array])[],
 ) {
   if (
@@ -18,6 +21,9 @@ export function machineInstallScript(
     installDir.split("/").includes("..")
   ) {
     throw new Error(`bad boxd install dir ${installDir}`);
+  }
+  if (!/^[A-Za-z0-9._/:@-]+$/.test(boxImage)) {
+    throw new Error(`bad box image ${boxImage}`);
   }
   const nodeCases = Object.entries(nodeSums)
     .map(([machine, [arch, sum]]) => `${machine}) arch=${arch}; sum=${sum};;`)
@@ -27,8 +33,15 @@ export function machineInstallScript(
     `d="$HOME/${installDir}"`,
     'mkdir -p "$d"',
     `case "$(uname -m)" in ${nodeCases} *) echo "unsupported machine $(uname -m)" >&2; exit 1;; esac`,
-    // Node's Linux build links libatomic, which the Podman machine image leaves out.
-    "ldconfig -p | grep -q 'libatomic.so.1' || sudo -n dnf install -y -q libatomic",
+    // Node's Linux build links libatomic.so.1. The Podman machine image leaves it out and, being
+    // bootc with a read-only /usr on QEMU and Apple hypervisors, can't install it, so Node loads
+    // the box image's copy (Debian, multiarch path).
+    `l="$d/${nodeLibDir}"`,
+    'if [ ! -e "$l/libatomic.so.1" ]; then',
+    '  mkdir -p "$l"',
+    `  podman run --rm --pull never --network none --entrypoint cat '${boxImage}' "/usr/lib/$(uname -m)-linux-gnu/libatomic.so.1" > "$l/.libatomic.tmp"`,
+    '  mv "$l/.libatomic.tmp" "$l/libatomic.so.1"',
+    "fi",
     `if [ "$("$d/${nodeBin}" --version 2>/dev/null || true)" != "${nodeVersion}" ]; then`,
     '  t="$(mktemp -d)"',
     `  curl -fsSL -o "$t/node.tar.xz" "https://nodejs.org/dist/${nodeVersion}/node-${nodeVersion}-linux-$arch.tar.xz"`,

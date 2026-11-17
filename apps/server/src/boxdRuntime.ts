@@ -19,7 +19,7 @@ import {
   frameReader,
   jsonFrame,
 } from "@beebot/boxd/protocol";
-import { machineInstallScript, nodeBin } from "@beebot/boxd/install";
+import { machineInstallScript, nodeBin, nodeLibDir } from "@beebot/boxd/install";
 import { z } from "zod";
 
 import type { BoxAttach, BoxExec, BoxRuntime } from "./boxRuntime.ts";
@@ -427,7 +427,18 @@ function installEntries(files: BoxdFiles) {
 // `podman machine ssh` runs the first `ssh` on PATH with `UserKnownHostsFile=NUL`. The MSYS ssh
 // that ships with Git for Windows takes NUL for a file name and leaves a file called NUL in the
 // working directory, so Windows' own OpenSSH goes first.
+// On Linux, Podman's default helper_binaries_dir misses where Debian and Ubuntu put gvproxy
+// (/usr/bin) and where distros put virtiofsd (/usr/libexec, Arch /usr/lib). gvproxy is looked up
+// only in those dirs plus CONTAINERS_HELPER_BINARY_DIR, which Podman searches first; virtiofsd
+// falls back to PATH.
 export function podmanEnv(env: NodeJS.ProcessEnv = process.env, platform = process.platform) {
+  if (platform === "linux") {
+    return {
+      ...env,
+      CONTAINERS_HELPER_BINARY_DIR: env.CONTAINERS_HELPER_BINARY_DIR ?? "/usr/bin",
+      PATH: `${env.PATH ?? "/usr/bin:/bin"}:/usr/libexec:/usr/lib`,
+    };
+  }
   if (platform !== "win32") {
     return env;
   }
@@ -504,6 +515,9 @@ export async function launchBoxd({
       [...ssh, "bash -s"],
       machineInstallScript(
         installDir,
+        z
+          .object({ image: z.string() })
+          .parse(JSON.parse(await NodeFs.readFile(files.runSpec, "utf8"))).image,
         await Promise.all(
           installEntries(files).map(
             async ([name, path]) => [name, await NodeFs.readFile(path)] as const,
@@ -513,7 +527,10 @@ export async function launchBoxd({
     );
     child = NodeChildProcess.spawn(
       host.podman,
-      [...ssh, `exec "$HOME/${installDir}/${nodeBin}" "$HOME/${installDir}/${entry}"`],
+      [
+        ...ssh,
+        `LD_LIBRARY_PATH="$HOME/${installDir}/${nodeLibDir}" exec "$HOME/${installDir}/${nodeBin}" "$HOME/${installDir}/${entry}"`,
+      ],
       { stdio: ["pipe", "pipe", "pipe"], env: podmanEnv(), windowsHide: true },
     );
   } else {

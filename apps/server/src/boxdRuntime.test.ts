@@ -114,8 +114,20 @@ describe("podman environment", () => {
   it("puts the OpenSSH that ships with Windows first on PATH", () => {
     const env = podmanEnv({ Path: "C:\\tools\\usr\\bin", SystemRoot: "C:\\Windows" }, "win32");
     expect(env.Path).toBe("C:\\Windows\\System32\\OpenSSH;C:\\tools\\usr\\bin");
-    const linux = { PATH: "/usr/bin" };
-    expect(podmanEnv(linux, "linux")).toBe(linux);
+    const mac = { PATH: "/usr/bin" };
+    expect(podmanEnv(mac, "darwin")).toBe(mac);
+  });
+
+  it("lets Podman on Linux find gvproxy and virtiofsd where distros install them", () => {
+    expect(podmanEnv({ PATH: "/usr/bin" }, "linux")).toEqual({
+      PATH: "/usr/bin:/usr/libexec:/usr/lib",
+      CONTAINERS_HELPER_BINARY_DIR: "/usr/bin",
+    });
+    const own = podmanEnv(
+      { PATH: "/usr/bin", CONTAINERS_HELPER_BINARY_DIR: "/opt/podman" },
+      "linux",
+    );
+    expect(own.CONTAINERS_HELPER_BINARY_DIR).toBe("/opt/podman");
   });
 
   it("logs in to a rootful machine as its rootless user, not root", () => {
