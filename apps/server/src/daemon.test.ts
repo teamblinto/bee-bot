@@ -84,10 +84,15 @@ const history = (state: ChatState, bot: Bot) =>
     .filter((m) => m.roomId === bot.roomId)
     .map(({ author, body }) => ({ author, body }));
 
+// SQLite's `-shm` WAL index holds page numbers and checksums, never row data, and on Windows a
+// live daemon's write locks byte ranges of it, so reading it fails with EBUSY.
 function everyFile(dir: string): string[] {
   return NodeFS.readdirSync(dir, { withFileTypes: true }).flatMap((item) => {
     const path = NodePath.join(dir, item.name);
-    return item.isDirectory() ? everyFile(path) : [NodeFS.readFileSync(path, "latin1")];
+    if (item.isDirectory()) {
+      return everyFile(path);
+    }
+    return item.name.endsWith("-shm") ? [] : [NodeFS.readFileSync(path, "latin1")];
   });
 }
 
