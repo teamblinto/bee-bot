@@ -107,7 +107,9 @@ jobs:
               "-c.win.azureSignOptions.publisherName=$AZURE_SIGNING_PUBLISHER"
             )
           fi
+          # Actions sets a missing secret to "", and electron-builder reads an empty CSC_LINK as a path.
           if [ -z "$CSC_LINK" ]; then
+            unset CSC_LINK CSC_KEY_PASSWORD
             export CSC_IDENTITY_AUTO_DISCOVERY=false
           fi
           # electron-builder wants APPLE_API_KEY as a path to the .p8 file, not its contents.
