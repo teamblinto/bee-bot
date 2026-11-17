@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,7 +21,7 @@ import type { InputAction } from "@beebot/boxd/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { runArgs, type BoxEntry } from "./index.ts";
-import { buildArgs, imageDir, podman, podmanOk } from "./podman.ts";
+import { buildArgs, imageDir, podman, podmanBin, podmanOk } from "./podman.ts";
 
 const podmanUp = (await podman(["version", "--format", "{{.Server.Version}}"])).code === 0;
 
@@ -74,6 +76,21 @@ async function startBox(entry: BoxEntry, keys: string[], extra: string[] = []) {
 }
 
 const exec = (id: string, script: string) => podman(["exec", id, "sh", "-c", script]);
+
+// Once stdin closes, socat gives the peer only half a second more, and a Chromium that has only
+// just started can take longer to answer. DevTools keeps the connection open after its answer, so
+// stdin closes once the answer starts arriving, as a client hanging up after a reply would.
+async function ask(id: string, argv: string[], input: string) {
+  const child = spawn(podmanBin, ["exec", "-i", id, ...argv], { windowsHide: true });
+  let stdout = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+    child.stdin.end();
+  });
+  child.stdin.write(input);
+  await once(child, "close");
+  return stdout;
+}
 
 async function processes(id: string) {
   const { stdout } = await exec(
@@ -209,9 +226,8 @@ describe.skipIf(!podmanUp)("box image", () => {
     // A viewer can open a box that has only just started: boxd's connects wait for it to listen.
     const banner = `sleep 1 | ${displayArgv().join(" ")}`;
     expect((await exec(id, banner)).stdout).toMatch(/^RFB /);
-    const request = "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    const devtools = `{ printf '${request}'; sleep 1; } | ${cdpArgv.join(" ")}`;
-    expect((await exec(id, devtools)).stdout).toContain("webSocketDebuggerUrl");
+    const request = "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    expect(await ask(id, cdpArgv, request)).toContain("webSocketDebuggerUrl");
 
     // boxd reaches DevTools and the VNC socket through `podman exec`. Chromium starts last, so
     // once DevTools listens the desktop is up, and it adds no TCP listener of its own.
