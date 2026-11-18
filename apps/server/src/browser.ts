@@ -74,6 +74,11 @@ export const browserTools = [
     description: "Types text into an element by its ref, then returns a new snapshot.",
     inputSchema: schema({ ref, text }),
   },
+  {
+    name: "browser_back",
+    description: "Goes back one page in your browser's history, then returns a new snapshot.",
+    inputSchema: schema({}),
+  },
 ];
 
 // Asking grants nothing: the owner decides whether to take over, and the bot waits either way.
@@ -92,6 +97,7 @@ const Args = {
   browser_snapshot: z.object({}),
   browser_click: z.object({ ref: z.string().max(32) }),
   browser_type: z.object({ ref: z.string().max(32), text: z.string().max(4000) }),
+  browser_back: z.object({}),
   request_takeover: z.object({ reason: z.string().trim().min(1).max(300) }),
 };
 type BrowserTool = keyof typeof Args;
@@ -361,6 +367,8 @@ export function createBrowserBroker(deps: BrowserDeps) {
       target = await tab.session.click(index ?? -1);
     } else if (tool === "browser_type") {
       target = await tab.session.type(index ?? -1, data.text ?? "");
+    } else if (tool === "browser_back") {
+      await tab.session.history("back");
     }
     if (target === null) {
       return refused("That element is gone. Take a new snapshot.");

@@ -573,6 +573,15 @@
     line-height: var(--text-label--line-height);
   }
 
+  /* Shiki gives each token both themes' colors as variables. */
+  .markdown pre span[style] {
+    color: var(--shiki-light);
+  }
+
+  :root[data-theme="dark"] .markdown pre span[style] {
+    color: var(--shiki-dark);
+  }
+
   .markdown table {
     display: block;
     overflow-x: auto;

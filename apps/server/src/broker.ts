@@ -94,6 +94,8 @@ const browserRules: Record<string, ToolRule> = {
     grant: browserGrant,
     typed: true,
   },
+  // The page it lands on can be one the bot was sent to, and loading it again can send something.
+  browser_back: { labels: legs("readsUntrusted", "sideEffect"), grant: browserGrant },
 };
 
 // A box desktop or the owner's own one, whichever the bot's control mode names. Every screen is

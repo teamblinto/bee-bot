@@ -147,6 +147,15 @@ describe("browser tools", () => {
     expect(checked).toEqual([["browser_navigate", { url: "https://example.com/" }]]);
   });
 
+  it("goes back through the page's history and answers with the page it lands on", async () => {
+    const { call, checked, fake } = setup();
+    await call("browser_navigate", { url: "https://example.com/" });
+    const answer = await call("browser_back");
+    expect(answer.status).toBe("ok");
+    expect(fake.received).toEqual(["navigate https://example.com/", "history back"]);
+    expect(checked.at(-1)).toEqual(["browser_back", {}]);
+  });
+
   it("refuses a denied call without opening the browser", async () => {
     const { call, fake, owner } = setup({ kind: "deny", reason: "not_granted" });
     const answer = await call("browser_navigate", { url: "https://example.com/" });

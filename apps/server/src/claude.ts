@@ -72,6 +72,7 @@ const beeTools = [
   "browser_snapshot",
   "browser_click",
   "browser_type",
+  "browser_back",
   "request_takeover",
   "computer_screenshot",
   "computer_click",

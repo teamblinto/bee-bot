@@ -41,3 +41,10 @@ it("keeps http links, opening externally, and blocks every other scheme", () => 
     expect(html).toContain("bad");
   }
 });
+
+it("colors a known fence language for both themes, and leaves an unknown one plain", async () => {
+  const { highlight } = await import("../highlight");
+  expect(await highlight("echo hi", "no-such-language")).toBeUndefined();
+  const tree = await highlight("const a = 1", "ts");
+  expect(JSON.stringify(tree)).toMatch(/--shiki-light:#[0-9a-f]+;--shiki-dark:#[0-9a-f]+/i);
+});

@@ -274,6 +274,7 @@ describe("the MCP endpoint", () => {
       "browser_snapshot",
       "browser_click",
       "browser_type",
+      "browser_back",
       "request_takeover",
     ];
     const desktop = [
