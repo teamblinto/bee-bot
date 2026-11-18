@@ -493,6 +493,36 @@ export async function startServer({
     }
   });
   boxes?.onChange((availability) => broadcast({ type: "box-availability", availability }));
+  // What a client that loads mid-turn needs to redraw the turn. Memory only, like the stream.
+  type LiveRun = {
+    text: string;
+    thinking: { active: boolean; text: string } | undefined;
+    tools: Map<string, { name: string; detail: string | null; failed: boolean | undefined }>;
+  };
+  const liveRuns = new Map<string, LiveRun>();
+  const liveRun = (runId: string) => {
+    const known = liveRuns.get(runId);
+    if (known) {
+      return known;
+    }
+    const created: LiveRun = { text: "", thinking: undefined, tools: new Map() };
+    liveRuns.set(runId, created);
+    return created;
+  };
+  store.onEvent((event) => {
+    if (event.type === "run.changed" && !["Queued", "Running"].includes(event.run.status)) {
+      liveRuns.delete(event.run.id);
+    }
+  });
+  const liveReplay = () =>
+    [...liveRuns].flatMap(([runId, { text, thinking, tools }]): ServerMessage[] => [
+      ...(thinking ? [{ type: "thinking" as const, runId, ...thinking }] : []),
+      ...[...tools].flatMap(([toolId, { name, detail, failed }]): ServerMessage[] => [
+        { type: "tool-start", runId, toolId, name, detail },
+        ...(failed === undefined ? [] : [{ type: "tool-end" as const, runId, toolId, failed }]),
+      ]),
+      ...(text ? [{ type: "delta" as const, runId, text }] : []),
+    ]);
   const approvals = createApprovals({
     store,
     dataDir,
@@ -557,11 +587,27 @@ export async function startServer({
         }
       }
     },
-    onDelta: (runId, text) => broadcast({ type: "delta", runId, text }),
-    onToolStart: (runId, { id, name, detail }) =>
-      broadcast({ type: "tool-start", runId, toolId: id, name, detail }),
-    onToolEnd: (runId, toolId, failed) => broadcast({ type: "tool-end", runId, toolId, failed }),
-    onThinking: (runId, { active, text }) => broadcast({ type: "thinking", runId, active, text }),
+    onDelta: (runId, text) => {
+      liveRun(runId).text += text;
+      broadcast({ type: "delta", runId, text });
+    },
+    onToolStart: (runId, { id, name, detail }) => {
+      const { tools } = liveRun(runId);
+      tools.set(id, { name, detail, failed: tools.get(id)?.failed });
+      broadcast({ type: "tool-start", runId, toolId: id, name, detail });
+    },
+    onToolEnd: (runId, toolId, failed) => {
+      const tool = liveRun(runId).tools.get(toolId);
+      if (tool) {
+        tool.failed = failed;
+      }
+      broadcast({ type: "tool-end", runId, toolId, failed });
+    },
+    onThinking: (runId, { active, text }) => {
+      const live = liveRun(runId);
+      live.thinking = { active, text: (live.thinking?.text ?? "") + text };
+      broadcast({ type: "thinking", runId, active, text });
+    },
     onRateLimit: (accountId, updates) => store.mergeUsage(accountId, updates),
     onTurnEnded: (accountId) => void limits.refresh(accountId).catch(logUsageFailure),
     accountHeld: (accountId) =>
@@ -1848,6 +1894,12 @@ export async function startServer({
         // and joining subscribers.
         try {
           send(client, catchUp(message.afterSeq));
+          // Deltas and thinking append, so only a client that starts empty gets the turn so far.
+          if (message.afterSeq === 0) {
+            for (const live of liveReplay()) {
+              send(client, live);
+            }
+          }
           send(client, { type: "pending-approvals", approvals: approvals.pending() });
           send(client, { type: "model-catalog", models: catalog() });
           if (boxes) {

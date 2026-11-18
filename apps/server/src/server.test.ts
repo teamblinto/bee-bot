@@ -384,6 +384,69 @@ describe("event stream", () => {
   });
 });
 
+describe("a reload mid-turn", () => {
+  it("gets the turn so far, and nothing once the run has ended", async () => {
+    let finish = (_outcome: TurnOutcome) => {};
+    const runTurn: RunTurn = ({ onThinking, onToolStart, onToolEnd, onDelta }) => {
+      onThinking({ active: true, text: "Looking" });
+      onThinking({ active: false, text: " first." });
+      onToolStart({ id: "a", name: "Read", detail: "src/index.ts" });
+      onToolEnd("a", true);
+      onToolStart({ id: "b", name: "Bash", detail: "pnpm test" });
+      onDelta("Half ");
+      onDelta("way");
+      return new Promise((resolve) => (finish = resolve));
+    };
+    const store = openEventStore(dataDir);
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [appOrigin],
+      store,
+      probeEngine,
+      runTurn,
+    });
+    cleanups.push(async () => {
+      await server.close();
+      store.close();
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    const bot = (await (await createBot(base)).json()) as Bot;
+    // An attended turn needs someone watching.
+    await subscribe(server.port, 0);
+    await command(base, {
+      type: "send-message",
+      messageId: crypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hi",
+    });
+    const status = () => store.state().runs[0]?.status;
+    await vi.waitFor(() => expect(status()).toBe("Running"));
+    // Deltas are batched for a moment before they count as sent.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const reloaded = await subscribe(server.port, 0);
+    expect(await reloaded.next()).toMatchObject({ type: "snapshot" });
+    const live = [await reloaded.next(), await reloaded.next(), await reloaded.next()];
+    const runId = (live[0] as { runId: string }).runId;
+    expect([...live, await reloaded.next(), await reloaded.next()]).toEqual([
+      { type: "thinking", runId, active: false, text: "Looking first." },
+      { type: "tool-start", runId, toolId: "a", name: "Read", detail: "src/index.ts" },
+      { type: "tool-end", runId, toolId: "a", failed: true },
+      { type: "tool-start", runId, toolId: "b", name: "Bash", detail: "pnpm test" },
+      { type: "delta", runId, text: "Half way" },
+    ]);
+
+    finish({ kind: "completed", text: "Half way" });
+    await vi.waitFor(() => expect(status()).toBe("Completed"));
+    const after = await subscribe(server.port, 0);
+    expect(await after.next()).toMatchObject({ type: "snapshot" });
+    await createBot(base);
+    expect(await after.next()).toMatchObject({ type: "event" });
+  });
+});
+
 describe("server info", () => {
   it("answers without the token or a protocol version, and keeps its ID across restarts", async () => {
     const first = await start();
