@@ -24,6 +24,9 @@ const refusedMimes = new Set([
   "application/x-bat",
 ]);
 
+// A bot's file has no Content-Type, so its name stands in for refusedMimes.
+export const refusedName = (name: string) => /\.(exe|dll|com|scr|msi|bat|cmd|sh|ps1)$/i.test(name);
+
 // The essence only, lowercased. Null when it isn't a MIME type or is one Bee refuses.
 export function attachmentMime(header: string | undefined) {
   const mime = (header?.split(";")[0] ?? "").trim().toLowerCase() || "application/octet-stream";

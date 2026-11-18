@@ -54,6 +54,7 @@ const beeTools = [
   "read_bot_activity",
   "ask_user",
   "create_routine",
+  "share_file",
 ];
 
 // Measured on 0.167.0. A CLI that rejects one fails to start, which pauses the bot as `cli_failed`

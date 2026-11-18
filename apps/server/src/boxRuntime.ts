@@ -5,6 +5,7 @@ import { Duplex, finished, type Readable } from "node:stream";
 import type { InputAction, SkillCopy } from "@beebot/boxd/protocol";
 import type { BoxState } from "@beebot/contracts";
 
+import type { BoxLayout } from "./boxEngine.ts";
 import { killTree } from "./engine.ts";
 
 export type BoxExec = { argv: string[]; env: Record<string, string>; cwd?: string };
@@ -41,6 +42,20 @@ export type BoxRuntime = {
   snapshot: (botId: string) => Promise<BoxState>;
   execAttach: (botId: string, exec: BoxExec) => Promise<BoxAttach>;
 };
+
+// The mirror of `inbox`: streams a file out of the workspace. The box resolves links itself, so
+// none can lead the read outside it. Exit 3 is a path that left the workspace, 2 one that isn't a file.
+export function outbox(
+  runtime: BoxRuntime,
+  { env, workdir }: Pick<BoxLayout, "env" | "workdir">,
+  botId: string,
+  path: string,
+) {
+  const script =
+    'real=$(realpath -e -- "$2") || exit 2; case "$real" in "$1"/*) ;; *) exit 3;; esac; ' +
+    '[ -f "$real" ] || exit 2; exec cat -- "$real"';
+  return runtime.execAttach(botId, { argv: ["sh", "-c", script, "sh", workdir, path], env });
+}
 
 // For tests: no container, the command runs on this machine as if it were in the box.
 export function createFakeBoxRuntime(): BoxRuntime {

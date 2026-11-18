@@ -919,6 +919,8 @@ export type FinishedRun = {
   reason: RunReason | null;
   reply?: string;
   tools?: ChatMessage["tools"];
+  // Files the turn shared, pending in the reply's room until the reply claims them.
+  attachmentIds?: string[];
   blockedUntil?: string;
   pauseBot?: PauseReason;
 };
@@ -3004,6 +3006,9 @@ export function openEventStore(dataDir: string) {
             run.hop > 0 &&
             checkBotPost(limits(), { ...rooms.round(roomId), now }).verdict === "refuse";
           if (!silent && !gated) {
+            const attachments = (finished.attachmentIds ?? []).flatMap(
+              (id) => attachmentStore.claimable(roomId, [id]) ?? [],
+            );
             const message: ChatMessage = {
               id: NodeCrypto.randomUUID(),
               roomId,
@@ -3015,10 +3020,15 @@ export function openEventStore(dataDir: string) {
               replyToId: null,
               chainId: run.chainId,
               hop: run.hop,
-              attachments: [],
+              attachments,
               createdAt: now,
             };
             addMessage(message);
+            attachmentStore.claim(
+              message.id,
+              roomId,
+              attachments.map(({ id }) => id),
+            );
             if (group && replied) {
               if (run.hop > 0) {
                 rooms.countBotPost(roomId, now);

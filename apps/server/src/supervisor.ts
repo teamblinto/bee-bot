@@ -53,6 +53,7 @@ function finishedRun(
   abortReason: unknown,
   tools: ChatMessage["tools"],
   parked: boolean,
+  attachmentIds: string[],
 ): FinishedRun {
   if (outcome.kind === "limited") {
     const blockMs = Math.min(Math.max(outcome.retryAfterMs, minBlockMs), maxBlockMs);
@@ -70,7 +71,7 @@ function finishedRun(
     };
   }
   if (outcome.kind === "waiting") {
-    return { status: "WaitingUser", reason: null, reply: outcome.text, tools };
+    return { status: "WaitingUser", reason: null, reply: outcome.text, tools, attachmentIds };
   }
   if (outcome.kind === "completed") {
     return {
@@ -78,6 +79,7 @@ function finishedRun(
       reason: null,
       reply: outcome.text,
       tools,
+      attachmentIds,
     };
   }
   if (outcome.kind === "folder_missing") {
@@ -145,6 +147,8 @@ export function createSupervisor({
       watchdog: ReturnType<typeof createWatchdog>;
       parked?: boolean;
       steer: () => void;
+      // Files the turn shared, for its reply.
+      shared: string[];
     }
   >();
   let closing = false;
@@ -386,7 +390,7 @@ export function createSupervisor({
       .then((outcome) => {
         deltas.flush();
         pauseClock();
-        const parked = turns.get(run.id)?.parked ?? false;
+        const { parked = false, shared = [] } = turns.get(run.id) ?? {};
         turns.delete(run.id);
         approvals.closeRun(run.id);
         // Left Running on purpose: the next boot marks it Interrupted.
@@ -397,6 +401,7 @@ export function createSupervisor({
               controller.signal.reason,
               [...tools.values()],
               parked,
+              shared,
             );
             store.effects.settleRunEffects(
               run.id,
@@ -414,7 +419,15 @@ export function createSupervisor({
         }
       })
       .catch((error: unknown) => console.error(error));
-    turns.set(run.id, { controller, ended, pauseClock, resumeClock, watchdog, steer: steerTurn });
+    turns.set(run.id, {
+      controller,
+      ended,
+      pauseClock,
+      resumeClock,
+      watchdog,
+      steer: steerTurn,
+      shared: [],
+    });
   }
 
   function startRun(runId: string, botId: string, accountId: string, now: string) {
@@ -537,6 +550,14 @@ export function createSupervisor({
         return false;
       }
       turn.parked = true;
+      return true;
+    },
+    shareFile: (runId: string, attachmentId: string) => {
+      const turn = turns.get(runId);
+      if (!turn || turn.controller.signal.aborted) {
+        return false;
+      }
+      turn.shared.push(attachmentId);
       return true;
     },
     resumeFromUser: (runId: string, answer: string) => {

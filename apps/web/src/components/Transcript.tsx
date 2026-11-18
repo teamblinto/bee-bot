@@ -173,6 +173,7 @@ function Item({
       <div className="text-body">
         <Markdown text={message.body} />
       </div>
+      {message.attachments.length > 0 && <MessageAttachments attachments={message.attachments} />}
     </div>
   );
 }

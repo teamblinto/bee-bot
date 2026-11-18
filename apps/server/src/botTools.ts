@@ -1,8 +1,12 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs/promises";
+import * as NodePath from "node:path";
 
 import { mentionKey, Routine } from "@beebot/contracts";
 import { z } from "zod";
 
+import { attachmentName, attachmentPath, receiveAttachment, refusedName } from "./attachments.ts";
+import type { BoxAttach } from "./boxRuntime.ts";
 import { checkDelegation, checkRoutineCreate, clampLimits } from "./limits.ts";
 import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
@@ -66,6 +70,14 @@ export const botTools = [
     description: "Schedules a recurring prompt for you. A cron needs 15 minutes between runs.",
     inputSchema: schema({ name: text, prompt: text, cron: text, timezone: text }),
   },
+  {
+    name: "share_file",
+    description:
+      "Attaches a file from your workspace to your reply, for the owner to download. Up to 50 MB.",
+    inputSchema: schema({
+      path: { type: "string", description: "Relative to your workspace, or absolute inside it" },
+    }),
+  },
 ];
 
 export const botToolNames = new Set(botTools.map(({ name }) => name));
@@ -83,6 +95,7 @@ const ReadActivity = z.object({
   bot: z.string().trim().min(1),
   limit: z.number().int().min(1).max(activityRows).default(5),
 });
+const ShareFile = z.object({ path: z.string().trim().min(1).max(4096) });
 const CreateRoutine = z.object({
   name: Routine.shape.name,
   prompt: Routine.shape.prompt,
@@ -125,6 +138,60 @@ function destination(store: EventStore, grant: Grant, to: string, kind: "delegat
     return { refused: "already_in_chain" };
   }
   return store.botStatus(target.id) === "paused" ? { refused: "target_paused" } : target;
+}
+
+// Box bots only: `read` is the box's outbox, and `attach` puts the file on the turn's reply.
+export type FileShare = {
+  dataDir: string;
+  workdir: string;
+  read: ((botId: string, path: string) => Promise<BoxAttach>) | undefined;
+  attach: (runId: string, attachmentId: string) => boolean;
+};
+
+export async function shareFile(
+  store: EventStore,
+  run: { id: string },
+  args: unknown,
+  { dataDir, workdir, read, attach }: FileShare,
+) {
+  const grant = store.tasks.runGrant(run.id);
+  if (!grant) {
+    return refused("run_ended");
+  }
+  const { data } = ShareFile.safeParse(args);
+  if (!data) {
+    return malformed("share_file");
+  }
+  const path = NodePath.posix.resolve(workdir, data.path);
+  if (!path.startsWith(`${workdir}/`)) {
+    return refused("outside_workspace");
+  }
+  const name = attachmentName(NodePath.posix.basename(path));
+  if (refusedName(name)) {
+    return refused("attachment_type");
+  }
+  if (!read) {
+    return refused("box_only");
+  }
+  const id = NodeCrypto.randomUUID();
+  const { stream, exited } = await read(grant.botId, path);
+  stream.end();
+  const [received, code] = await Promise.all([
+    receiveAttachment(stream, dataDir, grant.roomId, id),
+    exited,
+  ]);
+  if (received === "too_large") {
+    return refused("too_large");
+  }
+  if (code !== 0) {
+    await NodeFS.rm(attachmentPath(dataDir, grant.roomId, id), { force: true });
+    return refused(code === 3 ? "outside_workspace" : "not_a_file");
+  }
+  const mime = "application/octet-stream";
+  store.addAttachment({ id, roomId: grant.roomId, name, mime, ...received });
+  return attach(run.id, id)
+    ? answer({ status: "attached", name, size: received.size })
+    : refused("run_ended");
 }
 
 export function callBotTool(

@@ -259,6 +259,7 @@ describe("Claude in a box", () => {
         "read_bot_activity",
         "ask_user",
         "create_routine",
+        "share_file",
         "browser_navigate",
         "browser_snapshot",
         "browser_click",

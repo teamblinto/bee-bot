@@ -45,6 +45,8 @@ const beeRules: Record<string, ToolRule> = {
   // Another bot's words: the handler marks the session untrusted itself, with no grant needed.
   read_bot_activity: { labels: legs("readsPrivate") },
   create_routine: { labels: legs("sideEffect") },
+  // The file goes to the owner alone, like a reply, so it reads the workspace and nothing more.
+  share_file: { labels: legs("readsPrivate") },
 };
 
 // A write from a session that saw untrusted text waits for the owner's review, which is the draft

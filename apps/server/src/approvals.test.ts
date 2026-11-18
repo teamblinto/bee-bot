@@ -267,6 +267,7 @@ describe("the MCP endpoint", () => {
       "read_bot_activity",
       "ask_user",
       "create_routine",
+      "share_file",
     ];
     const browsing = [
       "browser_navigate",

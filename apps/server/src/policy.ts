@@ -287,12 +287,12 @@ export function refusedText(decision: Exclude<PolicyDecision, { kind: "allow" }>
 }
 
 // For Bee's own tools on /mcp. The broker never asks about them, so only a refusal stops one.
-export function gateTool(
+export function gateTool<T extends string | Promise<string>>(
   policy: Policy,
   run: BrokerRun,
   name: string,
   args: unknown,
-  call: () => string,
+  call: () => T,
 ) {
   const decision = policy.check(run, name, args);
   return decision.kind === "allow" ? call() : refusedText(decision);

@@ -53,7 +53,7 @@ export function toolsFor(control: BotControl, screen: ScreenSize | "cua" | undef
 export type McpHandlers = {
   approve: (args: unknown, closed: AbortSignal) => Promise<Decision>;
   memory: (name: string, args: unknown) => string;
-  bot: (name: string, args: unknown) => string;
+  bot: (name: string, args: unknown) => string | Promise<string>;
   browser: (name: string, args: unknown) => Promise<string>;
   computer: (name: string, args: unknown) => Promise<ToolContent[]>;
   tools: () => Promise<Tool[]>;
@@ -175,7 +175,7 @@ export async function answerMcp(
       if (typeof params?.name === "string" && botToolNames.has(params.name)) {
         let text: string;
         try {
-          text = bot(params.name, params.arguments);
+          text = await bot(params.name, params.arguments);
         } catch (error) {
           console.error(`beebotd: bot tool ${params.name} failed: ${(error as Error)?.name}`);
           text = "This tool is unavailable right now.";

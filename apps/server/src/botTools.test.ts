@@ -2,10 +2,12 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Duplex, Readable, Writable } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { callBotTool } from "./botTools.ts";
+import { attachmentsDir, maxAttachmentBytes } from "./attachments.ts";
+import { callBotTool, shareFile } from "./botTools.ts";
 import type { RunTurn } from "./engine.ts";
 import type * as LimitsModule from "./limits.ts";
 import type { Limits } from "./limits.ts";
@@ -486,5 +488,81 @@ describe("reaching a bot the owner mentioned", () => {
       status: "refused",
       reason: "already_in_chain",
     });
+  });
+});
+
+describe("share_file", () => {
+  const box = (chunks: Iterable<Buffer>, code = 0) =>
+    vi.fn(async () => ({
+      stream: Duplex.from({
+        readable: Readable.from(chunks),
+        writable: new Writable({ write: (_chunk, _encoding, done) => done() }),
+      }),
+      exited: Promise.resolve(code),
+    }));
+
+  function setUp() {
+    openStore();
+    const [ada] = team("Ada");
+    if (!ada) {
+      throw new Error("no bot");
+    }
+    say(ada.roomId, "send me the report");
+    const run = start(ada.id);
+    const attached: string[] = [];
+    const share = (args: unknown, read: ReturnType<typeof box>) =>
+      shareFile(store, run, args, {
+        dataDir,
+        workdir: "/work",
+        read,
+        attach: (_runId, id) => attached.push(id) > 0,
+      }).then((text) => JSON.parse(text) as Record<string, unknown>);
+    return { ada, run, attached, share };
+  }
+
+  it("refuses a path outside the workspace without reading anything", async () => {
+    const { share } = setUp();
+    const read = box([Buffer.from("root:x:0:0")]);
+    for (const path of ["../etc/passwd", "/etc/passwd", "/work/../etc/passwd", "/workshop/a"]) {
+      expect(await share({ path }, read)).toMatchObject({ reason: "outside_workspace" });
+    }
+    expect(read).not.toHaveBeenCalled();
+    // The box resolves links, and answers 3 for one that leads out.
+    expect(await share({ path: "link" }, box([], 3))).toMatchObject({
+      reason: "outside_workspace",
+    });
+  });
+
+  it("refuses a file over the limit and leaves nothing behind", async () => {
+    const { ada, attached, share } = setUp();
+    const mib = Buffer.alloc(1024 * 1024);
+    const chunks = Array.from({ length: maxAttachmentBytes / mib.length + 1 }, () => mib);
+    expect(await share({ path: "big.bin" }, box(chunks))).toMatchObject({ reason: "too_large" });
+    expect(attached).toEqual([]);
+    expect(NodeFS.readdirSync(attachmentsDir(dataDir, ada.roomId))).toEqual([]);
+  });
+
+  it("refuses a program, and puts any other file on the reply as a download", async () => {
+    const { ada, run, attached, share } = setUp();
+    expect(await share({ path: "setup.exe" }, box([]))).toMatchObject({
+      reason: "attachment_type",
+    });
+    expect(await share({ path: "out/report.html" }, box([Buffer.from("<b>hi</b>")]))).toEqual({
+      status: "attached",
+      name: "report.html",
+      size: 9,
+    });
+    store.finishRun(run.id, "boot", {
+      status: "Completed",
+      reason: null,
+      reply: "here it is",
+      tools: [],
+      attachmentIds: attached,
+    });
+    const reply = store.state().messages.find(({ author }) => author === "bot");
+    expect(reply?.attachments).toEqual([
+      { id: attached[0], name: "report.html", mime: "application/octet-stream", size: 9 },
+    ]);
+    expect(reply?.roomId).toBe(ada.roomId);
   });
 });
