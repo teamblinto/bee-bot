@@ -1,8 +1,8 @@
 import { type AttachmentRef, maxAttachments } from "@beebot/contracts";
-import { FileText, Paperclip, X } from "lucide-react";
+import { Download, FileText, Paperclip, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, useRef, useState } from "react";
 
-import { uploadAttachment } from "../serverConnection";
+import { downloadAttachment, uploadAttachment } from "../serverConnection";
 import { iconProps } from "./ui";
 
 type Upload = {
@@ -150,14 +150,18 @@ export function UploadChips({
 export function MessageAttachments({ attachments }: { attachments: AttachmentRef[] }) {
   return (
     <ul aria-label="Attachments" className="flex flex-wrap gap-1">
-      {attachments.map(({ id, name, size }) => (
-        <li
-          key={id}
-          className="flex max-w-56 items-center gap-1 rounded-field border border-edge px-2 py-0.5 text-caption text-ink-secondary"
-        >
-          <FileText {...iconProps} size={12} className="shrink-0" />
-          <span className="truncate">{name}</span>
-          <span className="shrink-0 tabular-nums">{fileSize(size)}</span>
+      {attachments.map((attachment) => (
+        <li key={attachment.id} className="flex max-w-56">
+          <button
+            type="button"
+            aria-label={`Download ${attachment.name}`}
+            className="flex min-w-0 items-center gap-1 rounded-field border border-edge px-2 py-0.5 text-caption text-ink-secondary transition-colors hover:text-ink"
+            onClick={() => void downloadAttachment(attachment)}
+          >
+            <Download {...iconProps} size={12} className="shrink-0" />
+            <span className="truncate">{attachment.name}</span>
+            <span className="shrink-0 tabular-nums">{fileSize(attachment.size)}</span>
+          </button>
         </li>
       ))}
     </ul>

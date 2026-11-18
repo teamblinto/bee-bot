@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import type { Duplex } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import {
   type Bot,
@@ -1515,6 +1516,26 @@ export async function startServer({
     sendJson(response, 200, { id, name, mime, size: received.size });
   }
 
+  // Always a download: the bytes may be anything a bot or the owner put there, so never rendered.
+  async function handleDownload(id: string, response: NodeHttp.ServerResponse) {
+    const found = store.getAttachment(id);
+    const file =
+      found &&
+      (await NodeFS.open(attachmentPath(dataDir, found.roomId, found.id)).catch(() => undefined));
+    if (!file) {
+      sendJson(response, 404, { code: "not_found" });
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": found.size,
+      // attachmentName leaves nothing that needs escaping.
+      "Content-Disposition": `attachment; filename="${found.name}"`,
+      "X-Content-Type-Options": "nosniff",
+    });
+    await pipeline(file.createReadStream(), response);
+  }
+
   // Uploads never sent are dropped after a day, rows first.
   async function sweepAttachments() {
     const cutoff = new Date(Date.now() - unclaimedAttachmentMs).toISOString();
@@ -1802,6 +1823,10 @@ export async function startServer({
           sendJson(response, 500, { code: "storage_failed" });
         }
       });
+    } else if (request.method === "GET" && url.pathname.startsWith("/attachments/")) {
+      handleDownload(url.pathname.slice("/attachments/".length), response).catch(() =>
+        response.destroy(),
+      );
     } else if (request.method === "POST" && url.pathname === "/commands") {
       handleCommand(request, response).catch(() => response.destroy());
     } else {

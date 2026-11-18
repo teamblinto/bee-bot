@@ -2643,6 +2643,7 @@ export function openEventStore(dataDir: string) {
       transaction(() => attachmentStore.addAttachment(row)),
     sweepAttachments: (cutoff: string) =>
       transaction(() => attachmentStore.sweepAttachments(cutoff)),
+    getAttachment: attachmentStore.getAttachment,
     // Newest first.
     recentMessages: (roomId: string, limit: number) =>
       z

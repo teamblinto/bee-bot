@@ -94,7 +94,7 @@ export async function receiveAttachment(
   return { size, sha256: hash.digest("hex") };
 }
 
-const PendingRow = AttachmentRef.extend({ roomId: z.string() });
+const RoomAttachment = AttachmentRef.extend({ roomId: z.string() });
 
 // Rows join the caller's transaction. An attachment is pending until a message claims it.
 export function openAttachments(db: DatabaseSync) {
@@ -114,12 +114,16 @@ export function openAttachments(db: DatabaseSync) {
      WHERE message_id IS NULL AND created_at < ?`,
   );
   const deleteRow = db.prepare("DELETE FROM attachments WHERE id = ?");
+  const selectOne = db.prepare(
+    "SELECT id, room_id AS roomId, name, mime, size FROM attachments WHERE id = ?",
+  );
 
   return {
     addAttachment: (row: AttachmentRef & { roomId: string; sha256: string }) => {
       const { id, roomId, name, mime, size, sha256 } = row;
       insert.run(id, roomId, name, mime, size, sha256, new Date().toISOString());
     },
+    getAttachment: (id: string) => RoomAttachment.optional().parse(selectOne.get(id)),
     // Every ID must be pending in this room, or none is taken.
     claimable: (roomId: string, ids: readonly string[]) => {
       const found = [...new Set(ids)].flatMap((id) => {
@@ -135,7 +139,7 @@ export function openAttachments(db: DatabaseSync) {
     },
     // The rows go first: a file left by a failed delete is harmless, a row without a file isn't.
     sweepAttachments: (cutoff: string) => {
-      const stale = z.array(PendingRow).parse(selectStale.all(cutoff));
+      const stale = z.array(RoomAttachment).parse(selectStale.all(cutoff));
       for (const { id } of stale) {
         deleteRow.run(id);
       }

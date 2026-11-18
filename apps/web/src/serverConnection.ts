@@ -778,6 +778,23 @@ export function uploadAttachment(
   });
 }
 
+// A link can't carry the token, so the bytes come through fetch and leave as a blob.
+export async function downloadAttachment({ id, name }: AttachmentRef) {
+  try {
+    const response = await fetch(endpoint(`/attachments/${id}`), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      throw new Error(String(response.status));
+    }
+    const href = URL.createObjectURL(await response.blob());
+    Object.assign(document.createElement("a"), { href, download: name }).click();
+    setTimeout(() => URL.revokeObjectURL(href), 60_000);
+  } catch {
+    setState({ ...state, commandError: "Could not download the file. Try again in a moment." });
+  }
+}
+
 // For quick actions with no place of their own: a failure shows above the composer.
 export async function sendCommand(command: Command) {
   const result = await postCommand(command);

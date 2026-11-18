@@ -447,6 +447,33 @@ describe("a reload mid-turn", () => {
   });
 });
 
+describe("attachment downloads", () => {
+  it("send the bytes as a download only to the owner", async () => {
+    const { base } = await start();
+    const bot = (await (await createBot(base)).json()) as Bot;
+    const uploaded = await fetch(
+      `${base}/attachments?protocolVersion=${protocolVersion}&room=${bot.roomId}&name=page.html`,
+      { method: "POST", headers: { ...auth, "Content-Type": "text/html" }, body: "<b>hi</b>" },
+    );
+    const { id } = (await uploaded.json()) as { id: string };
+
+    const download = await http(base, `/attachments/${id}`, { headers: auth });
+    expect(download.status).toBe(200);
+    expect(Object.fromEntries(download.headers)).toMatchObject({
+      "content-type": "application/octet-stream",
+      "content-disposition": 'attachment; filename="page.html"',
+      "x-content-type-options": "nosniff",
+    });
+    expect(await download.text()).toBe("<b>hi</b>");
+
+    expect((await http(base, `/attachments/${id}`)).status).toBe(401);
+    const foreign = { headers: { ...auth, Origin: "http://evil.test" } };
+    expect((await http(base, `/attachments/${id}`, foreign)).status).toBe(403);
+    const missing = await http(base, `/attachments/${crypto.randomUUID()}`, { headers: auth });
+    expect(missing.status).toBe(404);
+  });
+});
+
 describe("server info", () => {
   it("answers without the token or a protocol version, and keeps its ID across restarts", async () => {
     const first = await start();
