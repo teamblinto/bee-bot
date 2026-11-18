@@ -1026,7 +1026,7 @@ describe("through the real server, store and approvals", () => {
     expect(tainted()).toBe(expected);
   });
 
-  it("keeps tool input, the token and the account out of the database and the logs", async () => {
+  it("keeps tool input beyond its detail, the token and the account out of the database and the logs", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
       vi.spyOn(console, method),
     );
@@ -1036,9 +1036,11 @@ describe("through the real server, store and approvals", () => {
     const printed = JSON.stringify(spies.map((spy) => spy.mock.calls));
     vi.restoreAllMocks();
     const files = NodeFS.readdirSync(dataDir).filter((name) => name.startsWith("beebot.db"));
+    // The reply keeps each tool's short detail on purpose, so only that may name the input.
     const stored = files
       .map((name) => NodeFS.readFileSync(NodePath.join(dataDir, name), "latin1"))
-      .join("");
+      .join("")
+      .replace(/"detail":"[^"]*secret-input[^"]*"/g, "");
     for (const secret of ["secret-input", "owner@example.com", "Owner Workspace"]) {
       expect(stored).not.toContain(secret);
       expect(printed).not.toContain(secret);

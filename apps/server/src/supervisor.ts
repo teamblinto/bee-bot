@@ -1,5 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
+import type { ChatMessage } from "@beebot/contracts";
+
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
 import { recoverTakeovers } from "./browser.ts";
@@ -49,7 +51,7 @@ type Options = {
 function finishedRun(
   outcome: TurnOutcome,
   abortReason: unknown,
-  tools: string[],
+  tools: ChatMessage["tools"],
   parked: boolean,
 ): FinishedRun {
   if (outcome.kind === "limited") {
@@ -209,8 +211,7 @@ export function createSupervisor({
     const plan = launch.mode === "plan";
     const token = approvals.openRun(run.id, launch.botId, { attended, plan });
     const gate = approvals.authenticate(token);
-    const tools: string[] = [];
-    const seenTools = new Set<string>();
+    const tools = new Map<string, ChatMessage["tools"][number]>();
     const deltas = batchDeltas((text) => onDelta(run.id, text));
     const watchdog = createWatchdog(clock, silenceMs);
     const effects = new Map<string, string>();
@@ -303,9 +304,13 @@ export function createSupervisor({
         onToolStart: (tool) => {
           deltas.flush();
           watchdog.toolStart(tool.id);
-          if (!seenTools.has(tool.id)) {
-            seenTools.add(tool.id);
-            tools.push(tool.name);
+          const known = tools.get(tool.id);
+          tools.set(tool.id, {
+            name: tool.name,
+            detail: tool.detail,
+            failed: known?.failed ?? false,
+          });
+          if (!known) {
             recordEffect(tool);
             // Bee and connector tools taint through the broker, by their own labels.
             if (!tool.name.startsWith("mcp__bee__") && !tool.name.startsWith("mcp__connectors__")) {
@@ -322,6 +327,10 @@ export function createSupervisor({
           deltas.flush();
           watchdog.toolEnd(id);
           settleEffect(id, failed, cutOff);
+          const known = tools.get(id);
+          if (known) {
+            known.failed = failed;
+          }
           onToolEnd(run.id, id, failed);
         },
         onThinking: (state) => {
@@ -383,7 +392,12 @@ export function createSupervisor({
         // Left Running on purpose: the next boot marks it Interrupted.
         if (!closing) {
           try {
-            const finished = finishedRun(outcome, controller.signal.reason, tools, parked);
+            const finished = finishedRun(
+              outcome,
+              controller.signal.reason,
+              [...tools.values()],
+              parked,
+            );
             store.effects.settleRunEffects(
               run.id,
               outcome.kind === "completed" || outcome.kind === "waiting" ? "done" : "uncertain",

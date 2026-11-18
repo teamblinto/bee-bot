@@ -893,7 +893,7 @@ describe("the fake engine's /approve", () => {
     await vi.waitFor(() => expect(store.state().messages).toHaveLength(2));
     expect(store.state().messages[1]).toMatchObject({
       body: "Test engine: allowed",
-      tools: ["Bash"],
+      tools: [{ name: "Bash", detail: "npm run build --flag", failed: false }],
     });
 
     await send(bot.roomId, "/approve Read notes.txt");
@@ -1085,7 +1085,7 @@ describe("memory tools", () => {
     expect(memory).toMatchObject({ text: secret, status: "active", source: "agent", type: "user" });
     expect(store.state().messages[1]).toMatchObject({
       body: `Saved as ${memory?.id}.`,
-      tools: ["mcp__bee__memory_propose"],
+      tools: [{ name: "mcp__bee__memory_propose", detail: null, failed: false }],
     });
     expect(client.messages.some((m) => m.type === "tool-start")).toBe(true);
     expect(JSON.stringify(rows("SELECT * FROM audit_log"))).not.toContain(secret);

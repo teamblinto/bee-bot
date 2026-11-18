@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 38;
+export const protocolVersion = 39;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -192,8 +192,11 @@ export const ChatMessage = z.object({
   roomId: z.string(),
   author: z.enum(["human", "bot"]),
   body: z.string(),
-  // Names only, in call order. Tool input is never kept here.
-  tools: z.array(z.string()),
+  // In call order. `detail` is the short path or command the live row showed, kept on purpose so a
+  // finished turn reads the same after a reload. The rest of tool input is never kept here.
+  tools: z.array(
+    z.object({ name: z.string(), detail: z.string().nullable(), failed: z.boolean() }),
+  ),
   // How long the turn behind a bot message ran. Null for owners and for rows older than the column.
   workedMs: z.number().nullable(),
   // The bot that wrote it. Null for owners.
@@ -977,7 +980,8 @@ export const ServerMessage = z.discriminatedUnion("type", [
     text: z.string(),
   }),
   // A tool call started, or its detail became known: same `toolId`, so clients upsert.
-  // `detail` is a short path or command. Memory only, like all of tool input.
+  // `detail` is a short path or command. The reply keeps it in `ChatMessage.tools`; the rest of
+  // tool input stays in memory.
   z.object({
     type: z.literal("tool-start"),
     runId: z.string(),

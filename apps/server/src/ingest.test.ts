@@ -26,6 +26,12 @@ afterEach(() => {
 
 const addBot = () => store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
 
+const tools = [
+  { name: "Read", detail: "src/index.ts", failed: false },
+  { name: "Read", detail: "src/index.ts", failed: false },
+  { name: "Bash", detail: "pnpm test", failed: true },
+];
+
 function turn(bot: Bot, body: string, reply = "done") {
   store.sendMessage({ id: NodeCrypto.randomUUID(), roomId: bot.roomId, body, attended: true });
   const now = new Date().toISOString();
@@ -38,7 +44,7 @@ function turn(bot: Bot, body: string, reply = "done") {
     status: "Completed",
     reason: null,
     reply,
-    tools: ["Read", "Read", "Bash"],
+    tools,
   });
   store.ingestRun(claimed.id);
   return claimed.id;
@@ -72,6 +78,13 @@ describe("candidate memories", () => {
 });
 
 describe("the turn summary", () => {
+  it("leaves each tool's detail and failure on the reply, across a reopen", () => {
+    turn(addBot(), "hello");
+    store.close();
+    store = openEventStore(dataDir);
+    expect(store.state().messages.find(({ author }) => author === "bot")?.tools).toEqual(tools);
+  });
+
   it("records the turn and survives event pruning, and the index rebuilds after it", () => {
     const bot = addBot();
     store.addMemory({ botId: bot.id, text: "the files live on the NAS", type: "user" });

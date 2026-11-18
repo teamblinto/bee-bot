@@ -145,7 +145,6 @@ const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => (
   drafts: {},
   liveTools: {},
   thinking: {},
-  finishedTools: {},
   pending: [],
   engine: undefined,
   engineChecking: false,
@@ -354,7 +353,7 @@ it("upserts live tools by id and marks how they ended", () => {
 });
 
 it.each(["Completed", "WaitingUser"] as const)(
-  "moves the tools of a turn that ends %s onto its reply, in memory",
+  "drops the live tools of a turn that ends %s, since its reply carries them",
   (status) => {
     const working = {
       ...state(3, { bots: [bot], runs: [run("Running")] }),
@@ -370,9 +369,6 @@ it.each(["Completed", "WaitingUser"] as const)(
       event: { seq: 5, createdAt: "now", type: "run.changed", run: run(status) },
     });
     expect(ended.liveTools).toEqual({});
-    expect(ended.finishedTools).toEqual({
-      reply: [tool("a", { detail: "notes.md", status: "done" })],
-    });
   },
 );
 

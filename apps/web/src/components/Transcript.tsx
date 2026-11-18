@@ -1,4 +1,4 @@
-import type { Bot } from "@beebot/contracts";
+import type { Bot, ChatMessage } from "@beebot/contracts";
 import {
   Ban,
   Bot as BotIcon,
@@ -35,12 +35,12 @@ import { ThinkingRow, WorkGroup, WorkingLabel } from "./WorkLog";
 const jumpOffsetPx = 24;
 
 // The list only ever grows, so a position is a stable key.
-const namedTools = (names: string[]) =>
-  names.map((name, position): LiveTool => ({
+const toolRows = (tools: ChatMessage["tools"]) =>
+  tools.map(({ name, detail, failed }, position): LiveTool => ({
     id: String(position),
     name,
-    detail: null,
-    status: "done",
+    detail,
+    status: failed ? "failed" : "done",
   }));
 
 const answeredIcons = { allowed: Check, denied: Ban, expired: CirclePause, pending: Check };
@@ -80,14 +80,12 @@ function Item({
   item,
   bot,
   connected,
-  finishedTools,
   authorName,
   byline,
 }: {
   item: TranscriptItem;
   bot: Pick<Bot, "name">;
   connected: boolean;
-  finishedTools: Record<string, LiveTool[]>;
   authorName: ((botId: string) => string | undefined) | undefined;
   byline: boolean;
 }) {
@@ -168,7 +166,7 @@ function Item({
       {message.tools.length > 0 && (
         <WorkGroup
           label={workedLine(message.workedMs, message.tools.length)}
-          tools={finishedTools[message.id] ?? namedTools(message.tools)}
+          tools={toolRows(message.tools)}
           connectors={connectors}
         />
       )}
@@ -183,7 +181,6 @@ export function Transcript({
   bot,
   items,
   connected,
-  finishedTools,
   draft,
   liveTools,
   workingSince,
@@ -196,7 +193,6 @@ export function Transcript({
   bot: Pick<Bot, "name"> & { avatarSeed?: number };
   items: TranscriptItem[];
   connected: boolean;
-  finishedTools: Record<string, LiveTool[]>;
   draft: string | undefined;
   liveTools: LiveTool[];
   // Set while the turn runs.
@@ -339,7 +335,6 @@ export function Transcript({
                     item={item}
                     bot={bot}
                     connected={connected}
-                    finishedTools={finishedTools}
                     authorName={authorName}
                     byline={byline}
                   />
@@ -385,7 +380,6 @@ export function Transcript({
                 item={item}
                 bot={bot}
                 connected={connected}
-                finishedTools={finishedTools}
                 authorName={authorName}
                 byline={false}
               />

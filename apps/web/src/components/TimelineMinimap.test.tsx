@@ -275,7 +275,6 @@ function renderTranscript(items: TranscriptItem[]) {
       bot={bot}
       items={items}
       connected
-      finishedTools={{}}
       draft={undefined}
       liveTools={[]}
       workingSince={undefined}
@@ -318,7 +317,6 @@ it("turns off auto-follow on a jump, and sending turns it back on", () => {
         bot={bot}
         items={[...turns, message("7", "human", "fourth")]}
         connected
-        finishedTools={{}}
         draft={undefined}
         liveTools={[]}
         workingSince={undefined}

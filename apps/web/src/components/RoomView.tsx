@@ -450,7 +450,7 @@ export function RoomView({
   connection: ConnectionState;
   onOpenDrawer: () => void;
 }) {
-  const { chat, status, finishedTools, commandError } = connection;
+  const { chat, status, commandError } = connection;
   const [adding, setAdding] = useState(false);
   const connected = status === "connected";
   const members = room.members.flatMap((id) => chat.bots.filter((bot) => bot.id === id));
@@ -546,7 +546,6 @@ export function RoomView({
           bot={{ name: room.name ?? "" }}
           items={items}
           connected={connected}
-          finishedTools={finishedTools}
           draft={undefined}
           liveTools={[]}
           workingSince={undefined}

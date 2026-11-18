@@ -1099,7 +1099,7 @@ describe("live output", () => {
     );
   });
 
-  it("keeps tool input and thought text out of the database, events and logs", async () => {
+  it("keeps thought text out of the database, events and logs, and a tool's detail on its reply", async () => {
     const logged = vi.spyOn(console, "error");
     const engine = scriptedEngine();
     const { store, port, createBot, send } = await boot(engine.runTurn);
@@ -1127,10 +1127,11 @@ describe("live output", () => {
       }),
       JSON.stringify(logged.mock.calls),
     ].join("\n");
-    expect(stored).toContain("Bash");
-    expect(stored).not.toContain("secret-input");
     expect(stored).not.toContain("secret-thought");
-    expect(store.state().messages.at(-1)?.tools).toEqual(["Bash"]);
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("secret-input");
+    expect(store.state().messages.at(-1)?.tools).toEqual([
+      { name: "Bash", detail: "cat secret-input", failed: true },
+    ]);
   });
 
   it("records how long a finished turn worked", async () => {
@@ -1162,7 +1163,10 @@ describe("tool activity", () => {
     engine.turns[0]?.tool("Read");
     engine.turns[0]?.finish(reply);
     await expectStatus(store, bot, "Completed");
-    expect(store.state().messages.map(({ tools }) => tools)).toEqual([[], ["Bash", "Read"]]);
+    expect(store.state().messages.map(({ tools }) => tools.map(({ name }) => name))).toEqual([
+      [],
+      ["Bash", "Read"],
+    ]);
     const live = () => client.messages.flatMap((m) => (m.type === "tool-start" ? [m.name] : []));
     await vi.waitFor(() => expect(live()).toEqual(["Bash", "Read"]));
   });

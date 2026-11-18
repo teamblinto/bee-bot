@@ -190,7 +190,7 @@ export function ChatView({
   onOpenDrawer: () => void;
   onArchived: () => void;
 }) {
-  const { chat, drafts, liveTools, thinking, finishedTools } = connection;
+  const { chat, drafts, liveTools, thinking } = connection;
   const { pending, status, commandError, lastSeen, models } = connection;
   const connected = status === "connected";
   const messages = chat.messages.filter(({ roomId }) => roomId === bot.roomId);
@@ -334,7 +334,6 @@ export function ChatView({
             bot={bot}
             items={items}
             connected={connected}
-            finishedTools={finishedTools}
             draft={draft}
             liveTools={tools}
             workingSince={run?.status === "Running" ? run.startedAt : undefined}

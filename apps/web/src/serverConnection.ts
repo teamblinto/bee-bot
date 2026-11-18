@@ -25,7 +25,6 @@ const firstReconnectDelayMs = 1000;
 const maxReconnectDelayMs = 30_000;
 const lastSeenKey = "beebot.lastSeen";
 
-// Lives only in this client's memory: after a reload a finished turn has names alone.
 export type LiveTool = {
   id: string;
   name: string;
@@ -46,8 +45,6 @@ export type ConnectionState = {
   liveTools: Record<string, LiveTool[]>;
   // Thinking state of running turns, by run ID.
   thinking: Record<string, { active: boolean; text: string }>;
-  // Tool rows of replies finished since this client connected, by message ID.
-  finishedTools: Record<string, LiveTool[]>;
   // Card content for pending approvals. The server resends the whole set, so it is never merged.
   pending: PendingApproval[];
   // Undefined until the server sends it, so no model is called unavailable before then.
@@ -98,10 +95,6 @@ function upsert<T extends { id: string }>(items: T[], item: T) {
     : [...items, item];
 }
 
-// A tool still open when its turn ended was cut off, not failed: the engine never said.
-const settled = (tools: LiveTool[]) =>
-  tools.map((tool): LiveTool => (tool.status === "running" ? { ...tool, status: "done" } : tool));
-
 function applyEvent(state: ConnectionState, event: ServerEvent) {
   const { chat } = state;
   switch (event.type) {
@@ -144,16 +137,8 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     }
     case "account.changed":
       return { ...state, chat: { ...chat, accounts: upsert(chat.accounts, event.account) } };
-    case "message.created": {
-      const { message } = event;
-      const next = { ...state, chat: { ...chat, messages: [...chat.messages, message] } };
-      const botId = chat.bots.find(({ roomId }) => roomId === message.roomId)?.id;
-      const runId = chat.runs.find((run) => run.botId === botId)?.id;
-      const tools = runId && state.liveTools[runId];
-      return message.author === "bot" && tools
-        ? { ...next, finishedTools: { ...state.finishedTools, [message.id]: settled(tools) } }
-        : next;
-    }
+    case "message.created":
+      return { ...state, chat: { ...chat, messages: [...chat.messages, event.message] } };
     case "run.changed": {
       const { run } = event;
       const previous = chat.runs.find(({ botId }) => botId === run.botId);
@@ -408,7 +393,6 @@ let state: ConnectionState = {
   drafts: {},
   liveTools: {},
   thinking: {},
-  finishedTools: {},
   pending: [],
   models: undefined,
   boxAvailability: undefined,

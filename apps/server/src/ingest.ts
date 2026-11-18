@@ -43,7 +43,10 @@ const EndedRun = TurnSummary.pick({
   startedAt: true,
   endedAt: true,
 }).extend({ inputHighSeq: z.number().nullable() });
-const Reply = z.object({ body: z.string(), tools: Tools });
+const Reply = z.object({
+  body: z.string(),
+  tools: z.string().transform((text) => ChatMessage.shape.tools.parse(JSON.parse(text))),
+});
 const Input = ChatMessage.pick({ id: true, author: true, body: true });
 
 const excerpt = (text: string) => {
@@ -141,7 +144,7 @@ export function openIngest(
       run.reason,
       run.startedAt,
       run.endedAt,
-      JSON.stringify([...new Set(reply?.tools ?? [])]),
+      JSON.stringify([...new Set(reply?.tools.map(({ name }) => name) ?? [])]),
       excerpt(inputs[0]?.body ?? ""),
       excerpt(reply?.body ?? ""),
     );

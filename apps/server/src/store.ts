@@ -814,6 +814,15 @@ export const migrations: Array<{
     // Null until the owner answers: nothing is sent before they turn it on.
     sql: "ALTER TABLE settings ADD COLUMN usage_data INTEGER",
   },
+  {
+    name: "tool_details",
+    // Stored events carry the old shape, so they would not parse. Clients get a snapshot.
+    sql: `DELETE FROM events;
+    UPDATE messages SET tools = (
+      SELECT json_group_array(json_object('name', value, 'detail', NULL, 'failed', json('false')))
+      FROM (SELECT value FROM json_each(messages.tools) ORDER BY key)
+    ) WHERE tools != '[]';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -852,7 +861,7 @@ const Origin = z.object({
 const LastMessage = z.object({ id: z.string().optional() });
 const ChainTally = z.object({ turns: z.number(), startedAt: z.string() });
 const MessageRow = ChatMessage.extend({
-  tools: z.string().transform((text) => z.array(z.string()).parse(JSON.parse(text))),
+  tools: z.string().transform((text) => ChatMessage.shape.tools.parse(JSON.parse(text))),
   attachments: Attachments,
 });
 const Settings = z.object({ noticeAcknowledgedAt: z.string().nullable() });
@@ -909,7 +918,7 @@ export type FinishedRun = {
   status: "Completed" | "Failed" | "Cancelled" | "WaitingUser" | "WaitingQuota";
   reason: RunReason | null;
   reply?: string;
-  tools?: string[];
+  tools?: ChatMessage["tools"];
   blockedUntil?: string;
   pauseBot?: PauseReason;
 };

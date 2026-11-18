@@ -932,6 +932,23 @@ describe("restart", () => {
     expect(await client.next()).toMatchObject({ type: "snapshot", state: { bots: [{}] } });
   });
 
+  it("gives old tool names a detail column, in call order", async () => {
+    const db = await seedBefore(
+      "tool_details",
+      `${oldBot("ada")}
+      INSERT INTO messages (id, room_id, author, body, tools, event_seq, created_at)
+        VALUES ('m', 'room-ada', 'bot', 'done', '["Read","Bash","Edit"]', 2, 'then');
+      INSERT INTO events (type, payload, created_at) VALUES ('message.created', '{}', 'then');`,
+    );
+    db.close();
+
+    const { store } = await start();
+    expect(store.state().messages[0]?.tools).toEqual(
+      ["Read", "Bash", "Edit"].map((name) => ({ name, detail: null, failed: false })),
+    );
+    expect(store.eventsAfter(0)).toEqual([]);
+  });
+
   it("migrates a v4 database and backfills its messages without losing any", async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"), {
@@ -978,7 +995,7 @@ describe("restart", () => {
 
     const { messages, bots, memories } = store.state();
     expect(messages.map(({ body }) => body)).toEqual(bodies);
-    expect(messages.every(({ tools }) => tools[0] === "Read")).toBe(true);
+    expect(messages.every(({ tools }) => tools[0]?.name === "Read")).toBe(true);
     expect(bots.map(({ id }) => id)).toEqual(["old", "new"]);
     expect(memories).toEqual([]);
     // Old events lack `workedMs`, so run_timing clears them and clients take a snapshot.
