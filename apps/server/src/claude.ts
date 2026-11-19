@@ -20,9 +20,9 @@ import {
   proxyKeyPlaceholder,
   spawnHost,
   spawnInBox,
-  supportsSecureStorageDir,
 } from "./boxEngine.ts";
 import { waitingPattern } from "./continuations.ts";
+import { conflictingClaudeCredentials, engineEnv } from "./engineEnv.ts";
 import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
@@ -142,13 +142,11 @@ const usageLine = `${JSON.stringify({
   request: { subtype: "get_usage" },
 })}\n`;
 
-// The Git Bash path stays: without it the CLI can lose the Bash tool on Windows.
-const clearedEnv =
-  /^(?!CLAUDE_CODE_GIT_BASH_PATH$)(ANTHROPIC_|CLAUDE|T3CODE|AWS_|GOOGLE_APPLICATION|VERTEX_|CLOUD_ML_|DISABLE_|MCP_|ELECTRON_RUN_AS_NODE$)/i;
-
+// No credential or CLAUDE_CONFIG_DIR passes: the CLI uses its own login in its default config.
+// The Git Bash path does: without it the CLI can lose the Bash tool on Windows.
 export function childEnv(parent: NodeJS.ProcessEnv = process.env) {
   return {
-    ...Object.fromEntries(Object.entries(parent).filter(([name]) => !clearedEnv.test(name))),
+    ...engineEnv(parent, ["CLAUDE_CODE_GIT_BASH_PATH"]),
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
   };
@@ -774,28 +772,21 @@ type Options = { command: readonly string[]; dataDir: string; clock?: AwakeClock
 
 type Starter = (args: string[]) => () => EngineProcess;
 
-// `command` is the CLI as the box sees it.
-function boxStarter(
-  command: readonly string[],
-  { runtime, layout }: BoxOptions,
-  launch: BotLaunch,
-  token: string,
-  credentialEnv: Record<string, string>,
-): Starter {
-  const env = {
+// Built from the box layout alone, so nothing of beebotd's own environment reaches the box.
+function boxEnv(layout: BoxOptions["layout"], launch: BotLaunch, token: string, dataDir: string) {
+  return {
     ...layout.env,
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     [tokenVariable]: token,
-    ...credentialEnv,
+    ...credentialMapping({ engine: "claude", accountId: launch.engineAccountId, dataDir, layout })
+      .env,
     ...(launch.lane === "api_key" && {
       ANTHROPIC_BASE_URL: `${layout.apiLane}/anthropic`,
       ANTHROPIC_API_KEY: proxyKeyPlaceholder,
     }),
   };
-  return (args) => () =>
-    spawnInBox(runtime, launch.botId, { argv: [...command, ...args], env, cwd: layout.workdir });
 }
 
 export function createClaudeRunTurn({
@@ -804,24 +795,6 @@ export function createClaudeRunTurn({
   clock = createAwakeClock(),
   box,
 }: Options & { box?: BoxOptions | undefined }): RunTurn {
-  const secureStorage = new Map<string, Promise<boolean>>();
-  function credentialEnv({ runtime, layout }: BoxOptions, { botId, engineAccountId }: BotLaunch) {
-    const detected =
-      secureStorage.get(botId) ??
-      supportsSecureStorageDir(runtime, botId, layout.claudeBinary, layout.env);
-    secureStorage.set(botId, detected);
-    return detected.then((found) => {
-      const mapping = credentialMapping({
-        engine: "claude",
-        accountId: engineAccountId,
-        dataDir,
-        layout,
-        secureStorageDir: found,
-      });
-      return mapping.kind === "shared" ? mapping.env : {};
-    });
-  }
-
   return async ({
     prompt,
     sessionId,
@@ -841,6 +814,11 @@ export function createClaudeRunTurn({
     if (projectPath && !(await isFolder(projectPath))) {
       return { kind: "folder_missing" };
     }
+    const env = box ? boxEnv(box.layout, launch, permissions.token, dataDir) : childEnv();
+    if (conflictingClaudeCredentials(env)) {
+      console.error("beebotd: run refused, its environment holds both an API key and a token");
+      return { kind: "auth_failed", pauseReason: "credential_source" };
+    }
     const cwd = box ? box.layout.workdir : workingFolder(dataDir, launch.botId, projectPath);
     const privateFolder = workspacePath(dataDir, launch.botId);
     const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");
@@ -855,9 +833,11 @@ export function createClaudeRunTurn({
 
     const name = `${NodeCrypto.randomBytes(16).toString("hex")}.json`;
     const configPath = NodePath.join(dataDir, "runtime", name);
+    // `command` is the CLI as the box sees it.
     const start: Starter = box
-      ? boxStarter(command, box, launch, permissions.token, await credentialEnv(box, launch))
-      : (args) => () => spawnHost(command, args, { cwd, env: childEnv(), stderr: true });
+      ? (args) => () =>
+          spawnInBox(box.runtime, launch.botId, { argv: [...command, ...args], env, cwd })
+      : (args) => () => spawnHost(command, args, { cwd, env, stderr: true });
     const argsFor = (asResume: boolean) =>
       box
         ? boxTurnArgs(`${box.layout.beeDir.box}/persona.md`, sessionId, asResume, launch, {

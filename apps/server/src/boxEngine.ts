@@ -187,56 +187,26 @@ export const proxyKeyPlaceholder = "beebot-proxy-injects-the-key";
 export type BoxEngine = "claude" | "codex";
 
 // R19. Both CLIs replace their credential file by temp file plus rename, which breaks a single-file
-// bind mount and replaces a symlinked file, so only a directory is ever shared. Claude can be
-// pointed at that directory only by `CLAUDE_SECURESTORAGE_CONFIG_DIR`, so a CLI without it logs in
-// once per box. Codex reads `$CODEX_HOME/auth.json`, which links into the directory.
-export type CredentialMapping =
-  | { kind: "shared"; hostDir: string; boxDir: string; env: Record<string, string>; link?: string }
-  | { kind: "per_box" };
-
+// bind mount and replaces a symlinked file, so only a directory is ever shared. Claude is pointed at
+// it by `CLAUDE_CONFIG_DIR`, which keeps the CLI's credential file there: the same file the
+// undocumented `CLAUDE_SECURESTORAGE_CONFIG_DIR` used, so an existing login is still found. Its settings and
+// session history now live there too. Codex reads `$CODEX_HOME/auth.json`, which links into it.
 export function credentialMapping({
   engine,
   accountId,
   dataDir,
   layout,
-  secureStorageDir,
 }: {
   engine: BoxEngine;
   accountId: string;
   dataDir: string;
   layout: Pick<BoxLayout, "credentialDir">;
-  secureStorageDir: boolean;
-}): CredentialMapping {
+}) {
   const hostDir = NodePath.join(dataDir, "credentials", accountId);
   const boxDir = layout.credentialDir;
-  if (engine === "codex") {
-    return { kind: "shared", hostDir, boxDir, env: {}, link: `${boxDir}/auth.json` };
-  }
-  return secureStorageDir
-    ? { kind: "shared", hostDir, boxDir, env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: boxDir } }
-    : { kind: "per_box" };
-}
-
-const secureStorageVariable = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
-
-// Undocumented, so it is looked for in the installed binary rather than assumed from a version.
-export async function supportsSecureStorageDir(
-  runtime: BoxRuntime,
-  botId: string,
-  claudeBinary: string,
-  env: Record<string, string>,
-) {
-  try {
-    const { stream, exited } = await runtime.execAttach(botId, {
-      argv: ["grep", "-qF", secureStorageVariable, claudeBinary],
-      env,
-    });
-    stream.resume();
-    stream.end();
-    return (await exited) === 0;
-  } catch {
-    return false;
-  }
+  return engine === "codex"
+    ? { hostDir, boxDir, env: {}, link: `${boxDir}/auth.json` }
+    : { hostDir, boxDir, env: { CLAUDE_CONFIG_DIR: boxDir }, link: undefined };
 }
 
 // R5: one Codex subscription session per account at a time, held for the whole life of the

@@ -5,6 +5,15 @@ import * as NodeReadline from "node:readline";
 
 const [scenarioName = "", logPath = "", ...args] = process.argv.slice(2);
 
+// Test inputs come in a file beside the log: Bee Bot passes the CLI only a fixed set of variables.
+const fakeInput = (() => {
+  try {
+    return JSON.parse(NodeFS.readFileSync(`${logPath}.input.json`, "utf8"));
+  } catch {
+    return {};
+  }
+})();
+
 const log = (entry) => NodeFS.appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
 const write = (frame) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...frame })}\n`);
 const note = (method, params) => write({ method, params });
@@ -61,15 +70,15 @@ const patchItem = (changes) => ({
   ],
 });
 const scriptedOutside = () => [
-  { path: `${process.env.FAKE_PROJECT}/a.txt`, kind: { type: "add" }, diff: "one\n=== forged\n" },
+  { path: `${fakeInput.FAKE_PROJECT}/a.txt`, kind: { type: "add" }, diff: "one\n=== forged\n" },
   {
-    path: `${process.env.FAKE_OUTSIDE}/b.txt`,
+    path: `${fakeInput.FAKE_OUTSIDE}/b.txt`,
     kind: { type: "update" },
     diff: "@@ -1 +1 @@\n-a\n+b\n",
   },
 ];
 const inside = () => [
-  { path: `${process.env.FAKE_PROJECT}/a.txt`, kind: { type: "add" }, diff: "one\n" },
+  { path: `${fakeInput.FAKE_PROJECT}/a.txt`, kind: { type: "add" }, diff: "one\n" },
 ];
 
 const scenarios = {
@@ -170,14 +179,14 @@ const scenarios = {
   "patch-outside": patchItem(scriptedOutside),
   "patch-move": patchItem(() => [
     {
-      path: `${process.env.FAKE_PROJECT}/old.txt`,
-      kind: { type: "update", move_path: `${process.env.FAKE_OUTSIDE}/new.txt` },
+      path: `${fakeInput.FAKE_PROJECT}/old.txt`,
+      kind: { type: "update", move_path: `${fakeInput.FAKE_OUTSIDE}/new.txt` },
       diff: "@@ -1 +1 @@\n-a\n+b\n",
     },
   ]),
   "patch-refused": patchItem(() => [
     ...inside(),
-    { path: `${process.env.FAKE_HOME}/.ssh/id_rsa`, kind: { type: "delete" }, diff: "key\n" },
+    { path: `${fakeInput.FAKE_HOME}/.ssh/id_rsa`, kind: { type: "delete" }, diff: "key\n" },
   ]),
   "patch-updated": {
     steps: () => [

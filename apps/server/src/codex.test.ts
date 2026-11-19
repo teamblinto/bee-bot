@@ -68,8 +68,8 @@ beforeEach(() => {
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-outside-")),
   );
   logPath = NodePath.join(dataDir, "fake-cli.log");
-  plantEnv("FAKE_OUTSIDE", outside);
-  plantEnv("FAKE_HOME", NodeOS.homedir());
+  fakeInput("FAKE_OUTSIDE", outside);
+  fakeInput("FAKE_HOME", NodeOS.homedir());
 });
 
 afterEach(async () => {
@@ -88,6 +88,13 @@ afterEach(async () => {
 function plantEnv(name: string, value: string) {
   plantedEnv.push(name);
   process.env[name] = value;
+}
+
+// The fake CLI reads its test inputs from a file beside its log, not from the scrubbed environment.
+function fakeInput(name: string, value: string) {
+  const path = `${logPath}.input.json`;
+  const inputs = NodeFS.existsSync(path) ? JSON.parse(NodeFS.readFileSync(path, "utf8")) : {};
+  NodeFS.writeFileSync(path, JSON.stringify({ ...inputs, [name]: value }));
 }
 
 const fakeCommand = (scenario: string) => [process.execPath, fakeCli, scenario, logPath];
@@ -627,7 +634,7 @@ describe("requests from the server", () => {
   });
 
   it("marks every line of a patch, so content can't forge a file header", async () => {
-    plantEnv("FAKE_PROJECT", "/p");
+    fakeInput("FAKE_PROJECT", "/p");
     const { outcome, asked } = turn("patch-outside");
     await outcome;
     expect(asked).toEqual([
@@ -642,7 +649,7 @@ describe("requests from the server", () => {
   });
 
   it("puts a move's destination through the same gate", async () => {
-    plantEnv("FAKE_PROJECT", "/p");
+    fakeInput("FAKE_PROJECT", "/p");
     const { outcome, asked } = turn("patch-move");
     await outcome;
     expect(asked[0]?.input).toEqual({
@@ -652,7 +659,7 @@ describe("requests from the server", () => {
   });
 
   it("learns a patch's changes from patchUpdated too", async () => {
-    plantEnv("FAKE_PROJECT", "/p");
+    fakeInput("FAKE_PROJECT", "/p");
     const { outcome, asked, starts } = turn("patch-updated");
     await outcome;
     expect(asked[0]?.input.paths).toEqual(["/p/a.txt"]);
@@ -753,6 +760,14 @@ describe("the child environment", () => {
     "AZURE_OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "ELECTRON_RUN_AS_NODE",
+    // Not engine credentials, but beebotd's own or the machine's: none is the bot's to see.
+    "BEEBOT_VAULT_KEY",
+    "CREDENTIALS_DIRECTORY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "SOME_UNLISTED_SECRET",
   ];
 
   it("never carries planted credentials to the child", async () => {
@@ -913,7 +928,7 @@ describe("through the real server, store and approvals", () => {
     ).json()) as { id: string; roomId: string };
     await post({ type: "set-bot-engine", botId: bot.id, access });
     await post({ type: "set-account-lane", engineAccountId: "claude", lane });
-    plantEnv("FAKE_PROJECT", workspacePath(dataDir, bot.id));
+    fakeInput("FAKE_PROJECT", workspacePath(dataDir, bot.id));
     await post({
       type: "send-message",
       messageId: NodeCrypto.randomUUID(),

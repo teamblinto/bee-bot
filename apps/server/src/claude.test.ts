@@ -78,6 +78,13 @@ function plantEnv(name: string, value: string) {
   process.env[name] = value;
 }
 
+// The fake CLI reads its test inputs from a file beside its log, not from the scrubbed environment.
+function fakeInput(name: string, value: string) {
+  const path = `${logPath}.input.json`;
+  const inputs = NodeFS.existsSync(path) ? JSON.parse(NodeFS.readFileSync(path, "utf8")) : {};
+  NodeFS.writeFileSync(path, JSON.stringify({ ...inputs, [name]: value }));
+}
+
 const fakeCommand = (scenario: string) => [process.execPath, fakeCli, scenario, logPath];
 
 type LogEntry = {
@@ -717,6 +724,14 @@ describe("the child environment", () => {
     "MCP_TIMEOUT",
     "T3CODE_TOKEN",
     "ELECTRON_RUN_AS_NODE",
+    // Not engine credentials, but beebotd's own or the machine's: none is the bot's to see.
+    "BEEBOT_VAULT_KEY",
+    "CREDENTIALS_DIRECTORY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "SOME_UNLISTED_SECRET",
   ];
 
   it("never carries planted credentials to the child, and sets its own two", async () => {
@@ -743,9 +758,14 @@ describe("the child environment", () => {
     expect(childEnv({ CLAUDE_X: "y" })).not.toHaveProperty("CLAUDE_X");
   });
 
-  it("clears names case-insensitively, as Windows treats them", () => {
-    expect(childEnv({ anthropic_api_key: "x", PATH: "p" })).not.toHaveProperty("anthropic_api_key");
-    expect(childEnv({ PATH: "p" })).toHaveProperty("PATH", "p");
+  it("passes only listed names, matched case-insensitively as Windows treats them", () => {
+    expect(childEnv({ anthropic_api_key: "x", Path: "p", lc_all: "C", HOME: "h" })).toEqual({
+      Path: "p",
+      lc_all: "C",
+      HOME: "h",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    });
   });
 });
 
@@ -790,7 +810,7 @@ describe("a credential source that outranks the login", () => {
       for (const [name, value] of Object.entries(env)) {
         plantEnv(name, value);
       }
-      plantEnv("FAKE_CLAUDE_ACCOUNT", JSON.stringify(account));
+      fakeInput("FAKE_CLAUDE_ACCOUNT", JSON.stringify(account));
       const { outcome, delivered } = turn("gate-account");
       expect(await outcome).toEqual({ kind: "auth_failed", pauseReason: "credential_source" });
       expect(prompts()).toEqual([]);

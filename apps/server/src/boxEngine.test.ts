@@ -5,12 +5,7 @@ import { PassThrough } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import {
-  type BoxLayout,
-  createAccountGate,
-  credentialMapping,
-  supportsSecureStorageDir,
-} from "./boxEngine.ts";
+import { type BoxLayout, createAccountGate, credentialMapping } from "./boxEngine.ts";
 import {
   type BoxAttach,
   type BoxExec,
@@ -156,40 +151,20 @@ const gone = (pid: number) => {
 describe("credentialMapping", () => {
   const base = { accountId: "claude", dataDir: "/data", layout: { credentialDir: "/run/bee/c" } };
 
-  it("shares Claude's credential directory only when the CLI can be pointed at it", () => {
-    expect(credentialMapping({ ...base, engine: "claude", secureStorageDir: true })).toEqual({
-      kind: "shared",
+  // The account's directory on the host is where the old variable kept the credential file, and
+  // where CLAUDE_CONFIG_DIR keeps it, so a login made before the switch is still found.
+  it("points Claude at the account's shared directory with CLAUDE_CONFIG_DIR", () => {
+    expect(credentialMapping({ ...base, engine: "claude" })).toEqual({
       hostDir: NodePath.join("/data", "credentials", "claude"),
       boxDir: "/run/bee/c",
-      env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: "/run/bee/c" },
-    });
-    // Never a symlinked file: Claude's rename would replace the link.
-    expect(credentialMapping({ ...base, engine: "claude", secureStorageDir: false })).toEqual({
-      kind: "per_box",
+      env: { CLAUDE_CONFIG_DIR: "/run/bee/c" },
+      link: undefined,
     });
   });
 
   it("links Codex's auth.json into the shared directory, never mounting the file", () => {
-    const mapping = credentialMapping({
-      ...base,
-      accountId: "codex",
-      engine: "codex",
-      secureStorageDir: false,
-    });
-    expect(mapping).toMatchObject({ kind: "shared", env: {}, link: "/run/bee/c/auth.json" });
-  });
-});
-
-describe("supportsSecureStorageDir", () => {
-  const answering = (code: number | null): BoxRuntime => ({
-    ...createFakeBoxRuntime(),
-    execAttach: async () => ({ ...cleanExit(), exited: Promise.resolve(code) }),
-  });
-
-  it("is true only when the installed binary names the variable", async () => {
-    expect(await supportsSecureStorageDir(answering(0), "b", "/claude", {})).toBe(true);
-    expect(await supportsSecureStorageDir(answering(1), "b", "/claude", {})).toBe(false);
-    expect(await supportsSecureStorageDir(createFakeBoxRuntime(), "b", "/claude", {})).toBe(false);
+    const mapping = credentialMapping({ ...base, accountId: "codex", engine: "codex" });
+    expect(mapping).toMatchObject({ env: {}, link: "/run/bee/c/auth.json" });
   });
 });
 
@@ -307,7 +282,26 @@ describe("Claude in a box", () => {
     expect(JSON.stringify(args)).not.toContain(token);
     expect(JSON.stringify(args)).not.toContain("private question");
     expect(env).toContain("BEE_RUN_TOKEN");
+    expect(env).toContain("CLAUDE_CONFIG_DIR");
     expect(env).not.toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("refuses to start with both an API key and a token in its environment", async () => {
+    const attached: Seen[] = [];
+    const { runtime } = await boxRuntime([botId], (seen) => attached.push(seen));
+    const layout = testLayout(botId);
+    const runTurn = createClaudeRunTurn({
+      command: [process.execPath, fakeClaude, "success", logPath],
+      dataDir,
+      box: { runtime, layout: { ...layout, env: { ...layout.env, CLAUDE_CODE_OAUTH_TOKEN: "t" } } },
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(noop);
+    expect(await turn(runTurn, launchFor(botId, "claude", "api_key"))).toEqual({
+      kind: "auth_failed",
+      pauseReason: "credential_source",
+    });
+    errors.mockRestore();
+    expect(attached).toEqual([]);
   });
 
   it("points the API lane at the proxy with a placeholder, and accepts that as the lane's key", async () => {

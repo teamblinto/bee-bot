@@ -7,6 +7,15 @@ import * as NodeReadline from "node:readline";
 
 const [scenarioName = "", logPath = "", ...args] = process.argv.slice(2);
 
+// Test inputs come in a file beside the log: Bee Bot passes the CLI only a fixed set of variables.
+const fakeInput = (() => {
+  try {
+    return JSON.parse(NodeFS.readFileSync(`${logPath}.input.json`, "utf8"));
+  } catch {
+    return {};
+  }
+})();
+
 const fixture = (name) =>
   NodeFS.readFileSync(NodePath.join(import.meta.dirname, name), "utf8")
     .trim()
@@ -195,7 +204,7 @@ const scenarios = {
   "no-final-newline": { frames: () => replay("success.ndjson"), noNewline: true },
   // The test sets the account fields a credential source would show in the init reply.
   "gate-account": {
-    init: () => withAccount({ ...subscriber, ...JSON.parse(process.env.FAKE_CLAUDE_ACCOUNT) }),
+    init: () => withAccount({ ...subscriber, ...JSON.parse(fakeInput.FAKE_CLAUDE_ACCOUNT) }),
     frames: () => replay("success.ndjson"),
   },
   "repo-loader": { loadsRepo: true, frames: () => replay("success.ndjson") },

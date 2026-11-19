@@ -21,6 +21,7 @@ import {
   spawnInBox,
 } from "./boxEngine.ts";
 import type { BoxAttach } from "./boxRuntime.ts";
+import { engineEnv } from "./engineEnv.ts";
 import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
@@ -171,13 +172,9 @@ const beeArgs = (url: string, connectors: string | undefined) =>
     `shell_environment_policy.exclude=["${tokenVariable}"]`,
   ].flatMap((setting) => ["-c", setting]);
 
-// `CODEX_HOME` stays: it is where the owner's login lives, on either lane.
-const clearedEnv =
-  /^(?!CODEX_HOME$)(OPENAI_|CODEX_|AWS_|GOOGLE_|GCP_|AZURE_|ANTHROPIC_|CLAUDE|T3CODE|ELECTRON_RUN_AS_NODE$)/i;
-
-export function childEnv(parent: NodeJS.ProcessEnv = process.env) {
-  return Object.fromEntries(Object.entries(parent).filter(([name]) => !clearedEnv.test(name)));
-}
+// `CODEX_HOME` passes: it is where the owner's login lives, on either lane. No key does.
+export const childEnv = (parent: NodeJS.ProcessEnv = process.env) =>
+  engineEnv(parent, ["CODEX_HOME"]);
 
 // Used until `model/list` answers.
 export const staticCodexModels: EngineModel[] = [
@@ -688,17 +685,11 @@ async function startInBox(
   permissions: { url: string; token: string },
 ) {
   const codexHome = `${layout.home}/.codex`;
-  const mapping =
+  const link =
     launch.lane === "subscription"
-      ? credentialMapping({
-          engine: "codex",
-          accountId: launch.engineAccountId,
-          dataDir,
-          layout,
-          secureStorageDir: false,
-        })
+      ? credentialMapping({ engine: "codex", accountId: launch.engineAccountId, dataDir, layout })
+          .link
       : undefined;
-  const link = mapping?.kind === "shared" ? mapping.link : undefined;
   const prepare = { argv: prepareCodexHome(codexHome, link), env: layout.env };
   if (!(await exitsCleanly(runtime.execAttach(launch.botId, prepare)))) {
     return undefined;

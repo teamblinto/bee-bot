@@ -4,7 +4,7 @@ import { type Duplex, PassThrough } from "node:stream";
 import type { Bot } from "@beebot/contracts";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
 
-import { type BoxOptions, credentialMapping, supportsSecureStorageDir } from "./boxEngine.ts";
+import { type BoxOptions, credentialMapping } from "./boxEngine.ts";
 import { prepareCodexHome } from "./codex.ts";
 
 // R20: a login terminal is its own channel. What passes through it can hold a secret, so nothing
@@ -111,30 +111,15 @@ export function createTerminals({ runtime, layout, dataDir, bot }: Options) {
   };
 
   async function loginEnv(botId: string, engine: LoginEngine, accountId: string) {
+    const mapping = credentialMapping({ engine, accountId, dataDir, layout });
     if (engine === "codex") {
       const codexHome = `${layout.home}/.codex`;
-      const mapping = credentialMapping({
-        engine,
-        accountId,
-        dataDir,
-        layout,
-        secureStorageDir: false,
-      });
-      const link = mapping.kind === "shared" ? mapping.link : undefined;
-      if ((await run(botId, prepareCodexHome(codexHome, link))) !== 0) {
+      if ((await run(botId, prepareCodexHome(codexHome, mapping.link))) !== 0) {
         throw new Error("could not prepare CODEX_HOME");
       }
       return { CODEX_HOME: codexHome };
     }
-    const found = await supportsSecureStorageDir(runtime, botId, layout.claudeBinary, layout.env);
-    const mapping = credentialMapping({
-      engine,
-      accountId,
-      dataDir,
-      layout,
-      secureStorageDir: found,
-    });
-    return mapping.kind === "shared" ? mapping.env : {};
+    return mapping.env;
   }
 
   function serve(
