@@ -351,8 +351,12 @@ export function notificationBodies(state: ConnectionState, message: ServerMessag
 }
 
 const params = new URLSearchParams(window.location.search);
-const serverUrl = params.get("serverUrl");
-const token = params.get("token");
+// The desktop app hands over its server's address and token. Anywhere else a gateway serves the API
+// on this origin and its session cookie signs requests, so no token is read from a link.
+const desktop = window.beeDesktop !== undefined;
+const serverUrl = desktop ? params.get("serverUrl") : window.location.origin;
+const token = desktop ? params.get("token") : null;
+const auth: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 // The desktop app's global shortcut for taking the owner's computer back from a bot.
 export const stopShortcut = params.get("stopShortcut");
 
@@ -365,7 +369,7 @@ function readLastSeen(): Record<string, string> {
 }
 
 let state: ConnectionState = {
-  status: serverUrl && token ? "connecting" : "unconfigured",
+  status: !desktop || (serverUrl && token) ? "connecting" : "unconfigured",
   loaded: false,
   seq: 0,
   chat: {
@@ -439,29 +443,56 @@ function endpoint(path: string) {
   return url;
 }
 
+function wsEndpoint(path: string) {
+  const url = endpoint(path);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url;
+}
+
+// Browsers can't set headers on a WebSocket, so the desktop's token rides in the query.
+export function socketUrl(path: string) {
+  const url = wsEndpoint(path);
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url;
+}
+
+let signingIn = false;
+
+// A gateway answers 401 once its session ends. Its sign-in page is /login, where this app never runs.
+function signInOn401(status: number) {
+  if (status !== 401 || desktop || window.location.pathname === "/login") {
+    return false;
+  }
+  if (!signingIn) {
+    signingIn = true;
+    const { pathname, search, hash } = window.location;
+    window.location.assign(`/login?next=${encodeURIComponent(pathname + search + hash)}`);
+  }
+  return true;
+}
+
+async function apiFetch(url: URL, init: RequestInit = {}) {
+  const response = await fetch(url, { ...init, headers: { ...auth, ...init.headers } });
+  if (signInOn401(response.status)) {
+    throw new Error("Signed out");
+  }
+  return response;
+}
+
 // The login terminal's own socket (R20): its bytes never pass through the event stream.
 export function terminalSocketUrl(botId: string, cols: number, rows: number) {
-  const url = endpoint("/terminal");
-  url.protocol = "ws:";
-  url.searchParams.set("token", token ?? "");
+  const url = socketUrl("/terminal");
   url.searchParams.set("botId", botId);
   url.searchParams.set("cols", String(cols));
   url.searchParams.set("rows", String(rows));
   return url;
 }
 
-// Browsers can't set headers on a WebSocket, so the token rides in the query.
-export function socketUrl(path: string) {
-  const url = endpoint(path);
-  url.protocol = "ws:";
-  url.searchParams.set("token", token ?? "");
-  return url;
-}
-
 // The ticket stands in for the token, which never rides in this URL.
 export function displaySocketUrl(ticket: string) {
-  const url = endpoint("/display");
-  url.protocol = "ws:";
+  const url = wsEndpoint("/display");
   url.searchParams.set("ticket", ticket);
   return url;
 }
@@ -510,9 +541,7 @@ function reconnect() {
 
 async function fetchEngine() {
   try {
-    const response = await fetch(endpoint("/engine"), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await apiFetch(endpoint("/engine"));
     return response.ok ? EngineStatus.safeParse(await response.json()).data : undefined;
   } catch {
     return undefined;
@@ -521,9 +550,7 @@ async function fetchEngine() {
 
 export async function fetchHost() {
   try {
-    const response = await fetch(endpoint("/host"), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await apiFetch(endpoint("/host"));
     return response.ok ? HostPlatform.safeParse(await response.json()).data : undefined;
   } catch {
     return undefined;
@@ -534,7 +561,7 @@ export async function fetchUsage(days: number): Promise<UsageSummary> {
   try {
     const url = endpoint("/usage");
     url.searchParams.set("days", String(days));
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await apiFetch(url);
     return UsageSummary.safeParse(await response.json()).data ?? { status: "unavailable" };
   } catch {
     return { status: "unavailable" };
@@ -548,7 +575,7 @@ export async function fetchAudit(filter: { botId: string; unattended: boolean })
       url.searchParams.set("botId", filter.botId);
     }
     url.searchParams.set("unattended", filter.unattended ? "1" : "0");
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await apiFetch(url);
     return AuditPage.safeParse(await response.json()).data;
   } catch {
     return undefined;
@@ -565,10 +592,7 @@ const refreshNotes = {
 // The rows themselves arrive as an event. What comes back is only why nothing may have changed.
 export async function refreshLimits() {
   try {
-    const response = await fetch(endpoint("/usage/limits"), {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await apiFetch(endpoint("/usage/limits"), { method: "POST" });
     const result = UsageRefreshResult.safeParse(await response.json()).data;
     return result ? refreshNotes[result.outcome] : "Could not read limits.";
   } catch {
@@ -588,7 +612,7 @@ export async function checkEngine() {
 
 // A browser can't read the status of a refused WebSocket, so a version mismatch is found over HTTP.
 export async function connect() {
-  if (!serverUrl || !token) {
+  if (state.status === "unconfigured") {
     return;
   }
   // The same listener again on a reconnect is ignored.
@@ -596,9 +620,13 @@ export async function connect() {
 
   let health: Response;
   try {
-    health = await fetch(endpoint("/health"), { headers: { Authorization: `Bearer ${token}` } });
+    health = await fetch(endpoint("/health"), { headers: auth });
   } catch {
     reconnect();
+    return;
+  }
+  // Also catches a gateway refusing the socket, which a browser can't read: every reconnect lands here.
+  if (signInOn401(health.status)) {
     return;
   }
   if (health.status === 426) {
@@ -731,9 +759,9 @@ type CommandResult = { ok: true; body: unknown } | { ok: false; message: string 
 // For callers that show their own failure. `message` is always a plain sentence.
 export async function postCommand(command: Command): Promise<CommandResult> {
   try {
-    const response = await fetch(endpoint("/commands"), {
+    const response = await apiFetch(endpoint("/commands"), {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(command),
     });
     const body: unknown = await response.json();
@@ -755,10 +783,15 @@ export function uploadAttachment(
   return new Promise((resolve) => {
     const request = new XMLHttpRequest();
     request.open("POST", url);
-    request.setRequestHeader("Authorization", `Bearer ${token}`);
+    for (const [name, value] of Object.entries(auth)) {
+      request.setRequestHeader(name, value);
+    }
     request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
     request.upload.onprogress = ({ loaded, total }) => onProgress(total > 0 ? loaded / total : 0);
     request.onload = () => {
+      if (signInOn401(request.status)) {
+        return;
+      }
       let body: unknown;
       try {
         body = JSON.parse(request.responseText);
@@ -781,9 +814,7 @@ export function uploadAttachment(
 // A link can't carry the token, so the bytes come through fetch and leave as a blob.
 export async function downloadAttachment({ id, name }: AttachmentRef) {
   try {
-    const response = await fetch(endpoint(`/attachments/${id}`), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await apiFetch(endpoint(`/attachments/${id}`));
     if (!response.ok) {
       throw new Error(String(response.status));
     }
