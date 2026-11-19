@@ -2,7 +2,7 @@ import * as NodeCrypto from "node:crypto";
 import { createReadStream } from "node:fs";
 import * as NodeFS from "node:fs/promises";
 import * as NodeHttp from "node:http";
-import type { AddressInfo } from "node:net";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import type { Duplex } from "node:stream";
@@ -183,6 +183,10 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   hostDriver?: (() => Promise<HostDriver>) | undefined;
   // With it too, they act in the background through cua-driver, and fall back on `hostDriver`.
   cuaDriver?: (() => Promise<CuaDriver>) | undefined;
+  // Server mode: every bot is a box bot, nothing drives this machine, and desktop setup is off.
+  serverMode?: boolean | undefined;
+  // Listens here instead of on TCP. The socket's file permission is the only gate in front of it.
+  socketPath?: string | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -229,6 +233,25 @@ function parseCommand(text: string | undefined) {
   }
 }
 
+// A crash leaves the socket file behind. Only a dead one is removed, never a live server's.
+async function claimSocket(path: string) {
+  const code = await new Promise<string | undefined>((resolve) => {
+    const probe = NodeNet.connect(path);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve("listening");
+    });
+    probe.once("error", (error: NodeJS.ErrnoException) => resolve(error.code));
+  });
+  if (code === "ENOENT") {
+    return;
+  }
+  if (code !== "ECONNREFUSED" || !(await NodeFS.lstat(path)).isSocket()) {
+    throw new Error(`beebotd: ${path} is in use (${code})`);
+  }
+  await NodeFS.rm(path);
+}
+
 function logSummaryFailure(error: unknown) {
   console.error(`beebotd: summary failed: ${(error as Error)?.name}`);
 }
@@ -265,18 +288,21 @@ export async function startServer({
   browserRuntime = noBrowser,
   hostDriver,
   cuaDriver,
+  serverMode = false,
+  socketPath,
 }: Options) {
   const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
   // Clients whose window can be seen. Electron's main process subscribes too, but never shows.
   const visibleClients = new Set<WebSocket>();
-  const host =
-    hostDriver &&
-    createHostScreen({
-      start: hostDriver,
-      busy: store.botBusy,
-      watched: () => visibleClients.size > 0,
-      consented: store.policy.hostConsented,
-    });
+  const host = serverMode
+    ? undefined
+    : hostDriver &&
+      createHostScreen({
+        start: hostDriver,
+        busy: store.botBusy,
+        watched: () => visibleClients.size > 0,
+        consented: store.policy.hostConsented,
+      });
   const hostControl = () => hostAvailability(host !== undefined, host?.held() ?? false);
   // From the desktop, about once a second.
   let ownerIdle: IdleReading | undefined;
@@ -562,13 +588,18 @@ export async function startServer({
     requestApproval: (run, tool, args, shown) => approvals.requestApproval(run, tool, args, shown),
     notify: (run, text) => store.postRunNotice(run.id, text),
   });
-  const oauthRedirect = () =>
-    `http://127.0.0.1:${(server.address() as AddressInfo).port}${oauthCallbackPath}`;
+  // A box reaches beebotd through boxd's relay, which keeps only the path, so a socket has port 0.
+  const listenPort = () => {
+    const address = server.address();
+    return typeof address === "object" && address ? address.port : 0;
+  };
+  const oauthRedirect = () => `http://127.0.0.1:${listenPort()}${oauthCallbackPath}`;
   const supervisor = createSupervisor({
     store,
     runTurn,
     approvals,
-    permissionsUrl: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`,
+    boxOnly: serverMode,
+    permissionsUrl: () => `http://127.0.0.1:${listenPort()}/mcp`,
     turnTimeoutMs,
     clock,
     boxesReady,
@@ -646,15 +677,20 @@ export async function startServer({
   }
   const history = createUsageHistory(projectsDir);
 
+  // Invariant: only the cell owner (through the gateway that authenticated them) can open the
+  // socket, so whatever arrives on it is the owner's and no token or Origin check applies.
+  const ownerSocket = socketPath !== undefined;
+
   // Non-browser clients send no Origin; they still need the token.
   const originAllowed = (origin: string | undefined) =>
-    origin === undefined || allowedOrigins.includes(origin);
+    ownerSocket || origin === undefined || allowedOrigins.includes(origin);
 
   function tokenMatches(presented: string | null | undefined) {
     const candidate = Buffer.from(presented ?? "");
     return (
-      candidate.length === expectedToken.length &&
-      NodeCrypto.timingSafeEqual(candidate, expectedToken)
+      ownerSocket ||
+      (candidate.length === expectedToken.length &&
+        NodeCrypto.timingSafeEqual(candidate, expectedToken))
     );
   }
 
@@ -1007,7 +1043,7 @@ export async function startServer({
           return folder.refused;
         }
         const first = store.botIds().length === 0;
-        const bot = store.createBot({
+        const created = store.createBot({
           name,
           personality,
           engineAccountId,
@@ -1015,6 +1051,9 @@ export async function startServer({
           projectPath: folder.projectPath,
           ...(avatarSeed !== undefined && { avatarSeed }),
         });
+        const bot = serverMode
+          ? (store.policy.setBotBoundary(created.id, "box") ?? created)
+          : created;
         writeSummary(bot.id);
         trackUsage(botCreated(bot, first));
         return { status: 200, body: bot };
@@ -1338,6 +1377,9 @@ export async function startServer({
         if (!current) {
           return notFound;
         }
+        if (boundary === "host" && serverMode) {
+          return { status: 409, body: { code: "host_boundary_unavailable" } };
+        }
         if (boundary === "box" && !boxesReady()) {
           return { status: 409, body: { code: "boxes_unavailable" } };
         }
@@ -1470,7 +1512,7 @@ export async function startServer({
         void boxes.setUp();
         return ok;
       case "open-setup-terminal": {
-        const setup = setupCommand(hostPlatform(), command.step);
+        const setup = !serverMode && setupCommand(hostPlatform(), command.step);
         if (!setup) {
           return { status: 409, body: { code: "no_setup_command" } };
         }
@@ -1953,13 +1995,25 @@ export async function startServer({
     });
   });
 
+  if (socketPath !== undefined) {
+    await claimSocket(socketPath);
+  }
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    const listening = () => {
       server.off("error", reject);
       resolve();
-    });
+    };
+    if (socketPath === undefined) {
+      server.listen(port, "127.0.0.1", listening);
+    } else {
+      server.listen(socketPath, listening);
+    }
   });
+  if (socketPath !== undefined) {
+    // The gateway's group connects; nobody else may.
+    await NodeFS.chmod(socketPath, 0o660);
+  }
   const beat = () => {
     for (const client of sockets.clients) {
       if (!answered.has(client)) {
@@ -1984,7 +2038,7 @@ export async function startServer({
   }
 
   return {
-    port: (server.address() as AddressInfo).port,
+    port: listenPort(),
     // Fills the model catalog too, so the first picker shows what the CLI offers.
     refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
     checkCodex,

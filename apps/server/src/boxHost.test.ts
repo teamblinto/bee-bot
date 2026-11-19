@@ -4,7 +4,7 @@ import { once } from "node:events";
 import * as NodeFs from "node:fs";
 import * as NodeHttp from "node:http";
 import { createRequire } from "node:module";
-import type * as NodeNet from "node:net";
+import * as NodeNet from "node:net";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
@@ -311,7 +311,7 @@ describe.skipIf(!available)("boxes on the beebot-dev machine", () => {
         anySite: false,
         hosts: [],
       }),
-      beebotdPort: () => (beebotd.address() as NodeNet.AddressInfo).port,
+      relay: () => NodeNet.connect((beebotd.address() as NodeNet.AddressInfo).port, "127.0.0.1"),
       setBox: () => {},
       bootstrap: {
         prefix,
@@ -550,7 +550,7 @@ describe.skipIf(!available || !keyFile)(
         vault,
         account: () => "claude",
         egressInput: () => ({ engineAccountId: "claude", lane: "api_key", anySite: false, hosts }),
-        beebotdPort: () => port,
+        relay: () => NodeNet.connect(port, "127.0.0.1"),
         setBox: () => {},
         bootstrap: { prefix, labels: { "beebot-dev": "1" } },
         files,

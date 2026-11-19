@@ -1,6 +1,5 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFs from "node:fs";
-import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeStream from "node:stream";
 
@@ -252,7 +251,7 @@ export async function startBoxHost({
   vault,
   account,
   egressInput,
-  beebotdPort,
+  relay,
   setBox,
   bootstrap = {},
   files,
@@ -263,7 +262,8 @@ export async function startBoxHost({
   vault: Vault;
   account: (botId: string) => string | undefined;
   egressInput: (botId: string) => EgressInput | null;
-  beebotdPort: () => number;
+  // A connection to beebotd for each request a box makes to it.
+  relay: () => NodeStream.Duplex;
   setBox: (botId: string, state: BoxState, reason?: string | null) => unknown;
   bootstrap?: Partial<BoxdBootstrap>;
   files?: BoxdFiles;
@@ -273,7 +273,7 @@ export async function startBoxHost({
     installDir,
     files: files ?? boxdFiles(),
     bootstrap: { owner, ...bootstrap, secret: await boxdSecret(vault) },
-    hooks: { relay: () => NodeNet.connect(beebotdPort(), "127.0.0.1") },
+    hooks: { relay },
   });
   const egress = createEgressControl({ connect: boxd.egressControl, vault, egressInput });
   const ready = readyBoxRuntime(recordingBoxRuntime(boxd.runtime, setBox), {

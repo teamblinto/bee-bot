@@ -147,29 +147,58 @@ export function podmanMachine(bin: string, installDir: string, imageDir = defaul
         imageBuilt: image.code === 0,
       };
     },
-    buildImage: async (machine: string, onProgress: (progress: SetupProgress) => void) => {
-      const missing = missingSources(imageDir);
-      if (missing.length > 0) {
-        throw new Error(
-          `Bee Bot's installation is missing files the computer needs (${missing.join(", ")}). Reinstall Bee Bot.`,
-        );
+    buildImage: (machine: string, onProgress: (progress: SetupProgress) => void) =>
+      buildImage(bin, ["--connection", machine], imageDir, onProgress),
+  };
+}
+
+// Server mode on Linux: boxd runs beside beebotd on the host's own rootless Podman, with no machine.
+export function nativePodman(bin: string, imageDir = defaultImageDir) {
+  const noMachine = async () => {};
+  return {
+    init: noMachine,
+    start: noMachine,
+    stop: noMachine,
+    probe: async (): Promise<MachineProbe> => {
+      const image = await podman(bin, ["image", "exists", boxImage(imageDir)]);
+      if (image.code === null) {
+        const none = { found: false, running: false, boxdInstalled: false, imageBuilt: false };
+        return { ...none, podmanProblem: "Podman isn't installed." };
       }
-      const follow = buildProgress();
-      const result = await podman(
-        bin,
-        ["--connection", machine, "build", "-t", boxImage(imageDir), imageDir],
-        (line) => {
-          const next = follow(line);
-          if (next) {
-            onProgress(next);
-          }
-        },
-      );
-      if (result.code !== 0) {
-        throw new Error(`The box image didn't build: ${result.stderr.trim().split("\n").at(-1)}`);
+      // boxd is copied in each time it starts, so it is always installed.
+      return { found: true, running: true, boxdInstalled: true, imageBuilt: image.code === 0 };
+    },
+    buildImage: (_machine: string, onProgress: (progress: SetupProgress) => void) =>
+      buildImage(bin, [], imageDir, onProgress),
+  };
+}
+
+async function buildImage(
+  bin: string,
+  connection: string[],
+  imageDir: string,
+  onProgress: (progress: SetupProgress) => void,
+) {
+  const missing = missingSources(imageDir);
+  if (missing.length > 0) {
+    throw new Error(
+      `Bee Bot's installation is missing files the computer needs (${missing.join(", ")}). Reinstall Bee Bot.`,
+    );
+  }
+  const follow = buildProgress();
+  const result = await podman(
+    bin,
+    [...connection, "build", "-t", boxImage(imageDir), imageDir],
+    (line) => {
+      const next = follow(line);
+      if (next) {
+        onProgress(next);
       }
     },
-  };
+  );
+  if (result.code !== 0) {
+    throw new Error(`The box image didn't build: ${result.stderr.trim().split("\n").at(-1)}`);
+  }
 }
 
 function problemText(machine: string, probe: MachineProbe) {

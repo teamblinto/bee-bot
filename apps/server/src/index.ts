@@ -1,4 +1,6 @@
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
@@ -22,7 +24,7 @@ import {
 } from "./analytics.ts";
 import { boxLayout } from "./boxEngine.ts";
 import { startBoxHost, windowsPodman } from "./boxHost.ts";
-import { createBoxService, defaultBoxMachine, podmanMachine } from "./boxSetup.ts";
+import { createBoxService, defaultBoxMachine, nativePodman, podmanMachine } from "./boxSetup.ts";
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
 import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
@@ -31,6 +33,7 @@ import { spawnCuaDriver } from "./cuaScreen.ts";
 import { fakeRunTurn, type RunTurn } from "./engine.ts";
 import { spawnHostDriver } from "./hostScreen.ts";
 import { setupPath } from "./hostSetup.ts";
+import { logJson } from "./jsonLog.ts";
 import { pruneEvents } from "./retention.ts";
 import { startServer } from "./server.ts";
 import { engineChecked, trackUsage } from "./usageEvents.ts";
@@ -114,7 +117,9 @@ function wipeRuntime(dataDir: string) {
   }
 }
 
-async function boot(bootstrap: Bootstrap) {
+// Server mode: one beebotd per user on a Linux host, reached only through `socketPath`.
+async function boot(bootstrap: Bootstrap, socketPath?: string) {
+  const serverMode = socketPath !== undefined;
   const store = openStore(bootstrap.dataDir);
   if (bootstrap.telemetry) {
     startAnalytics({
@@ -139,12 +144,15 @@ async function boot(bootstrap: Bootstrap) {
   const podmanBin =
     process.platform === "win32" && NodeFS.existsSync(windowsPodman) ? windowsPodman : "podman";
   const installDir = "beebot/boxd";
-  const machine = podmanMachine(podmanBin, installDir);
+  const machine = serverMode ? nativePodman("podman") : podmanMachine(podmanBin, installDir);
   // R7: a box bot's lane, for its turns and its egress alike. Unattended runs without one are
   // refused at admission, so here an attended turn keeps the account's own lane.
   const boxLane = (botId: string, accountLane: EngineLane) => store.boxLane(botId) ?? accountLane;
   const boxes = createBoxService({
-    machine: () => store.boxMachine() ?? process.env.BEEBOT_PODMAN_MACHINE ?? defaultBoxMachine,
+    machine: () =>
+      serverMode
+        ? "native"
+        : (store.boxMachine() ?? process.env.BEEBOT_PODMAN_MACHINE ?? defaultBoxMachine),
     probe: machine.probe,
     initMachine: machine.init,
     startMachine: machine.start,
@@ -154,7 +162,9 @@ async function boot(bootstrap: Bootstrap) {
     markSetUp: store.setBoxMachineSetUp,
     startHost: (name) =>
       startBoxHost({
-        host: { kind: "podman-machine", podman: podmanBin, machine: name },
+        host: serverMode
+          ? { kind: "native", node: process.execPath }
+          : { kind: "podman-machine", podman: podmanBin, machine: name },
         installDir,
         owner: store.environmentId,
         vault,
@@ -163,7 +173,10 @@ async function boot(bootstrap: Bootstrap) {
           const input = store.egress.egressInput(botId);
           return input && { ...input, lane: boxLane(botId, input.lane) };
         },
-        beebotdPort: () => port,
+        relay: () =>
+          socketPath === undefined
+            ? NodeNet.connect(port, "127.0.0.1")
+            : NodeNet.connect(socketPath),
         // A connector's box is no bot's, so it has no row.
         setBox: (botId, state, reason) =>
           connectorOfBox(botId) === undefined && store.boxes.setBox(botId, state, reason),
@@ -191,6 +204,9 @@ async function boot(bootstrap: Bootstrap) {
         ? boxed.codex(launched)
         : boxed.claude(launched);
     }
+    if (serverMode) {
+      throw new Error("only box bots run in server mode");
+    }
     return turn.launch.engineAccountId === "codex" ? host.codex(turn) : host.claude(turn);
   };
   const probe = async (lane: EngineLane) => {
@@ -198,7 +214,7 @@ async function boot(bootstrap: Bootstrap) {
     trackUsage(engineChecked("claude", status));
     return status;
   };
-  const hostControl = bootstrap.hostControl === true && process.platform === "win32";
+  const hostControl = !serverMode && bootstrap.hostControl === true && process.platform === "win32";
   const { cuaDriver } = bootstrap;
   if (hostControl && !cuaDriver) {
     console.error("beebotd: no cua-driver, so bots on This PC move the owner's own pointer");
@@ -226,12 +242,19 @@ async function boot(bootstrap: Bootstrap) {
       ? () => spawnHostDriver(NodePath.join(dataDir, "runtime"), process.execPath)
       : undefined,
     cuaDriver: hostControl && cuaDriver ? () => spawnCuaDriver(cuaDriver) : undefined,
+    serverMode,
+    socketPath,
   });
   port = server.port;
   void boxes.refresh();
-  console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
+  if (serverMode) {
+    console.info(`beebotd: listening on ${socketPath}`);
+  } else {
+    console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
+  }
   const { pauseReason } = await probe(store.accountLane("claude"));
-  if (pauseReason) {
+  // The host's own CLI says nothing about box bots, the only ones server mode runs.
+  if (pauseReason && !serverMode) {
     console.error(`beebotd: Claude bots paused: ${pauseReason}`);
     store.pauseReadyBots("claude", pauseReason);
   }
@@ -271,11 +294,11 @@ for (const event of ["uncaughtException", "unhandledRejection"] as const) {
   });
 }
 
-function start(bootstrap: Bootstrap | undefined) {
+function start(bootstrap: Bootstrap | undefined, socketPath?: string) {
   if (!bootstrap) {
     exitWith(noRestartExitCodes.invalidBootstrap, "invalid bootstrap");
   }
-  const running = boot(bootstrap);
+  const running = boot(bootstrap, socketPath);
   running.catch(async (error: unknown) => {
     console.error(error);
     await crash(error);
@@ -291,9 +314,43 @@ function readBootstrapFile(path: string | undefined) {
   }
 }
 
+// Fails closed: without its own vault key a cell never starts.
+function serverBootstrap({
+  BEEBOT_DATA_DIR: dataDir,
+  BEEBOT_SOCKET: socketPath,
+  CREDENTIALS_DIRECTORY: credentials,
+}: NodeJS.ProcessEnv) {
+  if (!dataDir || !socketPath) {
+    return exitWith(
+      noRestartExitCodes.invalidBootstrap,
+      "server mode needs BEEBOT_DATA_DIR and BEEBOT_SOCKET",
+    );
+  }
+  const vault = readVaultKeyFile({
+    BEEBOT_VAULT_KEY_FILE: credentials && NodePath.join(credentials, "vault-key"),
+  });
+  if (vault.status !== "ready") {
+    return exitWith(
+      noRestartExitCodes.invalidBootstrap,
+      `no vault key at $CREDENTIALS_DIRECTORY/vault-key (${vault.problem})`,
+    );
+  }
+  // The token guards only the TCP listener, which server mode never opens.
+  const token = NodeCrypto.randomBytes(32).toString("base64url");
+  const bootstrap: Bootstrap = { port: 0, token, dataDir, allowedOrigins: [], vault };
+  return { bootstrap, socketPath };
+}
+
 const fileFlag = process.argv.indexOf("--bootstrap", 2);
 
-if (fileFlag === -1) {
+if (process.env.BEEBOT_SERVER_MODE === "1") {
+  logJson();
+  const { bootstrap, socketPath } = serverBootstrap(process.env);
+  const running = start(bootstrap, socketPath);
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => void running.then(({ stop }) => stop()).then(() => process.exit(0)));
+  }
+} else if (fileFlag === -1) {
   const bootstrapTimer = setTimeout(
     () => exitWith(noRestartExitCodes.invalidBootstrap, "no bootstrap on stdin"),
     bootstrapTimeoutMs,

@@ -40,6 +40,8 @@ type Options = {
   clock?: AwakeClock | undefined;
   // Whether a box runtime can run boxes now. Only a box bot may run unattended.
   boxesReady?: (() => boolean) | undefined;
+  // Server mode: a bot outside a box never runs, attended or not.
+  boxOnly?: boolean | undefined;
   // Whatever else a stopped bot leaves waiting, such as a takeover.
   onStopBot?: ((botId: string) => void) | undefined;
   // Puts the files a turn's input names into the bot's inbox, before the turn starts.
@@ -132,6 +134,7 @@ export function createSupervisor({
   outboxHandlers = new Map(),
   clock = createAwakeClock(),
   boxesReady = () => false,
+  boxOnly = false,
   onStopBot = () => {},
   copyInbox = async () => {},
 }: Options) {
@@ -196,6 +199,10 @@ export function createSupervisor({
     // Everything this wake was for was already answered by a run that started after it.
     if (!hasInput) {
       store.closeWake(wake.id);
+      return;
+    }
+    if (boxOnly && boundary !== "box") {
+      store.refuseWake(wake, "box_unavailable");
       return;
     }
     const box = boundary !== "box" ? "none" : boxesReady() ? "ready" : "unavailable";
