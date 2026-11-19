@@ -10,8 +10,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { createAuth, sessionCookie } from "./auth.ts";
-import { createGateway, type Provision, safeNext } from "./gateway.ts";
-import { createInvite, inviteTtlMs, openGatewayDb } from "./store.ts";
+import { createGateway, type ProvisionReply, safeNext } from "./gateway.ts";
+import { createInvite, inviteTtlMs, openGatewayDb, openInvite } from "./store.ts";
 
 const origin = "https://bee.example.test";
 const password = "correct horse battery";
@@ -21,8 +21,9 @@ let cellsDir: string;
 let db: DatabaseSync;
 let base: string;
 let provisioned: string[];
-let provisionCalls: string[];
-let provisionResult: Awaited<ReturnType<Provision>>;
+let provisionCalls: string[][];
+let provisionResult: ProvisionReply;
+let statusOf: (cell: string) => Promise<ProvisionReply>;
 let cells: Map<string, NodeHttp.Server>;
 // Sign-in is rate limited per client address, so each test is its own client.
 let clientIp = 0;
@@ -81,18 +82,30 @@ beforeEach(async () => {
   cells = new Map();
   clientIp += 1;
   provisionResult = { ok: true };
+  statusOf = async (cell) => ({
+    ok: true,
+    cell,
+    active: "active",
+    memoryMax: String(4 * 2 ** 30),
+    cpuQuotaPerSec: "2s",
+    tasksMax: "4096",
+  });
   const server = createGateway({
     auth: await createAuth(db, { secret: "s".repeat(32), origin }),
     db,
     origin,
     webDir: NodePath.join(dir, "web"),
     cellsDir,
-    provision: async (verb, cell) => {
-      provisionCalls.push(`${verb} ${cell}`);
+    provision: async (args) => {
+      const [verb, cell = ""] = args;
+      provisionCalls.push(args);
+      if (verb === "status") {
+        return statusOf(cell);
+      }
       if (verb === "add") {
         provisioned.push(cell);
       }
-      if (provisionResult.ok && verb !== "suspend") {
+      if (provisionResult.ok && (verb === "add" || verb === "resume")) {
         await fakeCell(cell);
       }
       return provisionResult;
@@ -384,17 +397,17 @@ describe("admin", () => {
     expect((await act("suspend", { cookie: admin, origin: "https://evil.example" })).status).toBe(
       403,
     );
-    expect((await act("suspend", { cookie: user })).status).toBe(403);
+    expect((await act("suspend", { cookie: user })).status).toBe(404);
     expect(socket.socket.destroyed).toBe(false);
 
     expect((await act("suspend")).status).toBe(200);
     await socket.closed;
-    expect(provisionCalls.at(-1)).toBe(`suspend ${cell}`);
+    expect(provisionCalls.at(-1)).toEqual(["suspend", cell]);
     expect((await fetch(`${base}/health`, { headers: { cookie: user } })).status).toBe(503);
     expect((await post("/login", { email: "uma@example.test", password })).status).toBe(403);
 
     expect((await act("resume")).status).toBe(200);
-    expect(provisionCalls.at(-1)).toBe(`resume ${cell}`);
+    expect(provisionCalls.at(-1)).toEqual(["resume", cell]);
     expect((await fetch(`${base}/health`, { headers: { cookie: user } })).status).toBe(200);
     expect((await act("resume")).status).toBe(409);
   });
@@ -415,6 +428,236 @@ describe("admin", () => {
       headers: { cookie: admin, origin: "https://evil.example" },
     });
     expect(users.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+describe("admin pages", () => {
+  const page = (path: string, cookie: string) =>
+    fetch(`${base}${path}`, { headers: { cookie }, redirect: "manual" });
+
+  it("are not found by anyone but an admin, and never reach a cell", async () => {
+    const admin = await signUp("ava@example.test", true);
+    const user = await signUp("ul@example.test");
+    const cell = provisioned[1]!;
+    for (const path of ["/admin", "/admin/api/users", `/admin/users/${cell}`, "/admin/x"]) {
+      const reply = await page(path, user);
+      expect(reply.status).toBe(404);
+      expect(await reply.json()).toEqual({ code: "not_found" });
+    }
+    expect((await post("/admin/users/suspend", { cell }, { cookie: user })).status).toBe(404);
+    expect(
+      (await post("/admin/invites", { email: "x@example.test" }, { cookie: user })).status,
+    ).toBe(404);
+    expect((await fetch(`${base}/admin/api/users`)).status).toBe(404);
+    const signedOut = await fetch(`${base}/admin`, { redirect: "manual" });
+    expect(signedOut.headers.get("location")).toBe("/login?next=%2Fadmin");
+    // The admin's own unknown path is the gateway's 404, not their cell's.
+    expect(await (await page("/admin/x", admin)).json()).toEqual({ code: "not_found" });
+    expect(provisionCalls.filter(([verb]) => verb === "suspend")).toEqual([]);
+  });
+
+  it("list users and their cells' health, with a policy that runs no script", async () => {
+    const admin = await signUp("ali@example.test", true);
+    await signUp("ux@example.test");
+    const reply = await page("/admin", admin);
+    expect(reply.status).toBe(200);
+    const policy = reply.headers.get("content-security-policy")!;
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).toContain("frame-ancestors 'none'");
+    expect(policy).not.toContain("script-src");
+    const html = await reply.text();
+    expect(html).not.toContain("<script");
+    expect(html).toContain(provisioned[1]);
+    expect(html.match(/<td>active<\/td>\n<td>answering<\/td>/g)).toHaveLength(2);
+  });
+
+  it("create an invite and show its link once", async () => {
+    const admin = await signUp("amy@example.test", true);
+    const reply = await post(
+      "/admin/invites",
+      { email: "new@example.test", admin: "true" },
+      {
+        cookie: admin,
+      },
+    );
+    expect(reply.status).toBe(200);
+    const token = /\/invite\/([\w-]+)"/.exec(await reply.text())![1]!;
+    expect(openInvite(db, token)).toEqual({ email: "new@example.test", admin: true });
+    expect(await (await page("/admin", admin)).text()).not.toContain(token);
+  });
+
+  it("refuse a form post from another origin, or with none", async () => {
+    const admin = await signUp("axe@example.test", true);
+    await signUp("uz@example.test");
+    const cell = provisioned[1]!;
+    const evil = await post(
+      "/admin/users/suspend",
+      { cell },
+      {
+        cookie: admin,
+        origin: "https://evil.example",
+      },
+    );
+    expect(evil.status).toBe(403);
+    const none = await fetch(`${base}/admin/invites`, {
+      method: "POST",
+      headers: { cookie: admin, "content-type": "application/x-www-form-urlencoded" },
+      body: "email=x%40example.test",
+    });
+    expect(none.status).toBe(403);
+    expect(provisionCalls.filter(([verb]) => verb === "suspend")).toEqual([]);
+    expect(db.prepare("SELECT count(*) AS n FROM invite").get()).toEqual({ n: 2 });
+  });
+
+  it("won't let an admin suspend or delete themselves, and close to a suspended admin", async () => {
+    const first = await signUp("ann@example.test", true);
+    const second = await signUp("ben@example.test", true);
+    const [firstCell, secondCell] = provisioned;
+    const self = await post("/admin/users/suspend", { cell: firstCell! }, { cookie: first });
+    expect(self.status).toBe(409);
+    expect(await self.text()).toContain("your own account");
+    const deleted = await post(
+      "/admin/users/delete",
+      { cell: firstCell!, confirm: "ann@example.test" },
+      { cookie: first },
+    );
+    expect(deleted.status).toBe(409);
+    expect(provisionCalls.some(([verb]) => verb === "suspend" || verb === "delete")).toBe(false);
+
+    expect(
+      (await post("/admin/users/suspend", { cell: secondCell! }, { cookie: first })).status,
+    ).toBe(303);
+    // A suspended admin's open session is no longer an admin's.
+    expect((await page("/admin", second)).status).toBe(404);
+    expect(
+      (await post("/admin/users/suspend", { cell: firstCell! }, { cookie: second })).status,
+    ).toBe(404);
+  });
+
+  it("set a quota from a checked form, with the helper's exact arguments", async () => {
+    const admin = await signUp("ari@example.test", true);
+    await signUp("uq@example.test");
+    const cell = provisioned[1]!;
+    const form = await (await page(`/admin/users/${cell}`, admin)).text();
+    expect(form).toContain('name="memory" value="4G"');
+    expect(form).toContain('name="cpu" value="200%"');
+    expect(form).toContain('name="tasks" value="4096"');
+    expect(form).not.toContain('name="boxes"');
+
+    const quota = (fields: Record<string, string>) =>
+      post("/admin/users/quota", { cell, ...fields }, { cookie: admin });
+    const saved = await quota({ memory: "8G", cpu: "150", tasks: "2048" });
+    expect(saved.status).toBe(303);
+    expect(saved.headers.get("location")).toBe(`/admin/users/${cell}?saved`);
+    expect(provisionCalls.at(-1)).toEqual([
+      "quota",
+      cell,
+      "--memory",
+      "8G",
+      "--cpu",
+      "150%",
+      "--tasks",
+      "2048",
+    ]);
+    await quota({ memory: "1T", cpu: "50%", tasks: "64", boxes: "3", "budget-usd": "25.50" });
+    expect(provisionCalls.at(-1)).toEqual([
+      "quota",
+      cell,
+      "--memory",
+      "1T",
+      "--cpu",
+      "50%",
+      "--tasks",
+      "64",
+      "--boxes",
+      "3",
+      "--budget-usd",
+      "25.50",
+    ]);
+
+    const calls = provisionCalls.length;
+    for (const bad of [
+      { memory: "--confirm", cpu: "100%", tasks: "1" },
+      { memory: "8G --confirm", cpu: "100%", tasks: "1" },
+      { memory: "8g", cpu: "100%", tasks: "1" },
+      { memory: "8G", cpu: "0%", tasks: "1" },
+      { memory: "8G", cpu: "100%", tasks: "" },
+      { memory: "8G", cpu: "100%", tasks: "1", boxes: "-1" },
+    ]) {
+      const refused = await quota(bad);
+      expect(refused.status).toBe(400);
+      expect(await refused.text()).toContain('role="alert"');
+    }
+    expect(provisionCalls.slice(calls).filter(([verb]) => verb === "quota")).toEqual([]);
+
+    statusOf = async () => ({ ok: true, active: "active", boxes: 5, budgetUsd: 10 });
+    const extra = await (await page(`/admin/users/${cell}`, admin)).text();
+    expect(extra).toContain('name="boxes" value="5"');
+    expect(extra).toContain('name="budget-usd" value="10"');
+  });
+
+  it("delete a user only once their email is typed", async () => {
+    const admin = await signUp("abi@example.test", true);
+    const user = await signUp("ud@example.test");
+    const cell = provisioned[1]!;
+    const socket = await openSocket(user);
+    const wrong = await post("/admin/users/delete", { cell, confirm: "nope" }, { cookie: admin });
+    expect(wrong.status).toBe(400);
+    expect(provisionCalls.some(([verb]) => verb === "delete")).toBe(false);
+
+    const done = await post(
+      "/admin/users/delete",
+      { cell, confirm: "UD@example.test" },
+      { cookie: admin },
+    );
+    expect(done.status).toBe(303);
+    expect(provisionCalls.at(-1)).toEqual(["delete", cell, "--confirm"]);
+    await socket.closed;
+    expect(db.prepare(`SELECT count(*) AS n FROM "user"`).get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT count(*) AS n FROM member").get()).toEqual({ n: 1 });
+    expect((await fetch(`${base}/health`, { headers: { cookie: user } })).status).toBe(401);
+    expect((await post("/login", { email: "ud@example.test", password })).status).toBe(401);
+  });
+
+  it("aren't held up by a cell that never answers", async () => {
+    const admin = await signUp("ace@example.test", true);
+    await signUp("uh@example.test");
+    const cell = provisioned[1]!;
+    await new Promise((resolve) => {
+      const server = cells.get(cell)!;
+      server.close(resolve);
+      server.closeAllConnections();
+    });
+    const hung = NodeHttp.createServer(() => {});
+    hung.listen(NodePath.join(cellsDir, cell, "beebotd.sock"));
+    await once(hung, "listening");
+    cleanups.push(() => {
+      hung.closeAllConnections();
+      hung.close();
+    });
+    const answered = statusOf;
+    statusOf = (asked) => (asked === cell ? new Promise(() => {}) : answered(asked));
+
+    const started = Date.now();
+    const reply = await page("/admin", admin);
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(reply.status).toBe(200);
+    const html = await reply.text();
+    expect(html).toContain("<td>active</td>\n<td>answering</td>");
+    expect(html).toContain("<td>unknown</td>\n<td>not answering</td>");
+  });
+});
+
+describe("gateway health", () => {
+  it("is ok while its database is usable, and says nothing else", async () => {
+    const reply = await fetch(`${base}/_gateway/health`);
+    expect(reply.status).toBe(200);
+    expect(await reply.json()).toEqual({ ok: true });
+    db.close();
+    const down = await fetch(`${base}/_gateway/health`);
+    expect(down.status).toBe(503);
+    expect(await down.json()).toEqual({ ok: false });
+    db = openGatewayDb(NodePath.join(dir, "gateway.db"));
   });
 });
 

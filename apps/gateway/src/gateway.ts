@@ -7,12 +7,21 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { type Auth, createPasswordUser, passwordProblem } from "./auth.ts";
 import { log } from "./log.ts";
-import { invitePage, loginPage, logoutPage, messagePage } from "./pages.ts";
+import {
+  invitePage,
+  loginPage,
+  logoutPage,
+  messagePage,
+  type QuotaValues,
+  userPage,
+  usersPage,
+} from "./pages.ts";
 import {
   addMember,
   cellPattern,
   claimInvite,
   createInvite,
+  deleteMember,
   findMember,
   findMemberByCell,
   listUsers,
@@ -22,18 +31,18 @@ import {
   setMemberState,
 } from "./store.ts";
 
-export type Provision = (
-  verb: "add" | "suspend" | "resume",
-  cell: string,
-) => Promise<{ ok: true } | { ok: false; error: string }>;
+export type ProvisionReply = { ok: true; [field: string]: unknown } | { ok: false; error: string };
+
+// The arguments after `user`, like ["quota", cell, "--memory", "4G", ...].
+export type Provision = (args: string[], timeoutMs?: number) => Promise<ProvisionReply>;
 
 // The root helper prints one JSON object: {"ok":true,...} or {"ok":false,"error":"..."}.
-export const sudoProvision: Provision = (verb, cell) =>
+export const sudoProvision: Provision = (args, timeoutMs = 5 * 60_000) =>
   new Promise((resolve) => {
     NodeChildProcess.execFile(
       "sudo",
-      ["-n", "/usr/local/sbin/beebot-provision", "user", verb, cell],
-      { timeout: 5 * 60_000 },
+      ["-n", "/usr/local/sbin/beebot-provision", "user", ...args],
+      { timeout: timeoutMs },
       (error, stdout, stderr) => {
         let reply: { ok?: unknown; error?: unknown } | undefined;
         try {
@@ -41,7 +50,7 @@ export const sudoProvision: Provision = (verb, cell) =>
         } catch {}
         resolve(
           !error && reply?.ok === true
-            ? { ok: true }
+            ? { ...reply, ok: true }
             : {
                 ok: false,
                 error: String(reply?.error ?? (stderr.trim() || error?.message || "no reply")),
@@ -102,9 +111,87 @@ const contentTypes: Record<string, string> = {
 
 const pageSecurity = {
   "content-security-policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "cache-control": "no-store",
 };
+
+const healthTimeoutMs = 2000;
+
+const within = <T>(ms: number, work: Promise<T>, late: T) =>
+  Promise.race([work, new Promise<T>((resolve) => setTimeout(resolve, ms, late).unref())]);
+
+// beebotd answers GET /health on its socket without a token.
+function answers(socketPath: string) {
+  return new Promise<boolean>((resolve) => {
+    const request = NodeHttp.get(
+      // A fresh connection each time, so a pooled one can't answer for a socket that's gone.
+      { socketPath, path: "/health", timeout: healthTimeoutMs, agent: false },
+      (reply) => {
+        reply.resume();
+        resolve(reply.statusCode === 200);
+      },
+    );
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => resolve(false));
+  });
+}
+
+type UserVerb = "suspend" | "resume" | "quota" | "delete";
+
+const refusal = (status: number, code: string, error: string) => ({
+  status,
+  body: { ok: false as const, code, error },
+});
+
+// The helper's own patterns, matched here too, so no value can pass as another flag.
+const quotaFields = {
+  memory: /^[1-9][0-9]{0,5}[KMGT]$/,
+  cpu: /^[1-9][0-9]{0,4}%$/,
+  tasks: /^[1-9][0-9]{0,6}$/,
+  boxes: /^[0-9]{1,4}$/,
+  "budget-usd": /^[0-9]{1,6}(\.[0-9]{1,2})?$/,
+};
+
+export function quotaArgs(form: URLSearchParams) {
+  const args: string[] = [];
+  for (const [name, pattern] of Object.entries(quotaFields)) {
+    let value = form.get(name)?.trim() ?? "";
+    if (name === "cpu" && /^\d+$/.test(value)) {
+      value += "%";
+    }
+    // Boxes and budget are sent only when the form has them, which it does when status reports them.
+    if (value === "" && (name === "boxes" || name === "budget-usd")) {
+      continue;
+    }
+    if (!pattern.test(value)) {
+      return undefined;
+    }
+    args.push(`--${name}`, value);
+  }
+  return args;
+}
+
+const memoryUnits = [
+  ["T", 2 ** 40],
+  ["G", 2 ** 30],
+  ["M", 2 ** 20],
+  ["K", 2 ** 10],
+] as const;
+
+// From `status`: MemoryMax in bytes and CPUQuotaPerSecUSec like "2s" or "500ms", as systemd shows them.
+function quotaValues(status: Record<string, unknown>): QuotaValues {
+  const bytes = Number(status.memoryMax);
+  const unit = memoryUnits.find(([, size]) => bytes > 0 && bytes % size === 0);
+  const cpu = /^(\d+(?:\.\d+)?)(s|ms)$/.exec(String(status.cpuQuotaPerSec));
+  const optional = (value: unknown) => (value == null ? undefined : String(value));
+  return {
+    memory: unit ? `${bytes / unit[1]}${unit[0]}` : "",
+    cpu: cpu ? `${Math.round(Number(cpu[1]) * (cpu[2] === "s" ? 100 : 0.1))}%` : "",
+    tasks: /^\d+$/.test(String(status.tasksMax)) ? String(status.tasksMax) : "",
+    boxes: optional(status.boxes),
+    "budget-usd": optional(status.budgetUsd),
+  };
+}
 
 // Only a path on this origin: `/`, then anything but a second slash or a backslash.
 export function safeNext(next: string | null | undefined) {
@@ -199,7 +286,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
   }
 
   async function provisionCell(userId: string, cell: string) {
-    const provisioned = await provision("add", cell);
+    const provisioned = await provision(["add", cell]);
     if (provisioned.ok) {
       setMemberState(db, userId, "ready");
       log("info", "cell provisioned", { userId, cell });
@@ -359,48 +446,151 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     redirect(response, "/login", signedOut?.headers.getSetCookie() ?? []);
   }
 
+  // Bounded, so one dead cell can't hold up the users page.
+  const cellStatus = (cell: string) =>
+    within(healthTimeoutMs, provision(["status", cell], healthTimeoutMs), {
+      ok: false,
+      error: "timed out",
+    });
+
+  const unitOf = (status: ProvisionReply) =>
+    status.ok ? String(status.active ?? "unknown") : "unknown";
+
+  async function showUsers(
+    response: NodeHttp.ServerResponse,
+    status: number,
+    selfCell: string,
+    notice: { invite?: string; error?: string } = {},
+  ) {
+    const users = await Promise.all(
+      listUsers(db).map(async (user) => {
+        const [unit, answering] = await Promise.all([
+          cellStatus(user.cell),
+          answers(cellSocket(user.cell)),
+        ]);
+        return { ...user, unit: unitOf(unit), answering };
+      }),
+    );
+    sendPage(response, status, usersPage(users, selfCell, notice));
+  }
+
+  async function showUser(
+    response: NodeHttp.ServerResponse,
+    status: number,
+    cell: string,
+    notice: { error?: string; saved?: boolean } = {},
+  ) {
+    const member = cellPattern.test(cell) ? findMemberByCell(db, cell) : undefined;
+    if (!member) {
+      sendJson(response, 404, { code: "not_found" });
+      return;
+    }
+    const reply = await cellStatus(cell);
+    sendPage(
+      response,
+      status,
+      userPage(member, unitOf(reply), quotaValues(reply.ok ? reply : {}), notice),
+    );
+  }
+
+  async function changeUser(actorId: string, verb: UserVerb, form: URLSearchParams) {
+    const cell = form.get("cell") ?? "";
+    const member = cellPattern.test(cell) ? findMemberByCell(db, cell) : undefined;
+    if (!member) {
+      return refusal(404, "not_found", "There's no such user.");
+    }
+    // Only an unsuspended admin gets here, so refusing their own account always leaves an admin.
+    if ((verb === "suspend" || verb === "delete") && member.user_id === actorId) {
+      return refusal(409, "self", "You can't suspend or delete your own account.");
+    }
+    if (verb === "resume" && member.state !== "suspended") {
+      return refusal(409, "not_suspended", "This user isn't suspended.");
+    }
+    if (verb === "delete" && form.get("confirm")?.trim().toLowerCase() !== member.email) {
+      return refusal(400, "unconfirmed", `Type ${member.email} to delete this user.`);
+    }
+    const quota = verb === "quota" ? quotaArgs(form) : [];
+    if (!quota) {
+      return refusal(
+        400,
+        "bad_quota",
+        "Use memory like 4G, CPU like 200%, and whole numbers for tasks and boxes.",
+      );
+    }
+    // Fails closed: the gateway stops proxying before the cell stops, and starts after it starts.
+    if (verb === "suspend" || verb === "delete") {
+      setMemberState(db, member.user_id, "suspended");
+      closeSockets(member.user_id);
+    }
+    const result = await provision(
+      verb === "delete" ? ["delete", cell, "--confirm"] : [verb, cell, ...quota],
+    );
+    if (result.ok && verb === "resume") {
+      setMemberState(db, member.user_id, "ready");
+    }
+    if (result.ok && verb === "delete") {
+      await (await auth.$context).internalAdapter.deleteUser(member.user_id);
+      deleteMember(db, member.user_id);
+    }
+    log(result.ok ? "info" : "error", `${verb} ${result.ok ? "done" : "failed"}`, {
+      cell,
+      ...(!result.ok && { error: result.error }),
+    });
+    return result.ok
+      ? { status: 200, body: result }
+      : refusal(502, "provision_failed", `The cell didn't change: ${result.error}`);
+  }
+
   async function handleAdmin(
     request: NodeHttp.IncomingMessage,
     response: NodeHttp.ServerResponse,
     url: URL,
+    actor: { userId: string; cell: string },
   ) {
-    const toggle = /^\/admin\/api\/users\/(suspend|resume)$/.exec(url.pathname)?.[1];
-    if (request.method === "GET" && url.pathname === "/admin/api/users") {
+    const api = url.pathname.startsWith("/admin/api/");
+    const route = url.pathname.slice(api ? "/admin/api".length : "/admin".length) || "/";
+    const verb = /^\/users\/(suspend|resume|quota|delete)$/.exec(route)?.[1] as
+      | UserVerb
+      | undefined;
+    const managed = /^\/users\/(bb[0-9a-f]{10})$/.exec(route)?.[1];
+    if (request.method === "GET" && api && route === "/users") {
       sendJson(response, 200, { users: listUsers(db) });
-    } else if (request.method === "POST" && (toggle === "suspend" || toggle === "resume")) {
-      const cell = (await readForm(request)).get("cell") ?? "";
-      const member = cellPattern.test(cell) ? findMemberByCell(db, cell) : undefined;
-      if (!member) {
-        sendJson(response, 404, { code: "not_found" });
-        return;
-      }
-      if (toggle === "resume" && member.state !== "suspended") {
-        sendJson(response, 409, { code: "not_suspended" });
-        return;
-      }
-      // Fails closed: the gateway stops proxying before the cell stops, and starts after it starts.
-      if (toggle === "suspend") {
-        setMemberState(db, member.user_id, "suspended");
-        closeSockets(member.user_id);
-      }
-      const result = await provision(toggle, cell);
-      if (result.ok && toggle === "resume") {
-        setMemberState(db, member.user_id, "ready");
-      }
-      log(result.ok ? "info" : "error", `${toggle} ${result.ok ? "done" : "failed"}`, {
-        cell,
-        ...(!result.ok && { error: result.error }),
-      });
-      sendJson(response, result.ok ? 200 : 502, result);
-    } else if (request.method === "POST" && url.pathname === "/admin/api/invites") {
+    } else if (request.method === "GET" && !api && route === "/") {
+      await showUsers(response, 200, actor.cell);
+    } else if (request.method === "GET" && !api && managed) {
+      await showUser(response, 200, managed, { saved: url.searchParams.has("saved") });
+    } else if (request.method === "POST" && route === "/invites") {
       const form = await readForm(request);
       const email = form.get("email")?.trim() ?? "";
       if (!/^[^\s@]+@[^\s@]+$/.test(email)) {
-        sendJson(response, 400, { code: "bad_request" });
+        if (api) {
+          sendJson(response, 400, { code: "bad_request" });
+        } else {
+          await showUsers(response, 400, actor.cell, { error: "Enter an email address." });
+        }
         return;
       }
-      const token = createInvite(db, email, form.get("admin") === "true");
-      sendJson(response, 201, { url: `${origin}/invite/${token}` });
+      const invite = `${origin}/invite/${createInvite(db, email, form.get("admin") === "true")}`;
+      log("info", "invite created", { by: actor.userId });
+      if (api) {
+        sendJson(response, 201, { url: invite });
+      } else {
+        await showUsers(response, 200, actor.cell, { invite });
+      }
+    } else if (request.method === "POST" && verb) {
+      const form = await readForm(request);
+      const result = await changeUser(actor.userId, verb, form);
+      if (api) {
+        sendJson(response, result.status, result.body);
+      } else if (result.body.ok) {
+        redirect(response, verb === "quota" ? `/admin/users/${form.get("cell")}?saved` : "/admin");
+      } else if (verb === "quota" || verb === "delete") {
+        await showUser(response, result.status, form.get("cell") ?? "", {
+          error: result.body.error,
+        });
+      } else {
+        await showUsers(response, result.status, actor.cell, { error: result.body.error });
+      }
     } else {
       sendJson(response, 404, { code: "not_found" });
     }
@@ -501,7 +691,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       return { status: 401, code: "unauthorized" } as const;
     }
     if (member.state !== "ready") {
-      return { status: 503, code: "cell_unavailable", member } as const;
+      return { status: 503, code: "cell_unavailable", member, session } as const;
     }
     return { member, session, socketPath: cellSocket(member.cell) };
   }
@@ -517,6 +707,19 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       sendJson(response, 403, { code: "origin_refused" });
       return;
     }
+    if (safe && url.pathname === "/_gateway/health") {
+      let ok = false;
+      try {
+        db.prepare("SELECT 1 FROM member LIMIT 1").get();
+        ok = true;
+      } catch {}
+      sendJson(response, ok ? 200 : 503, { ok });
+      return;
+    }
+    if (url.pathname.startsWith("/_gateway/")) {
+      sendJson(response, 404, { code: "not_found" });
+      return;
+    }
     if (url.pathname === "/login") {
       return handleLogin(request, response, url);
     }
@@ -529,6 +732,24 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     }
 
     const resolved = await resolveCell(request.headers);
+    // The gateway's own, never a cell's: anyone but an unsuspended admin finds nothing here.
+    if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+      if (resolved.status === 401 && safe && url.pathname === "/admin") {
+        redirect(response, "/login?next=%2Fadmin");
+      } else if (
+        resolved.status === 401 ||
+        !resolved.member.admin ||
+        resolved.member.state === "suspended"
+      ) {
+        sendJson(response, 404, { code: "not_found" });
+      } else {
+        await handleAdmin(request, response, url, {
+          userId: resolved.session.user.id,
+          cell: resolved.member.cell,
+        });
+      }
+      return;
+    }
     if (resolved.status === 401) {
       if (safe && (url.pathname === "/" || url.pathname === "/index.html")) {
         redirect(response, `/login?next=${encodeURIComponent(url.pathname + url.search)}`);
@@ -536,13 +757,6 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
         sendJson(response, 401, { code: "unauthorized" });
       }
       return;
-    }
-    if (url.pathname.startsWith("/admin/api/")) {
-      if (!resolved.member.admin) {
-        sendJson(response, 403, { code: "forbidden" });
-        return;
-      }
-      return handleAdmin(request, response, url);
     }
     if (resolved.status === 503) {
       sendJson(response, 503, { code: resolved.code });

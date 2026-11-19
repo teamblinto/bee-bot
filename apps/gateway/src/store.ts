@@ -89,9 +89,16 @@ export function retryFailedMember(db: DatabaseSync, userId: string) {
 }
 
 export function findMemberByCell(db: DatabaseSync, cell: string) {
-  return db.prepare("SELECT user_id, state FROM member WHERE cell = ?").get(cell) as
-    | { user_id: string; state: MemberState }
-    | undefined;
+  return db
+    .prepare(
+      `SELECT m.user_id, m.cell, m.state, u.email FROM member m JOIN "user" u ON u.id = m.user_id
+       WHERE m.cell = ?`,
+    )
+    .get(cell) as { user_id: string; cell: string; state: MemberState; email: string } | undefined;
+}
+
+export function deleteMember(db: DatabaseSync, userId: string) {
+  db.prepare("DELETE FROM member WHERE user_id = ?").run(userId);
 }
 
 export function findMember(db: DatabaseSync, userId: string): Member | undefined {
@@ -101,12 +108,22 @@ export function findMember(db: DatabaseSync, userId: string): Member | undefined
   return row && { cell: row.cell, admin: row.admin === 1, state: row.state };
 }
 
-export function listUsers(db: DatabaseSync) {
-  return db
-    .prepare(
-      `SELECT u.email, m.cell, m.admin = 1 AS admin, m.state, m.error, u.createdAt
+export type UserRow = {
+  email: string;
+  cell: string;
+  admin: boolean;
+  state: MemberState;
+  error: string | null;
+  createdAt: string | number;
+};
+
+export function listUsers(db: DatabaseSync): UserRow[] {
+  return (
+    db
+      .prepare(
+        `SELECT u.email, m.cell, m.admin = 1 AS admin, m.state, m.error, u.createdAt
        FROM member m JOIN "user" u ON u.id = m.user_id ORDER BY u.createdAt`,
-    )
-    .all()
-    .map((row) => ({ ...row, admin: row.admin === 1 }));
+      )
+      .all() as Array<Omit<UserRow, "admin"> & { admin: number }>
+  ).map((row) => ({ ...row, admin: row.admin === 1 }));
 }
