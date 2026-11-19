@@ -1,0 +1,19 @@
+{
+  "name": "@beebot/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bee Bot gateway: signs users in and proxies each to their own cell",
+  "bin": {
+    "beebot-gateway": "dist/index.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.mjs",
+    "test": "vp test run"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "better-auth": "1.7.18",
+    "vite-plus": "catalog:"
+  }
+}

@@ -1,0 +1,11 @@
+# Bee Bot behind Caddy. Caddy terminates TLS and hands every request, WebSockets included,
+# to the gateway's unix socket, which is 0660. Give the socket a group Caddy is in, for example
+# by running the gateway with caddy as a supplementary group and /run/beebot setgid caddy.
+# Never add Caddy to beebot-gw: that group opens every cell's socket, bypassing sign-in.
+{
+	admin off
+}
+
+bee.example.com {
+	reverse_proxy unix//run/beebot/gateway.sock
+}
