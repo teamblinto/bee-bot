@@ -82,6 +82,31 @@ describe("container specs", () => {
     expect(Number(flag(args, "--pids-limit"))).toBeGreaterThan(0);
   });
 
+  it.each(["engine", "browser"] as const)(
+    "gives the %s its own uid range on a native host, keeping every lockdown flag",
+    (role) => {
+      const machine = createArgs(spec(role));
+      const native = createArgs(
+        containerSpec(role, {
+          box,
+          secret,
+          runSpec: testRunSpec,
+          seccomp: "/opt/boxd/seccomp-chromium.json",
+          egress: { dns: null, env: {} },
+          labels: { "beebot-dev": "1" },
+          native: true,
+        }),
+      );
+      expect(machine.some((arg) => arg.startsWith("--userns"))).toBe(false);
+      expect(native).toContain("--userns=auto:uidmapping=10001:10001:1,gidmapping=10001:10001:1");
+      expect(native.filter((arg) => !arg.startsWith("--userns"))).toEqual(machine);
+      // Before the image: everything after it is the container's own command.
+      expect(
+        native.indexOf("--userns=auto:uidmapping=10001:10001:1,gidmapping=10001:10001:1"),
+      ).toBeLessThan(native.indexOf(testRunSpec[role].image));
+    },
+  );
+
   it("gives the sidecar the Chromium seccomp profile and a fixed hostname", () => {
     const browser = createArgs(spec("browser"));
     expect(browser).toContain("seccomp=/opt/boxd/seccomp-chromium.json");

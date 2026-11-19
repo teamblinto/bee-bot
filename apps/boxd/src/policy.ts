@@ -181,7 +181,17 @@ export type ContainerSpec = {
   cpus: string;
   pids: number;
   labels: Record<string, string>;
+  userns: string | null;
 };
+
+// A native host's boxes each get their own subordinate uid range, so a box's root and every other
+// uid in it is nobody else's. Only the image's user keeps one fixed id across boxes: it owns the
+// volumes a recreated box keeps and the credential directory boxes on one account share, and
+// rootless Podman can't idmap a mount instead.
+export function ownUserns(image: RoleImage) {
+  const [uid, gid] = image.user.split(":");
+  return `auto:uidmapping=${uid}:${uid}:1,gidmapping=${gid}:${gid}:1`;
+}
 
 export function containerSpec(
   role: Role,
@@ -193,6 +203,7 @@ export function containerSpec(
     egress,
     labels,
     binds = [],
+    native = false,
   }: {
     box: Box;
     secret: Uint8Array;
@@ -201,6 +212,8 @@ export function containerSpec(
     egress: EgressAttachment;
     labels: Record<string, string>;
     binds?: Bind[];
+    // boxd runs on the Linux host itself, not in a Podman machine.
+    native?: boolean;
   },
 ): ContainerSpec {
   const names = boxNames(box);
@@ -231,6 +244,7 @@ export function containerSpec(
     cpus: image.cpus,
     pids: image.pids,
     labels: { ...labels, ...ownershipLabels(secret, box, role, name) },
+    userns: native ? ownUserns(image) : null,
   };
 }
 
@@ -245,6 +259,7 @@ export function createArgs(spec: ContainerSpec) {
     spec.name,
     "--pull=never",
     "--init",
+    ...(spec.userns === null ? [] : [`--userns=${spec.userns}`]),
     "--user",
     spec.user,
     "--hostname",

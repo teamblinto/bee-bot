@@ -3,9 +3,9 @@ import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 
 import { createBoxd } from "./boxd.ts";
-import { createPodmanEgress, noEgress } from "./egress.ts";
+import { createPodmanEgress } from "./egress.ts";
 import { createPodman } from "./podman.ts";
-import { parseRunSpec } from "./policy.ts";
+import { ownUserns, parseRunSpec } from "./policy.ts";
 import { type Bootstrap, type Hello, Kind, frameReader, jsonFrame } from "./protocol.ts";
 import { becomeOnlyBoxd } from "./instance.ts";
 import { MachineRestartNeeded, setup } from "./setup.ts";
@@ -80,25 +80,33 @@ async function boot(bootstrap: Bootstrap) {
   const relayDir = NodePath.join(dir, "relay");
   NodeFs.mkdirSync(relayDir, { recursive: true, mode: 0o755 });
   NodeFs.rmSync(NodePath.join(relayDir, "bee.sock"), { force: true });
+  // No proxy, no boxes: boxd never serves without one.
   const script = NodePath.join(dir, "egress.mjs");
-  const egress = NodeFs.existsSync(script)
-    ? createPodmanEgress({
-        podman,
-        prefix: bootstrap.prefix,
-        owner: bootstrap.owner,
-        labels: bootstrap.labels,
-        image: runSpec.engine.image,
-        nodeDir: NodePath.join(dir, "node"),
-        script,
-        relayDir,
-        testUpstreams: bootstrap.testUpstreams,
-        log: (line) => process.stderr.write(`${line}\n`),
-        onExit: () => {
-          process.stderr.write("boxd: the egress proxy went away\n");
-          process.exit(1);
-        },
-      })
-    : noEgress;
+  if (!NodeFs.existsSync(script)) {
+    throw new Error("egress.mjs is missing");
+  }
+  // A Podman machine gets its own Node installed beside boxd; a native host's boxd runs on the
+  // host's Node, so the proxy uses the image's.
+  const nodeDir = NodePath.join(dir, "node");
+  // beebotd's server mode starts boxd beside it on the host, and boxd inherits its environment.
+  const native = process.env.BEEBOT_SERVER_MODE === "1";
+  const egress = createPodmanEgress({
+    podman,
+    prefix: bootstrap.prefix,
+    owner: bootstrap.owner,
+    labels: bootstrap.labels,
+    image: runSpec.engine.image,
+    nodeDir: NodeFs.existsSync(nodeDir) ? nodeDir : null,
+    userns: native ? ownUserns(runSpec.engine) : null,
+    script,
+    relayDir,
+    testUpstreams: bootstrap.testUpstreams,
+    log: (line) => process.stderr.write(`${line}\n`),
+    onExit: () => {
+      process.stderr.write("boxd: the egress proxy went away\n");
+      process.exit(1);
+    },
+  });
   await egress.start();
   const boxd = createBoxd({
     podman,
@@ -111,6 +119,7 @@ async function boot(bootstrap: Bootstrap) {
     seccomp,
     stateDir: NodePath.join(dir, "state"),
     send,
+    native,
   });
   await boxd.reapOrphans();
   await boxd.rebind();

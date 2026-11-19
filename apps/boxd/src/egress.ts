@@ -49,7 +49,11 @@ export type PodmanEgressOptions = {
   labels: Record<string, string>;
   image: string;
   // Directories in the Linux host: Node's install, egress.mjs and boxd's beebotd relay socket.
-  nodeDir: string;
+  // Mounted as the proxy's Node; null runs the image's own.
+  nodeDir: string | null;
+  // A native host's `--userns`, the boxes' own (ownUserns): the proxy then takes a range of its own,
+  // and the boxes' fixed user id stays out of it.
+  userns: string | null;
   script: string;
   relayDir: string;
   testUpstreams?: Record<string, string> | undefined;
@@ -64,6 +68,7 @@ export function createPodmanEgress(options: PodmanEgressOptions): Egress {
   const { podman, prefix, owner, labels, log } = options;
   const container = `${prefix}-egress`;
   const upstream = `${prefix}-egress-up`;
+  const node = options.nodeDir === null ? "/usr/bin/node" : "/opt/node/bin/node";
   const labelArgs = Object.entries({ ...labels, "beebot.owner": owner }).flatMap(([key, value]) => [
     "--label",
     `${key}=${value}`,
@@ -90,7 +95,7 @@ export function createPodmanEgress(options: PodmanEgressOptions): Egress {
   }
 
   function control() {
-    return podman.spawn(["exec", "-i", container, "/opt/node/bin/node", "-e", relay], {});
+    return podman.spawn(["exec", "-i", container, node, "-e", relay], {});
   }
 
   function connectControl() {
@@ -157,6 +162,7 @@ export function createPodmanEgress(options: PodmanEgressOptions): Egress {
           container,
           ...labelArgs,
           "--pull=never",
+          ...(options.userns === null ? [] : [`--userns=${options.userns}`]),
           "--user",
           "10002:10002",
           "--cap-drop=all",
@@ -173,14 +179,13 @@ export function createPodmanEgress(options: PodmanEgressOptions): Egress {
           "128",
           "--network",
           upstream,
-          "-v",
-          `${options.nodeDir}:/opt/node:ro`,
+          ...(options.nodeDir === null ? [] : ["-v", `${options.nodeDir}:/opt/node:ro`]),
           "-v",
           `${options.script}:/opt/egress/egress.mjs:ro`,
           "-v",
           `${options.relayDir}:/run/bee-relay:ro`,
           options.image,
-          "/opt/node/bin/node",
+          node,
           "/opt/egress/egress.mjs",
         ],
         {},

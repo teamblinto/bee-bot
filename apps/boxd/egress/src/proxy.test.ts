@@ -318,6 +318,55 @@ describe("egress proxy on real sockets", () => {
     expect(vendor.seen).toEqual([]);
   });
 
+  it("connects to the address it checked, and refuses a socket that lands somewhere private", async () => {
+    const local = await recorder((_request, response) => response.end("ok"));
+    const { control, logs, ports } = await startProxy(local.port);
+    const client = await controlClient(control);
+    await client.send({ type: "bind", address: "127.0.0.1", botId: "b1" });
+    await client.send({
+      type: "policy",
+      botId: "b1",
+      hosts: ["rebind.example"],
+      subscription: null,
+      api: null,
+    });
+
+    // DNS rebinding: public on the check, loopback on any second look.
+    const lookup = vi.spyOn(NodeDns.promises, "lookup") as unknown as MockInstance<
+      () => Promise<NodeDns.LookupAddress[]>
+    >;
+    lookup.mockResolvedValueOnce([{ address: "93.184.215.14", family: 4 }]);
+    lookup.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+    // Whatever route the network takes, the socket ends up on loopback.
+    const original = NodeNet.Socket.prototype.connect;
+    const targets: unknown[] = [];
+    const connect = vi.spyOn(NodeNet.Socket.prototype, "connect").mockImplementation(function (
+      this: NodeNet.Socket,
+      ...args: unknown[]
+    ) {
+      const options: unknown = Array.isArray(args[0]) ? args[0][0] : args[0];
+      if (
+        options &&
+        typeof options === "object" &&
+        Reflect.get(options, "host") === "93.184.215.14"
+      ) {
+        targets.push(Reflect.get(options, "host"));
+        Object.assign(options, { host: "127.0.0.1", port: local.port });
+      }
+      return Reflect.apply(original, this, args) as NodeNet.Socket;
+    });
+    cleanups.push(() => {
+      connect.mockRestore();
+      lookup.mockRestore();
+    });
+
+    expect(await boxConnect(ports.proxy, "rebind.example:443")).toBe("HTTP/1.1 403 Forbidden");
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(targets).toEqual(["93.184.215.14"]);
+    expect(logs.at(-1)).toMatchObject({ ip: "127.0.0.1", reason: "connected to denied range" });
+    expect(local.seen).toEqual([]);
+  });
+
   it("denies a source that no bot is bound to, and a bot with no API key", async () => {
     const vendor = await recorder((_request, response) => response.end("ok"));
     const { control, ports } = await startProxy(vendor.port);

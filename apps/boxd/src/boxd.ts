@@ -70,6 +70,8 @@ export type BoxdOptions = {
   // In the Linux host: per-bot read-only directories and per-account credential directories.
   stateDir: string;
   send: (frame: Buffer) => void;
+  // boxd runs on the Linux host itself (server mode), not in a Podman machine.
+  native?: boolean;
 };
 
 type Attached = { child: Child; botId: string; stop: () => Promise<void> };
@@ -490,6 +492,7 @@ export function createBoxd(options: BoxdOptions) {
           egress: attachment,
           labels,
           binds: role === "engine" ? await engineBinds(box.botId, account) : [],
+          native: options.native ?? false,
         });
         await podmanOk(createArgs(spec), spec.env);
         made.push(spec.name);

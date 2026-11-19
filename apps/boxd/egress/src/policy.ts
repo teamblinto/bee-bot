@@ -52,10 +52,16 @@ export function normalizeHost(raw: string) {
   return NodeNet.isIP(host) !== 0 || /^[0-9]+$/.test(last) ? null : host;
 }
 
+// Names that only ever mean this machine, its network or its cloud's metadata service
+// (metadata.google.internal, instance-data.ec2.internal), refused even when allowlisted.
+const privateSuffixes = ["localhost", "local", "internal", "home.arpa"];
+const privateName = (host: string) =>
+  privateSuffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+
 // Exact names only: a suffix or prefix of an allowed name is a different host. Any site opens every
 // name but a vendor host, which only a lane opens (connectHosts).
 const reachable = (allow: readonly string[], host: string, anySite: boolean) =>
-  allow.includes(host) || (anySite && !vendorHosts.has(host));
+  !privateName(host) && (allow.includes(host) || (anySite && !vendorHosts.has(host)));
 
 export function hostAllowed(allow: readonly string[], raw: string, anySite = false) {
   const host = normalizeHost(raw);
@@ -92,6 +98,8 @@ const v4Denied: [string, number][] = [
   ["10.0.0.0", 8],
   ["100.64.0.0", 10],
   ["127.0.0.0", 8],
+  // Azure's WireServer: a public address that serves the VM's metadata.
+  ["168.63.129.16", 32],
   ["169.254.0.0", 16],
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],

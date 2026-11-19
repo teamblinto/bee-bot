@@ -14,6 +14,7 @@ import {
   decideConnect,
   decideResolved,
   hostAllowed,
+  isDeniedAddress,
   keyHeader,
   type Vendor,
   vendorApi,
@@ -176,7 +177,14 @@ export async function startEgress(
         // Connect to the address that was checked, never the name again: no rebinding race.
         const upstream = NodeNet.connect({ host: resolved.address, port: decision.port });
         track(botId, upstream);
+        let refused = false;
         upstream.once("connect", () => {
+          // And judge where the socket actually went, so nothing between check and connect counts.
+          if (isDeniedAddress(upstream.remoteAddress ?? "")) {
+            refused = true;
+            upstream.destroy();
+            return deny("connected to denied range", upstream.remoteAddress ?? null);
+          }
           client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
           upstream.write(head);
           client.pipe(upstream);
@@ -185,6 +193,9 @@ export async function startEgress(
         upstream.on("error", () => upstream.destroy());
         client.once("close", () => upstream.destroy());
         upstream.once("close", () => {
+          if (refused) {
+            return;
+          }
           client.destroy();
           log({
             ev: "connect",
@@ -316,6 +327,9 @@ export async function startEgress(
     upstream.on("socket", (socket) => {
       socket.once("connect", () => {
         ip ??= socket.remoteAddress ?? null;
+        if (!test && isDeniedAddress(socket.remoteAddress ?? "")) {
+          upstream.destroy(new Error("connected to denied range"));
+        }
       });
     });
     upstream.on("response", (answer) => {

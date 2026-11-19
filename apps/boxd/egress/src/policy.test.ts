@@ -65,6 +65,28 @@ describe("CONNECT targets", () => {
     const decision = decideConnect(allow, authority);
     expect(decision.allow ? "allow" : decision.reason).toBe(expected);
   });
+
+  it.each([
+    "metadata.google.internal:443",
+    "instance-data.ec2.internal:443",
+    "printer.local:443",
+    "app.localhost:443",
+    "router.home.arpa:443",
+  ])("refuses the private-use name %s even when allowlisted or any site", (authority) => {
+    const host = authority.replace(/:443$/, "");
+    const decision = decideConnect([host], authority, true);
+    expect(decision.allow ? "allow" : decision.reason).toBe("host not allowlisted");
+    expect(hostAllowed([host], host, true)).toBe(false);
+  });
+
+  it.each([
+    ["[::ffff:127.0.0.1]:443", "IP literal"],
+    ["[fd00:ec2::254]:443", "IP literal"],
+    ["0177.0.0.1:443", "bad host"],
+  ])("%j -> %s", (authority, expected) => {
+    const decision = decideConnect(allow, authority, true);
+    expect(decision.allow ? "allow" : decision.reason).toBe(expected);
+  });
 });
 
 describe("CONNECT by lane", () => {
@@ -136,6 +158,12 @@ describe("SSRF deny ranges", () => {
     ["198.18.0.1", true],
     ["224.0.0.1", true],
     ["255.255.255.255", true],
+    ["168.63.129.16", true],
+    ["192.0.0.192", true],
+    ["fd12:3456::1", true],
+    ["::ffff:192.168.1.1", true],
+    ["::ffff:a9fe:a9fe", true],
+    ["::ffff:100.64.0.1", true],
     ["::", true],
     ["::1", true],
     ["::ffff:127.0.0.1", true],
