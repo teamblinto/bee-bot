@@ -25,6 +25,9 @@ RuntimeDirectoryMode=0700
 ExecStartPre=+/usr/sbin/nft list chain inet beebot_fence cell
 # Only the cell and the gateway enter the socket folder. Not a RuntimeDirectory=: systemd would
 # give it back the cell's own group. setgid, so the socket gets the gateway's group too.
+# The parents are made first and on their own: under UMask= they would be 0700 and shut the
+# gateway (and Caddy, on its way to the gateway's socket) out.
+ExecStartPre=+/usr/bin/install -d -m 0711 /run/beebot /run/beebot/cells
 ExecStartPre=+/usr/bin/install -d -o %i -g beebot-gw -m 2750 /run/beebot/cells/%i
 # Each cell holds the box image in its own store: rootless Podman re-owns an image's files into a
 # box's id range, which it cannot do for layers in a root-owned shared store.

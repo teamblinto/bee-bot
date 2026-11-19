@@ -1,0 +1,42 @@
+[Unit]
+Description=Bee Bot gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beebot-gw
+# Caddy joins beebot-web to reach the gateway's socket. beebot-gw opens every cell's socket, so it
+# is only a supplementary group here and Caddy is never in it.
+Group=beebot-web
+SupplementaryGroups=beebot-gw
+EnvironmentFile=/etc/beebot/beebot.env
+# Root-only (0600) and read by systemd before it drops to beebot-gw: holds GATEWAY_AUTH_SECRET.
+EnvironmentFile=/etc/beebot/gateway.env
+Environment=GATEWAY_DB=/var/lib/beebot/gateway/gateway.db
+Environment=GATEWAY_SOCKET=/run/beebot/gateway/gateway.sock
+Environment=GATEWAY_WEB_DIR=/opt/beebot/current/apps/web/dist
+StateDirectory=beebot/gateway
+StateDirectoryMode=0700
+# Its own folder: /run/beebot and /run/beebot/cells stay root's, since root makes each cell's
+# socket folder there.
+RuntimeDirectory=beebot/gateway
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/node /opt/beebot/current/apps/gateway/dist/index.mjs serve
+Restart=on-failure
+RestartSec=5
+
+UMask=0077
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# Not ProtectSystem=strict or full, nor NoNewPrivileges= and the seccomp options that imply it:
+# the gateway runs beebot-provision through setuid sudo, and that root helper shares this unit's
+# mount namespace, so it must still write /etc and /var/lib.
+ProtectSystem=yes
+
+[Install]
+WantedBy=multi-user.target

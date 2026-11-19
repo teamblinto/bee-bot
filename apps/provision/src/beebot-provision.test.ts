@@ -1,15 +1,19 @@
 import * as NodeFs from "node:fs";
+import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { afterAll, describe, expect, it } from "vite-plus/test";
 
 import {
+  assertRootOwned,
   cellIdBase,
   cellSlots,
   freeSlot,
   parseArgs,
   parseSubids,
+  prepareHome,
   Refusal,
+  removeTree,
   subidBase,
   subidCount,
   subidRange,
@@ -109,10 +113,68 @@ it("reads subordinate id files", () => {
   ]);
 });
 
-it("fences exactly the uids cells get", () => {
+it("fences every process a cell can start, whatever its uid", () => {
   const fence = NodeFs.readFileSync(
     NodePath.join(import.meta.dirname, "../system/fence.nft"),
     "utf8",
   );
+  const subids = `${subidBase}-${subidRange(cellSlots - 1).start + subidCount - 1}`;
   expect(fence).toContain(`meta skuid ${cellIdBase}-${cellIdBase + cellSlots - 1} jump cell`);
+  expect(fence).toContain(`meta skuid ${subids} jump cell`);
+});
+
+describe.skipIf(process.platform === "win32")("root never follows a cell's links", () => {
+  const made: string[] = [];
+  const scratch = () => {
+    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "provision-"));
+    made.push(dir);
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of made) {
+      NodeFs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
+
+  it("refuses a home that is a link", () => {
+    const dir = scratch();
+    const target = NodePath.join(dir, "etc");
+    NodeFs.mkdirSync(target, { mode: 0o755 });
+    NodeFs.symlinkSync(target, NodePath.join(dir, "home"));
+    expect(() => prepareHome(NodePath.join(dir, "home"), uid, gid)).toThrow(/ELOOP|ENOTDIR/);
+    expect(NodeFs.statSync(target).mode & 0o777).toBe(0o755);
+  });
+
+  it("re-adds a live cell without touching what the cell planted inside", () => {
+    const dir = scratch();
+    const target = NodePath.join(dir, "etc");
+    NodeFs.mkdirSync(target, { mode: 0o755 });
+    const cellHome = NodePath.join(dir, "home");
+    prepareHome(cellHome, uid, gid);
+    NodeFs.symlinkSync(target, NodePath.join(cellHome, "data"));
+    prepareHome(cellHome, uid, gid);
+    expect(NodeFs.statSync(cellHome).mode & 0o777).toBe(0o700);
+    expect(NodeFs.statSync(target).mode & 0o777).toBe(0o755);
+  });
+
+  it("deletes a home without following a link out of it", () => {
+    const dir = scratch();
+    const target = NodePath.join(dir, "etc");
+    NodeFs.mkdirSync(target);
+    NodeFs.writeFileSync(NodePath.join(target, "passwd"), "root");
+    const cellHome = NodePath.join(dir, "home");
+    NodeFs.mkdirSync(NodePath.join(cellHome, "data"), { recursive: true });
+    NodeFs.symlinkSync(target, NodePath.join(cellHome, "data", "link"));
+    removeTree(cellHome);
+    expect(NodeFs.existsSync(cellHome)).toBe(false);
+    expect(NodeFs.readFileSync(NodePath.join(target, "passwd"), "utf8")).toBe("root");
+  });
+
+  it("refuses to act below a folder someone else can write", () => {
+    const dir = scratch();
+    NodeFs.chmodSync(dir, 0o777);
+    expect(() => assertRootOwned(dir)).toThrow(Refusal);
+  });
 });

@@ -17,7 +17,7 @@ const quotaPatterns = {
 const defaultQuota = { memory: "4G", cpu: "200%", tasks: "4096" };
 
 // Cell uids are 50000 + slot, and slot also fixes the subordinate id range, so the fence
-// (system/fence.nft) can name every cell with one uid range.
+// (system/fence.nft) can name every cell, and every id a cell maps, with two uid ranges.
 export const cellIdBase = 50000;
 export const cellSlots = 1000;
 export const subidBase = 100_000_000;
@@ -32,6 +32,7 @@ const paths = {
   group: "/etc/group",
   subuid: "/etc/subuid",
   subgid: "/etc/subgid",
+  denied: ["/etc/cron.deny", "/etc/at.deny"],
 };
 const gatewayGroup = "beebot-gw";
 
@@ -146,6 +147,58 @@ function run(command: string, args: string[], input?: string | Buffer) {
 
 const read = (path: string) => (NodeFs.existsSync(path) ? NodeFs.readFileSync(path, "utf8") : "");
 
+// Root acts only below directories nobody else can change, so no one can swap a link into its path.
+export function assertRootOwned(dir: string) {
+  for (let path = dir; ; path = NodePath.dirname(path)) {
+    const stat = NodeFs.lstatSync(path);
+    if (!stat.isDirectory() || stat.uid !== 0 || (stat.mode & 0o022) !== 0) {
+      throw new Refusal(`${path} must be a root-owned directory only root can write`);
+    }
+    if (path === "/") {
+      return;
+    }
+  }
+}
+
+// The home is made and handed over through a handle that refuses a link, and nothing inside it is
+// touched: the cell writes there, so beebotd makes its own folders.
+export function prepareHome(path: string, uid: number, gid: number) {
+  try {
+    NodeFs.mkdirSync(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+  const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW } = NodeFs.constants;
+  const fd = NodeFs.openSync(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  try {
+    NodeFs.fchownSync(fd, uid, gid);
+    NodeFs.fchmodSync(fd, 0o700);
+  } finally {
+    NodeFs.closeSync(fd);
+  }
+}
+
+// GNU rm walks with openat and never follows a link, even one a process swaps in mid-walk.
+export const removeTree = (path: string) => run("rm", ["-rf", "--one-file-system", "--", path]);
+
+// Cron and at would start a cell's processes outside its slice and its fence. A line is only ever
+// added: a deleted cell's name stays denied.
+function denyScheduling(cell: string) {
+  for (const file of paths.denied) {
+    const text = read(file);
+    if (!text.split("\n").includes(cell)) {
+      const exists = NodeFs.existsSync(file);
+      // Appended in place, so the file keeps the owner and mode at and cron read it with.
+      NodeFs.appendFileSync(file, `${text === "" || text.endsWith("\n") ? "" : "\n"}${cell}\n`);
+      if (!exists) {
+        NodeFs.chmodSync(file, 0o644);
+      }
+    }
+  }
+}
+
 const unit = (cell: string) => `beebotd@${cell}.service`;
 const slice = (cell: string) => `beebot-${cell}.slice`;
 const home = (cell: string) => NodePath.join(paths.cells, cell);
@@ -165,6 +218,7 @@ function lookup(cell: string) {
 }
 
 function writeQuota(cell: string, quota: Quota) {
+  assertRootOwned(paths.units);
   const dir = quotaDir(cell);
   NodeFs.mkdirSync(dir, { recursive: true, mode: 0o755 });
   const text = `[Slice]\nMemoryMax=${quota.memory}\nCPUQuota=${quota.cpu}\nTasksMax=${quota.tasks}\n`;
@@ -215,14 +269,13 @@ function add(cell: string) {
       run("usermod", [flag, `${range.start}-${range.start + range.count - 1}`, cell]);
     }
   }
-  for (const dir of [home(cell), NodePath.join(home(cell), "data")]) {
-    NodeFs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    NodeFs.chownSync(dir, uid, gid);
-    NodeFs.chmodSync(dir, 0o700);
-  }
+  denyScheduling(cell);
+  run("loginctl", ["disable-linger", cell]);
+  assertRootOwned(paths.cells);
+  prepareHome(home(cell), uid, gid);
   // A cred that exists is never replaced: the cell's vault is sealed with it.
+  assertRootOwned(paths.creds);
   if (!NodeFs.existsSync(credFile(cell))) {
-    NodeFs.mkdirSync(paths.creds, { recursive: true, mode: 0o700 });
     const partial = `${credFile(cell)}.new`;
     // The key goes to systemd-creds over a pipe and only its sealed form is written.
     run(
@@ -306,8 +359,12 @@ function remove(cell: string) {
   if (parseIds(read(paths.group)).some((entry) => entry.name === cell)) {
     run("groupdel", [cell]);
   }
-  NodeFs.rmSync(home(cell), { recursive: true, force: true });
-  NodeFs.rmSync(NodePath.join(paths.sockets, cell), { recursive: true, force: true });
+  assertRootOwned(paths.cells);
+  removeTree(home(cell));
+  if (NodeFs.existsSync(paths.sockets)) {
+    assertRootOwned(paths.sockets);
+    removeTree(NodePath.join(paths.sockets, cell));
+  }
   NodeFs.rmSync(credFile(cell), { force: true });
   NodeFs.rmSync(quotaDir(cell), { recursive: true, force: true });
   run("systemctl", ["daemon-reload"]);
@@ -318,10 +375,14 @@ export function execute(command: Command) {
   switch (command.verb) {
     case "add":
       return add(command.cell);
-    case "suspend":
-      existing(command.cell);
+    case "suspend": {
+      const { uid } = existing(command.cell);
+      run("loginctl", ["disable-linger", command.cell]);
       run("systemctl", ["disable", "--now", unit(command.cell)]);
+      // Ends whatever the cell left running, in its slice or in a session, by cgroup.
+      run("systemctl", ["stop", slice(command.cell), `user-${uid}.slice`]);
       return { cell: command.cell, suspended: true };
+    }
     case "resume":
       existing(command.cell);
       run("systemctl", ["enable", "--now", unit(command.cell)]);

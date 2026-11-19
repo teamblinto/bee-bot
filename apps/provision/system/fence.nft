@@ -1,7 +1,7 @@
 #!/usr/sbin/nft -f
-# Cell users (uids 50000-50999, see beebot-provision.ts) may reach the internet and the DNS
-# resolvers below, nothing on this host and no private or metadata address. Box traffic leaves
-# through pasta, which runs as the cell's uid, so it is fenced too. install.sh fills in resolvers.
+# Everything a cell starts may reach the internet and the DNS resolvers below, nothing on this host
+# and no private or metadata address. Box traffic leaves through pasta, which runs as the cell's
+# uid, so it is fenced too. install.sh fills in resolvers.
 table inet beebot_fence
 delete table inet beebot_fence
 table inet beebot_fence {
@@ -12,7 +12,10 @@ table inet beebot_fence {
 
 	chain output {
 		type filter hook output priority filter; policy accept;
+		# Cell uids, and every subordinate id a cell can map in a user namespace (see
+		# beebot-provision.ts): a cell's process has one of these, whatever uid it sees inside.
 		meta skuid 50000-50999 jump cell
+		meta skuid 100000000-2099999999 jump cell
 	}
 
 	chain cell {
