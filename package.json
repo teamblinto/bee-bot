@@ -15,7 +15,8 @@
     "fmt:check": "vp fmt --check",
     "dist:desktop:win": "vp run build && vp run --filter @beebot/desktop dist:win",
     "dist:desktop:mac": "vp run build && vp run --filter @beebot/desktop dist:mac",
-    "dist:desktop:linux": "vp run build && vp run --filter @beebot/desktop dist:linux"
+    "dist:desktop:linux": "vp run build && vp run --filter @beebot/desktop dist:linux",
+    "release:linux": "vp run build && node scripts/release-linux.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

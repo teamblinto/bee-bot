@@ -1,11 +1,11 @@
-# Bee Bot behind Caddy. Caddy terminates TLS and hands every request, WebSockets included,
-# to the gateway's unix socket, which is 0660. Give the socket a group Caddy is in, for example
-# by running the gateway with caddy as a supplementary group and /run/beebot setgid caddy.
-# Never add Caddy to beebot-gw: that group opens every cell's socket, bypassing sign-in.
+# Bee Bot behind Caddy, as deploy/install.sh writes it. Caddy terminates TLS and hands every
+# request, WebSockets included, to the gateway's unix socket. Caddy reaches it through the
+# beebot-web group; never add Caddy to beebot-gw, which opens every cell's socket.
+# With admin off there is no admin API to reload through: restart Caddy to apply a change.
 {
 	admin off
 }
 
 bee.example.com {
-	reverse_proxy unix//run/beebot/gateway.sock
+	reverse_proxy unix//run/beebot/gateway/gateway.sock
 }

@@ -1,0 +1,178 @@
+#!/bin/bash
+# Bee Bot host commands, as root.
+#   beebot invite <email> [--admin]   prints a sign-up link
+#   beebot update <release.tar.gz> [--box-image <box.tar>]
+# An update unpacks the release, backs up the gateway's and every cell's database, switches
+# /opt/beebot/current, and starts the gateway and the cells that were running before. If any of
+# them does not come back healthy, it puts the old release and the databases back, starts the same
+# set again and exits non-zero: 1 when the rollback is healthy, 2 when it is not.
+# BEEBOT_UPDATE_FORCE_FAIL=1 fails the new release's health check, to try the rollback.
+set -euo pipefail
+say() { echo "beebot: $*" >&2; }
+usage() {
+	sed -n '3,4s/^#  //p' "$0" >&2
+	exit 2
+}
+[ "$(id -u)" = 0 ] || { say "run as root"; exit 1; }
+
+gateway_cli() {
+	local origin
+	origin=$(sed -n 's/^BEEBOT_PUBLIC_ORIGIN=//p' /etc/beebot/beebot.env)
+	(cd / && runuser -u beebot-gw -- env BEEBOT_PUBLIC_ORIGIN="$origin" \
+		GATEWAY_DB=/var/lib/beebot/gateway/gateway.db \
+		/usr/bin/node --disable-warning=ExperimentalWarning /opt/beebot/current/apps/gateway/dist/index.mjs "$@")
+}
+
+if [ "${1:-}" = invite ] && [ $# -ge 2 ]; then
+	shift
+	gateway_cli invite "$@"
+	exit
+fi
+if [ "${1:-}" != update ] || [ $# -lt 2 ]; then
+	usage
+fi
+tarball=$2
+box=""
+shift 2
+case "${1:-}" in
+--box-image) box=$(readlink -f "${2:?}") ;;
+"") ;;
+*) usage ;;
+esac
+[ -f "$tarball" ] || { say "$tarball is not a file"; exit 1; }
+
+releases=/opt/beebot/releases
+previous=$(readlink -f /opt/beebot/current)
+incoming=$(mktemp -d "$releases/.incoming.XXXXXX")
+trap 'rm -rf "$incoming"' EXIT
+tar -xzf "$tarball" -C "$incoming" --no-same-owner --no-same-permissions
+unpacked=("$incoming"/*)
+if [ ${#unpacked[@]} != 1 ] || [ ! -f "${unpacked[0]}/VERSION" ]; then
+	say "$tarball is not a Bee Bot release"
+	exit 1
+fi
+version=$(cat "${unpacked[0]}/VERSION")
+[[ $version =~ ^[A-Za-z0-9._-]+$ ]] || { say "bad VERSION in $tarball"; exit 1; }
+release=$releases/$version
+if [ "$release" = "$previous" ]; then
+	say "$version is already running"
+	exit 0
+fi
+if [ ! -d "$release" ]; then
+	chown -R root:root "${unpacked[0]}"
+	chmod -R u+rwX,go+rX,go-w "${unpacked[0]}"
+	chmod 0755 "${unpacked[0]}/deploy/beebot" "${unpacked[0]}/apps/provision/src/beebot-provision.ts"
+	mv "${unpacked[0]}" "$release"
+fi
+
+# Only what runs now comes back: a suspended or failed cell stays as it is.
+mapfile -t cells < <(systemctl list-units --type=service --state=active,activating --plain \
+	--no-legend 'beebotd@*.service' | awk '{ print $1 }' | grep -xE 'beebotd@bb[0-9a-f]{10}\.service' || true)
+units=(beebot-gateway.service "${cells[@]}")
+
+# A database is copied by its owner, beside itself, so root never follows a path a cell controls.
+# VACUUM INTO makes a consistent copy even of a database in WAL mode.
+databases=(beebot-gw:/var/lib/beebot/gateway/gateway.db)
+for home in /var/lib/beebot/cells/bb*; do
+	cell=${home##*/}
+	[[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null &&
+		databases+=("$cell:$home/data/beebot.db")
+done
+sqlite_copy() { # backup|restore owner:path
+	(cd / && umask 077 && runuser -u "${2%%:*}" -- /usr/bin/node --disable-warning=ExperimentalWarning -e '
+		const fs = require("node:fs");
+		const [op, db] = process.argv.slice(1);
+		const copy = db + ".pre-update";
+		if (op === "backup") {
+			fs.rmSync(copy, { force: true });
+			if (fs.existsSync(db)) {
+				const source = new (require("node:sqlite").DatabaseSync)(db);
+				source.prepare("VACUUM INTO ?").run(copy);
+				source.close();
+			}
+		} else if (fs.existsSync(copy)) {
+			for (const suffix of ["-wal", "-shm", "-journal"]) fs.rmSync(db + suffix, { force: true });
+			fs.copyFileSync(copy, db);
+		}
+	' "$1" "${2#*:}")
+}
+
+backup=/var/lib/beebot/update-backup
+rm -rf "$backup"
+install -d -m 0700 "$backup"
+cp -p /etc/beebot/box-image.env "$backup/"
+ln /var/lib/beebot/box-image.tar "$backup/"
+restore_box_image() {
+	ln -f "$backup/box-image.tar" /var/lib/beebot/box-image.tar
+	cp -p "$backup/box-image.env" /etc/beebot/box-image.env
+}
+# Before anything stops: a new box image may take a long build.
+if ! bash "$release/deploy/box-image.sh" "$release" "$box"; then
+	restore_box_image
+	say "the box image for $version could not be made; nothing was changed"
+	exit 1
+fi
+
+# Called where errexit is off, so each step checks the last.
+switch() {
+	ln -sfn "$1" /opt/beebot/current.new &&
+		mv -T /opt/beebot/current.new /opt/beebot/current &&
+		bash "$1/deploy/system.sh" "$1"
+}
+
+why=""
+healthy() { # phase
+	if [ "$1" = update ] && [ "${BEEBOT_UPDATE_FORCE_FAIL:-}" = 1 ]; then
+		why="BEEBOT_UPDATE_FORCE_FAIL=1"
+		return 1
+	fi
+	local deadline=$((SECONDS + ${BEEBOT_UPDATE_TIMEOUT:-300})) unit cell
+	until runuser -u beebot-gw -- curl -sf --max-time 5 --unix-socket /run/beebot/gateway/gateway.sock \
+		http://gateway/_gateway/health 2>/dev/null | grep -q '"ok":true'; do
+		[ $SECONDS -lt $deadline ] || { why="the gateway does not answer /_gateway/health"; return 1; }
+		sleep 2
+	done
+	for unit in "${cells[@]}"; do
+		cell=${unit#beebotd@}
+		cell=${cell%.service}
+		# Any HTTP answer will do: a cell refuses requests that don't come through the gateway.
+		until systemctl is-active -q "$unit" && [ "$(runuser -u beebot-gw -- curl -s -o /dev/null \
+			-w '%{http_code}' --max-time 5 --unix-socket "/run/beebot/cells/$cell/beebotd.sock" \
+			http://cell/health)" != 000 ]; do
+			[ $SECONDS -lt $deadline ] || { why="cell $cell does not answer on its socket"; return 1; }
+			sleep 2
+		done
+	done
+}
+
+from=$(basename "$previous")
+say "updating $from -> $version (gateway and ${#cells[@]} running cells)"
+systemctl stop "${units[@]}"
+for db in "${databases[@]}"; do
+	if ! sqlite_copy backup "$db"; then
+		systemctl start "${units[@]}"
+		restore_box_image
+		say "could not back up ${db#*:}; nothing was changed"
+		exit 1
+	fi
+done
+
+if switch "$release" && systemctl start "${units[@]}" && healthy update; then
+	say "now running $version"
+	exit 0
+fi
+say "$version is not healthy: $why. Rolling back to $from"
+failed=0
+systemctl stop "${units[@]}" || failed=1
+switch "$previous" || failed=1
+restore_box_image || failed=1
+for db in "${databases[@]}"; do
+	sqlite_copy restore "$db" || { failed=1; say "could not restore ${db#*:}"; }
+done
+systemctl start "${units[@]}" || failed=1
+if [ $failed = 0 ] && healthy rollback; then
+	say "rolled back: $from runs again with the databases from before the update"
+	exit 1
+fi
+say "the rollback is not healthy either${why:+: $why}. The copies from before the update are the *.pre-update files beside each database"
+exit 2
