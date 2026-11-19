@@ -1,0 +1,184 @@
+#!/bin/bash
+# Encrypted, verified backups of a Bee Bot host, kept in a restic repository. See README.md.
+# Usage: beebot-backup backup
+#        beebot-backup restore <cell>|all [snapshot]
+set -euo pipefail
+umask 077
+
+# The config and key live outside /etc/beebot, so the key never lands inside a backup.
+conf_dir=${BEEBOT_BACKUP_CONF:-/etc/beebot-backup}
+if [ -r "$conf_dir/backup.env" ]; then
+	set -a
+	. "$conf_dir/backup.env"
+	set +a
+fi
+export RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-/var/backups/beebot/restic}
+export RESTIC_PASSWORD_FILE=${RESTIC_PASSWORD_FILE:-$conf_dir/key}
+export RESTIC_CACHE_DIR=${RESTIC_CACHE_DIR:-/var/cache/beebot-backup}
+# Every host path is under $root, so the self-test can run against a fake host.
+root=${BEEBOT_BACKUP_ROOT:-}
+etc=$root/etc/beebot
+units=$root/etc/systemd/system
+cells=$root/var/lib/beebot/cells
+gateway=$root/var/lib/beebot/gateway
+# SQLite snapshots are staged here, mirroring each database's own path, and backed up from here.
+stage=$root/var/lib/beebot-backup/stage
+check_subset=${BEEBOT_BACKUP_CHECK_SUBSET:-10%}
+cell_pattern='^bb[0-9a-f]{10}$'
+
+die() {
+	echo "beebot-backup: $*" >&2
+	exit 1
+}
+
+# A consistent copy of a live database, made as the database's owner: root opening it could leave
+# root-owned -wal and -shm files behind that the owner can no longer open.
+snapshot_db() {
+	local db=$1 out=$stage$1 owner
+	owner=$(stat -c %u:%g "$(dirname "$db")")
+	# Parents open to traversal but not listing, so the owner reaches the one folder it can write.
+	(umask 066 && mkdir -p "$(dirname "$out")")
+	chown "$owner" "$(dirname "$out")"
+	chmod 0700 "$(dirname "$out")"
+	setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups \
+		sqlite3 -batch -init /dev/null -cmd '.timeout 30000' "$db" "VACUUM INTO '$out'"
+	[ "$(sqlite3 "$out" 'PRAGMA integrity_check')" = ok ] || die "snapshot of $db is corrupt"
+}
+
+list_cells() {
+	[ -d "$cells" ] || return 0
+	find "$cells" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E "$cell_pattern" || true
+}
+
+backup() {
+	local paths=() cell
+	rm -rf --one-file-system "$stage"
+	# The snapshots are plaintext, so they never outlive the run.
+	trap 'rm -rf --one-file-system "$stage"' EXIT
+	(umask 066 && mkdir -p "$stage")
+	chmod 0711 "$stage"
+	[ ! -f "$gateway/gateway.db" ] || snapshot_db "$gateway/gateway.db"
+	for cell in $(list_cells); do
+		[ ! -f "$cells/$cell/data/beebot.db" ] || snapshot_db "$cells/$cell/data/beebot.db"
+		[ ! -d "$cells/$cell/data" ] || paths+=("$cells/$cell/data")
+	done
+	[ ! -d "$etc" ] || paths+=("$etc")
+	# beebot-provision's quota drop-ins.
+	for dir in "$units"/beebot-*.slice.d; do [ ! -d "$dir" ] || paths+=("$dir"); done
+	paths+=("$stage")
+
+	restic unlock
+	# Claude and Codex logins (data/credentials holds each account's CLAUDE_CONFIG_DIR), live
+	# database files (the staged snapshots stand in for them), and what beebotd rebuilds.
+	restic backup --one-file-system --exclude-caches --tag beebot \
+		--exclude "$cells/*/data/credentials" \
+		--exclude "$cells/*/data/runtime" \
+		--exclude "$cells/*/data/beebot.db" \
+		--exclude "$cells/*/data/beebot.db-*" \
+		--exclude .credentials.json \
+		--exclude node_modules/.cache \
+		"${paths[@]}"
+	rm -rf --one-file-system "$stage"
+	restic forget --tag beebot --keep-daily 7 --keep-weekly 4 --prune
+	verify
+}
+
+# Reads back part of the repository, then restores every database from the newest snapshot and
+# checks it, so a backup that can't be decrypted or restored fails the unit.
+verify() {
+	local db count=0
+	restic check --read-data-subset="$check_subset"
+	tmp=$(mktemp -d)
+	trap 'rm -rf --one-file-system "$stage" "$tmp"' EXIT
+	restic restore latest --tag beebot --target "$tmp" --include "$stage"
+	while IFS= read -r -d '' db; do
+		[ "$(sqlite3 "$db" 'PRAGMA integrity_check')" = ok ] || die "restored ${db#"$tmp"} is corrupt"
+		count=$((count + 1))
+	done < <(find "$tmp" -type f -name '*.db' -print0)
+	echo "beebot-backup: verified $count database(s)"
+}
+
+# Stops a unit if it runs and remembers to start it again.
+stopped=()
+stop_unit() {
+	if systemctl is-active --quiet "$1"; then
+		systemctl stop "$1"
+		stopped+=("$1")
+	fi
+}
+
+# Puts a restored database in place. Its old -wal and -shm go too: SQLite would replay them onto it.
+place_db() {
+	local from=$1 to=$2 owner=$3
+	rm -f "$to" "$to-wal" "$to-shm" "$to-journal"
+	install -m 0600 -o "${owner%:*}" -g "${owner#*:}" "$from" "$to"
+}
+
+restore_cell() {
+	local cell=$1 snap=$2 tmp=$3 home=$cells/$1 owner old=
+	if [ ! -f "$etc/creds/$cell.vault-key.cred" ]; then
+		restic restore "$snap" --target "$tmp" --include "$etc/creds/$cell.vault-key.cred"
+		[ ! -f "$tmp$etc/creds/$cell.vault-key.cred" ] ||
+			install -D -m 0600 "$tmp$etc/creds/$cell.vault-key.cred" "$etc/creds/$cell.vault-key.cred"
+	fi
+	# The home and user come from beebot-provision; with the cred back first, it reuses that key.
+	[ -d "$home" ] || die "no cell $cell here: run 'beebot-provision user add $cell', then this again"
+	owner=$(stat -c %u:%g "$home")
+	stop_unit "beebotd@$cell.service"
+	restic restore "$snap" --target "$tmp" --include "$home/data" --include "$stage$home/data"
+	[ -d "$tmp$home/data" ] || die "snapshot $snap has no cell $cell"
+	if [ -d "$home/data" ]; then
+		old=$home/data.before-restore-$(date -u +%Y%m%dT%H%M%SZ)
+		mv "$home/data" "$old"
+		# Logins are never backed up, so the ones already here are kept.
+		[ ! -d "$old/credentials" ] || mv "$old/credentials" "$tmp$home/data/credentials"
+	fi
+	mv "$tmp$home/data" "$home/data"
+	[ ! -f "$tmp$stage$home/data/beebot.db" ] ||
+		place_db "$tmp$stage$home/data/beebot.db" "$home/data/beebot.db" "$owner"
+	# The uids in a snapshot are another host's when restoring onto a new one.
+	chown -R "$owner" "$home/data"
+	echo "beebot-backup: restored $cell${old:+ (previous data kept in $old)}"
+}
+
+restore() {
+	local target=${1:-} snap=${2:-latest} cell unit missing=()
+	[[ $target == all || $target =~ $cell_pattern ]] || die "restore <cell>|all [snapshot]"
+	[[ $snap =~ ^(latest|[0-9a-f]{8,64})$ ]] || die "bad snapshot id $snap"
+	install -d -m 0711 "$cells"
+	tmp=$(mktemp -d "$cells/.restore-XXXXXX")
+	trap 'rm -rf --one-file-system "$tmp"' EXIT
+	if [ "$target" = all ]; then
+		stop_unit beebot-gateway.service
+		for unit in $(systemctl list-units --plain --no-legend --state=active 'beebotd@*.service' | awk '{ print $1 }'); do
+			stop_unit "$unit"
+		done
+		restic restore "$snap" --target "$tmp" --include "$etc" --include "$units" --include "$stage$gateway"
+		[ ! -d "$tmp$etc" ] || cp -a "$tmp$etc/." "$etc/"
+		[ ! -d "$tmp$units" ] || cp -a "$tmp$units/." "$units/"
+		if [ -f "$tmp$stage$gateway/gateway.db" ]; then
+			install -d -m 0700 "$gateway"
+			place_db "$tmp$stage$gateway/gateway.db" "$gateway/gateway.db" "$(stat -c %u:%g "$gateway")"
+		fi
+		for cell in $(restic ls "$snap" "$cells" | sed -n "s|^$cells/\([^/]*\)$|\1|p" | grep -E "$cell_pattern"); do
+			if [ -d "$cells/$cell" ]; then restore_cell "$cell" "$snap" "$tmp"; else missing+=("$cell"); fi
+		done
+		systemctl daemon-reload
+	else
+		restore_cell "$target" "$snap" "$tmp"
+	fi
+	for unit in ${stopped[@]+"${stopped[@]}"}; do systemctl start "$unit"; done
+	# Their vault keys are back in /etc/beebot/creds, so beebot-provision reuses them.
+	for cell in ${missing[@]+"${missing[@]}"}; do
+		echo "beebot-backup: no cell $cell here: run 'beebot-provision user add $cell', then 'beebot-backup restore $cell'" >&2
+	done
+	[ -z "${missing[*]:-}" ] || exit 1
+}
+
+[ "$(id -u)" = 0 ] || die "run as root"
+case ${1:-} in
+backup) backup ;;
+verify) verify ;;
+restore) restore "${@:2}" ;;
+*) die "usage: beebot-backup backup | restore <cell>|all [snapshot]" ;;
+esac

@@ -1,0 +1,19 @@
+[Unit]
+Description=Back up and verify Bee Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beebot-backup backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+PrivateTmp=yes
+# Not strict: a local repository may be configured anywhere outside /usr, /boot and /etc.
+ProtectSystem=full
+# Read-only, not hidden: an sftp repository needs root's ssh key and known_hosts.
+ProtectHome=read-only
+CacheDirectory=beebot-backup
+CacheDirectoryMode=0700
