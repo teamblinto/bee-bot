@@ -225,3 +225,16 @@ describe.skipIf(process.platform === "win32")("root never follows a cell's links
     expect(() => assertRootOwned(dir)).toThrow(Refusal);
   });
 });
+
+// By construction: the gateway connects to /run/beebot/cells/<cell>.sock (apps/gateway), and only
+// root may write that folder, so no cell can swap the socket or link in another cell's.
+it("has systemd make every cell's socket, as root, where no cell can write", () => {
+  const system = NodePath.join(import.meta.dirname, "..", "system");
+  const socket = NodeFs.readFileSync(NodePath.join(system, "beebotd@.socket"), "utf8");
+  expect(socket).toMatch(/^ListenStream=\/run\/beebot\/cells\/%i\.sock$/m);
+  expect(socket).toMatch(/^SocketUser=root$/m);
+  expect(socket).toContain("install -d -g beebot-gw -m 0710 /run/beebot/cells\n");
+  const service = NodeFs.readFileSync(NodePath.join(system, "beebotd@.service"), "utf8");
+  expect(service).not.toContain("/run/beebot/cells");
+  expect(service).toMatch(/^Requires=.*beebotd@%i\.socket/m);
+});

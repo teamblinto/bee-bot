@@ -16,8 +16,11 @@ install -d -m 0755 /var/lib/beebot
 install -d -m 0711 /var/lib/beebot/cells
 install -d -m 0700 /etc/beebot/creds
 install -m 0644 "$system/containers.conf" /etc/beebot/
-install -m 0644 "$system/beebotd@.service" "$system/beebot-fence.service" \
+install -m 0644 "$system/beebotd@.service" "$system/beebotd@.socket" "$system/beebot-fence.service" \
 	"$system/beebot-gateway.service" /etc/systemd/system/
+install -d -m 0755 /etc/systemd/resolved.conf.d
+install -m 0644 "$system/resolved.conf" /etc/systemd/resolved.conf.d/beebot.conf
+systemctl try-restart systemd-resolved.service
 
 # The fence lets cells reach this host's DNS resolvers and nothing else local.
 resolvers=$(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ { printf "%s%s", sep, $2; sep = ", " }' /etc/resolv.conf)
@@ -33,6 +36,18 @@ ln -sfn /opt/beebot/current/deploy/beebot /usr/local/sbin/beebot
 
 systemctl daemon-reload
 systemctl enable --quiet beebot-fence.service beebot-gateway.service
+# Cells from before beebotd@.socket: an enabled cell gets its socket enabled too. Their old socket
+# folders, which the cell owned, go.
+for wanted in /etc/systemd/system/multi-user.target.wants/beebotd@bb*.service; do
+	cell=${wanted##*/beebotd@}
+	cell=${cell%.service}
+	if [[ $cell =~ ^bb[0-9a-f]{10}$ ]]; then
+		systemctl enable --quiet "beebotd@$cell.socket"
+	fi
+done
+install -d -m 0711 /run/beebot
+install -d -g beebot-gw -m 0710 /run/beebot/cells
+find /run/beebot/cells -mindepth 1 -maxdepth 1 -type d -name 'bb*' -exec rm -rf --one-file-system -- {} + 2>/dev/null || true
 systemctl start beebot-fence.service
 # Not a restart of the fence unit, which would restart every cell (Requires=): the file swaps the
 # table in one transaction.

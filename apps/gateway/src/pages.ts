@@ -163,8 +163,8 @@ ${saved ? `<p role="status">Quota saved.</p>` : ""}
 ${field("memory", "Memory", quota.memory, "[1-9][0-9]{0,5}[KMGT]", "Like 4G or 512M.")}
 ${field("cpu", "CPU", quota.cpu, "[1-9][0-9]{0,4}%?", "Percent of one core, like 200%.")}
 ${field("tasks", "Tasks", quota.tasks, "[1-9][0-9]{0,6}", "Most processes and threads at once.")}
-${quota.boxes === undefined ? "" : field("boxes", "Boxes", quota.boxes, "[0-9]{1,4}", "Most boxes running at once.")}
-${quota["budget-usd"] === undefined ? "" : field("budget-usd", "Budget (USD)", quota["budget-usd"], "[0-9]{1,6}([.][0-9]{1,2})?", "Spending limit in dollars.")}
+${quota.boxes === undefined ? "" : field("boxes", "Boxes", quota.boxes, "[1-9][0-9]{0,2}", "Most boxes running at once.")}
+${quota["budget-usd"] === undefined ? "" : field("budget-usd", "Budget (USD)", quota["budget-usd"], "(0|[1-9][0-9]{0,6})([.][0-9]{1,2})?", "Spending limit in dollars.")}
 <button type="submit">Save quota</button>
 </form>
 <h2>Delete</h2>

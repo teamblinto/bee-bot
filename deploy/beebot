@@ -120,6 +120,16 @@ switch() {
 		bash "$1/deploy/system.sh" "$1"
 }
 
+# Where the gateway of the release now current reaches a cell: releases before beebotd@.socket
+# had each cell make its own.
+cell_socket() {
+	if [ -f /opt/beebot/current/apps/provision/system/beebotd@.socket ]; then
+		echo "/run/beebot/cells/$1.sock"
+	else
+		echo "/run/beebot/cells/$1/beebotd.sock"
+	fi
+}
+
 why=""
 healthy() { # phase
 	if [ "$1" = update ] && [ "${BEEBOT_UPDATE_FORCE_FAIL:-}" = 1 ]; then
@@ -137,7 +147,7 @@ healthy() { # phase
 		cell=${cell%.service}
 		# Any HTTP answer will do: a cell refuses requests that don't come through the gateway.
 		until systemctl is-active -q "$unit" && [ "$(runuser -u beebot-gw -- curl -s -o /dev/null \
-			-w '%{http_code}' --max-time 5 --unix-socket "/run/beebot/cells/$cell/beebotd.sock" \
+			-w '%{http_code}' --max-time 5 --unix-socket "$(cell_socket "$cell")" \
 			http://cell/health)" != 000 ]; do
 			[ $SECONDS -lt $deadline ] || { why="cell $cell does not answer on its socket"; return 1; }
 			sleep 2

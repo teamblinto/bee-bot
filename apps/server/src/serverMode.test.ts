@@ -272,7 +272,6 @@ it(
       env: {
         BEEBOT_SERVER_MODE: "1",
         BEEBOT_DATA_DIR: dataDir,
-        BEEBOT_SOCKET: NodePath.join(dataDir, "beebotd.sock"),
         BEEBOT_PUBLIC_ORIGIN: "https://bee.example.test/",
       },
     });
@@ -291,7 +290,6 @@ it(
       env: {
         BEEBOT_SERVER_MODE: "1",
         BEEBOT_DATA_DIR: dataDir,
-        BEEBOT_SOCKET: NodePath.join(dataDir, "beebotd.sock"),
         BEEBOT_PUBLIC_ORIGIN: "https://bee.example.test",
         CREDENTIALS_DIRECTORY: dataDir,
       },
@@ -300,6 +298,29 @@ it(
     expect(await daemon.exited).toBe(noRestartExitCodes.invalidBootstrap);
     const line = JSON.parse(daemon.output().trim().split("\n").at(-1) ?? "");
     expect(line).toMatchObject({ level: "error", msg: expect.stringContaining("vault-key") });
+    expect(NodeFS.existsSync(NodePath.join(dataDir, "beebot.db"))).toBe(false);
+  },
+  daemonTestTimeoutMs,
+);
+
+it(
+  "fails closed in server mode without a socket systemd made for it",
+  async () => {
+    NodeFS.writeFileSync(NodePath.join(dataDir, "vault-key"), Buffer.alloc(32).toString("base64"));
+    // Activation meant for another process, as a child of an activated one would inherit it.
+    const daemon = spawnBeebotd("", {
+      env: {
+        BEEBOT_SERVER_MODE: "1",
+        BEEBOT_DATA_DIR: dataDir,
+        BEEBOT_PUBLIC_ORIGIN: "https://bee.example.test",
+        CREDENTIALS_DIRECTORY: dataDir,
+        LISTEN_FDS: "1",
+        LISTEN_PID: String(process.pid),
+      },
+    });
+    cleanups.push(daemon.kill);
+    expect(await daemon.exited).toBe(noRestartExitCodes.invalidBootstrap);
+    expect(daemon.output()).toContain("beebotd@.socket");
     expect(NodeFS.existsSync(NodePath.join(dataDir, "beebot.db"))).toBe(false);
   },
   daemonTestTimeoutMs,

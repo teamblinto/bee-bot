@@ -119,13 +119,13 @@ function wipeRuntime(dataDir: string) {
 }
 
 type Cell = {
-  socketPath: string;
+  socketFd: number;
   publicOrigin: string;
   maxActiveBoxes: number;
   monthlyBudgetUsd: number | null;
 };
 
-// Server mode: one beebotd per user on a Linux host, reached only through `socketPath`.
+// Server mode: one beebotd per user on a Linux host, reached only through `socketFd`.
 async function boot(bootstrap: Bootstrap, cell?: Cell) {
   const serverMode = cell !== undefined;
   const store = openStore(bootstrap.dataDir);
@@ -270,7 +270,7 @@ async function boot(bootstrap: Bootstrap, cell?: Cell) {
   relay = server.relay;
   void boxes.refresh();
   if (cell) {
-    console.info(`beebotd: listening on ${cell.socketPath}`);
+    console.info("beebotd: listening on the socket from systemd");
   } else {
     console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
     const { pauseReason } = await probe(store.accountLane("claude"));
@@ -338,18 +338,24 @@ function readBootstrapFile(path: string | undefined) {
 // The origin alone, as browsers send it: scheme, host and port, no path or trailing slash.
 const isOrigin = (value: string) => URL.parse(value)?.origin === value;
 
-// Fails closed: without its own vault key and its public origin a cell never starts.
+// Fails closed: without its own vault key, its public origin and the socket systemd made for it
+// a cell never starts.
 function serverBootstrap({
   BEEBOT_DATA_DIR: dataDir,
-  BEEBOT_SOCKET: socketPath,
   BEEBOT_PUBLIC_ORIGIN: publicOrigin,
   CREDENTIALS_DIRECTORY: credentials,
+  LISTEN_FDS: listenFds,
+  LISTEN_PID: listenPid,
   ...env
 }: NodeJS.ProcessEnv) {
-  if (!dataDir || !socketPath || !publicOrigin || !isOrigin(publicOrigin)) {
+  // Not passed on: a child would take the socket as handed to it.
+  delete process.env.LISTEN_FDS;
+  delete process.env.LISTEN_PID;
+  delete process.env.LISTEN_FDNAMES;
+  if (!dataDir || !publicOrigin || !isOrigin(publicOrigin)) {
     return exitWith(
       noRestartExitCodes.invalidBootstrap,
-      "server mode needs BEEBOT_DATA_DIR, BEEBOT_SOCKET and an origin in BEEBOT_PUBLIC_ORIGIN",
+      "server mode needs BEEBOT_DATA_DIR and an origin in BEEBOT_PUBLIC_ORIGIN",
     );
   }
   const limits = cellLimits(env);
@@ -365,10 +371,17 @@ function serverBootstrap({
       `no vault key at $CREDENTIALS_DIRECTORY/vault-key (${vault.problem})`,
     );
   }
+  // sd_listen_fds(3): systemd hands over one socket, at fd 3, to this very process.
+  if (listenFds !== "1" || listenPid !== String(process.pid)) {
+    return exitWith(
+      noRestartExitCodes.invalidBootstrap,
+      "server mode listens only on the socket systemd passes it (beebotd@.socket)",
+    );
+  }
   // The token guards only the TCP listener, which server mode never opens.
   const token = NodeCrypto.randomBytes(32).toString("base64url");
   const bootstrap: Bootstrap = { port: 0, token, dataDir, allowedOrigins: [], vault };
-  return { bootstrap, cell: { socketPath, publicOrigin, ...limits } };
+  return { bootstrap, cell: { socketFd: 3, publicOrigin, ...limits } };
 }
 
 const fileFlag = process.argv.indexOf("--bootstrap", 2);

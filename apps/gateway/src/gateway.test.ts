@@ -35,14 +35,16 @@ async function fakeCell(cell: string) {
   if (cells.has(cell)) {
     return;
   }
-  const socketPath = NodePath.join(cellsDir, cell, "beebotd.sock");
+  const socketPath = NodePath.join(cellsDir, `${cell}.sock`);
   // Windows has no unix socket at a file path, so there the cells are named pipes.
   if (process.platform !== "win32") {
-    NodeFS.mkdirSync(NodePath.dirname(socketPath), { recursive: true });
+    NodeFS.mkdirSync(cellsDir, { recursive: true });
   }
   const server = NodeHttp.createServer((request, response) => {
     response.setHeader("set-cookie", "stolen=1; Path=/");
     response.setHeader("content-security-policy", "default-src *");
+    response.setHeader("access-control-allow-origin", "https://evil.example");
+    response.setHeader("clear-site-data", '"cookies"');
     if (request.url?.endsWith(".html")) {
       response.setHeader("content-type", "text/html");
       response.end("<script>fetch('/admin/api/users')</script>");
@@ -53,7 +55,7 @@ async function fakeCell(cell: string) {
   });
   server.on("upgrade", (request, socket: NodeNet.Socket) => {
     socket.write(
-      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Cell: ${cell}\r\nSet-Cookie: stolen=1\r\n\r\n`,
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Cell: ${cell}\r\nSet-Cookie: stolen=1\r\nClear-Site-Data: "*"\r\nContent-Security-Policy: default-src *\r\n\r\n`,
     );
     socket.pipe(socket);
   });
@@ -264,6 +266,16 @@ describe("invites", () => {
     expect(provisioned).toEqual([cell, cell]);
     const health = await fetch(`${base}/health`, { headers: { cookie: cookieOf(login)! } });
     expect((await health.json()).cell).toBe(cell);
+  });
+
+  it("retry a cell a gateway restart left provisioning", async () => {
+    await signUp("bi@example.test");
+    const [cell] = provisioned;
+    // As a gateway that died during `add` leaves it.
+    db.prepare("UPDATE member SET state = 'provisioning'").run();
+    const login = await post("/login", { email: "bi@example.test", password, next: "/" });
+    expect(login.status).toBe(303);
+    expect(provisioned).toEqual([cell, cell]);
   });
 });
 
@@ -590,7 +602,13 @@ describe("admin pages", () => {
     }
     expect(provisionCalls.slice(calls).filter(([verb]) => verb === "quota")).toEqual([]);
 
-    statusOf = async () => ({ ok: true, active: "active", boxes: 5, budgetUsd: 10 });
+    // As beebot-provision's `status` reports them.
+    statusOf = async () => ({
+      ok: true,
+      active: "active",
+      maxActiveBoxes: "5",
+      monthlyBudgetUsd: "10",
+    });
     const extra = await (await page(`/admin/users/${cell}`, admin)).text();
     expect(extra).toContain('name="boxes" value="5"');
     expect(extra).toContain('name="budget-usd" value="10"');
@@ -629,7 +647,7 @@ describe("admin pages", () => {
       server.closeAllConnections();
     });
     const hung = NodeHttp.createServer(() => {});
-    hung.listen(NodePath.join(cellsDir, cell, "beebotd.sock"));
+    hung.listen(NodePath.join(cellsDir, `${cell}.sock`));
     await once(hung, "listening");
     cleanups.push(() => {
       hung.closeAllConnections();
@@ -697,6 +715,9 @@ describe("proxy to cells", () => {
     expect(reply.status).toBe(101);
     expect(reply.headers["x-cell"]).toBe(provisioned[1]);
     expect(reply.headers["set-cookie"]).toBeUndefined();
+    expect(reply.headers["clear-site-data"]).toBeUndefined();
+    expect(reply.headers["content-security-policy"]).toBe("sandbox");
+    expect(reply.headers["x-content-type-options"]).toBe("nosniff");
   });
 
   it("serves a cell's page in an opaque origin, and lets it set no cookie", async () => {
@@ -706,6 +727,8 @@ describe("proxy to cells", () => {
       expect(reply.headers.get("content-security-policy")).toBe("sandbox");
       expect(reply.headers.get("x-content-type-options")).toBe("nosniff");
       expect(reply.headers.getSetCookie()).toEqual([]);
+      expect(reply.headers.get("access-control-allow-origin")).toBeNull();
+      expect(reply.headers.get("clear-site-data")).toBeNull();
     }
   });
 

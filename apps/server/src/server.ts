@@ -187,6 +187,9 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   serverMode?: boolean | undefined;
   // Listens here instead of on TCP. The socket's file permission is the only gate in front of it.
   socketPath?: string | undefined;
+  // Or listens on a socket systemd made and handed over (beebotd@.socket): the same gate, kept by
+  // systemd in a folder no cell can write.
+  socketFd?: number | undefined;
   // Server mode: the gateway's origin, the only one a browser may call from, and where OAuth returns.
   publicOrigin?: string | undefined;
   // Server mode: the API-key budget for each calendar month, or null for none.
@@ -299,6 +302,7 @@ export async function startServer({
   cuaDriver,
   serverMode = false,
   socketPath,
+  socketFd,
   publicOrigin,
   monthlyBudgetUsd,
 }: Options) {
@@ -695,7 +699,7 @@ export async function startServer({
   // Invariant: only the cell owner (through the gateway that authenticated them) can open the
   // socket, so whatever arrives on it is the owner's and no token check applies. Origin still
   // does: the owner's browser sends the gateway its cookie whichever site makes the call.
-  const ownerSocket = socketPath !== undefined;
+  const ownerSocket = socketPath !== undefined || socketFd !== undefined;
 
   // Non-browser clients send no Origin; they still need the token.
   const originAllowed = (origin: string | undefined) =>
@@ -2043,7 +2047,9 @@ export async function startServer({
       server.off("error", reject);
       resolve();
     };
-    if (socketPath === undefined) {
+    if (socketFd !== undefined) {
+      server.listen({ fd: socketFd }, listening);
+    } else if (socketPath === undefined) {
       server.listen(port, "127.0.0.1", listening);
     } else {
       server.listen(socketPath, listening);

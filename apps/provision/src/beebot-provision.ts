@@ -35,7 +35,12 @@ const paths = {
   group: "/etc/group",
   subuid: "/etc/subuid",
   subgid: "/etc/subgid",
-  denied: ["/etc/cron.deny", "/etc/at.deny"],
+  // Without cron.allow or cron.deny every user may use cron, so cron.deny is made if missing.
+  // Without at.allow or at.deny only root may use at, and making at.deny would open it to all.
+  denied: [
+    { file: "/etc/cron.deny", make: true },
+    { file: "/etc/at.deny", make: false },
+  ],
 };
 const gatewayGroup = "beebot-gw";
 
@@ -202,10 +207,10 @@ export const removeTree = (path: string) => run("rm", ["-rf", "--one-file-system
 // Cron and at would start a cell's processes outside its slice and its fence. A line is only ever
 // added: a deleted cell's name stays denied.
 function denyScheduling(cell: string) {
-  for (const file of paths.denied) {
+  for (const { file, make } of paths.denied) {
+    const exists = NodeFs.existsSync(file);
     const text = read(file);
-    if (!text.split("\n").includes(cell)) {
-      const exists = NodeFs.existsSync(file);
+    if ((exists || make) && !text.split("\n").includes(cell)) {
       // Appended in place, so the file keeps the owner and mode at and cron read it with.
       NodeFs.appendFileSync(file, `${text === "" || text.endsWith("\n") ? "" : "\n"}${cell}\n`);
       if (!exists) {
@@ -216,6 +221,8 @@ function denyScheduling(cell: string) {
 }
 
 const unit = (cell: string) => `beebotd@${cell}.service`;
+// The gateway's connect starts the cell through this, so it goes down and comes up with the cell.
+const socketUnit = (cell: string) => `beebotd@${cell}.socket`;
 const slice = (cell: string) => `beebot-${cell}.slice`;
 const home = (cell: string) => NodePath.join(paths.cells, cell);
 const credFile = (cell: string) => NodePath.join(paths.creds, `${cell}.vault-key.cred`);
@@ -330,7 +337,7 @@ function add(cell: string) {
     writeQuota(cell, defaultQuota);
   }
   run("systemctl", ["daemon-reload"]);
-  run("systemctl", ["enable", "--now", unit(cell)]);
+  run("systemctl", ["enable", "--now", socketUnit(cell), unit(cell)]);
   return { cell, uid, subid: subidRange(slot).start, created };
 }
 
@@ -389,9 +396,9 @@ function status(cell: string) {
 // Irreversible. Each step tolerates an earlier, interrupted delete having done it already.
 function remove(cell: string) {
   const found = lookup(cell);
-  run("systemctl", ["disable", "--now", unit(cell)]);
-  // Stopping the slice ends anything left in it, by cgroup, never by name.
-  run("systemctl", ["stop", slice(cell)]);
+  run("systemctl", ["disable", "--now", socketUnit(cell), unit(cell)]);
+  // Stopping the slices ends anything left in them, by cgroup, never by name.
+  run("systemctl", ["stop", slice(cell), ...(found ? [`user-${found.uid}.slice`] : [])]);
   if (found) {
     for (const [file, flag] of [
       [paths.subuid, "--del-subuids"],
@@ -410,10 +417,8 @@ function remove(cell: string) {
   }
   assertRootOwned(paths.cells);
   removeTree(home(cell));
-  if (NodeFs.existsSync(paths.sockets)) {
-    assertRootOwned(paths.sockets);
-    removeTree(NodePath.join(paths.sockets, cell));
-  }
+  // systemd removes the socket as it stops it; this is the one an interrupted stop leaves.
+  NodeFs.rmSync(NodePath.join(paths.sockets, `${cell}.sock`), { force: true });
   NodeFs.rmSync(credFile(cell), { force: true });
   NodeFs.rmSync(quotaDir(cell), { recursive: true, force: true });
   NodeFs.rmSync(limitsDir(cell), { recursive: true, force: true });
@@ -428,14 +433,15 @@ export function execute(command: Command) {
     case "suspend": {
       const { uid } = existing(command.cell);
       run("loginctl", ["disable-linger", command.cell]);
-      run("systemctl", ["disable", "--now", unit(command.cell)]);
+      // The socket too, so no connect can start the cell again.
+      run("systemctl", ["disable", "--now", socketUnit(command.cell), unit(command.cell)]);
       // Ends whatever the cell left running, in its slice or in a session, by cgroup.
       run("systemctl", ["stop", slice(command.cell), `user-${uid}.slice`]);
       return { cell: command.cell, suspended: true };
     }
     case "resume":
       existing(command.cell);
-      run("systemctl", ["enable", "--now", unit(command.cell)]);
+      run("systemctl", ["enable", "--now", socketUnit(command.cell), unit(command.cell)]);
       return { cell: command.cell, suspended: false };
     case "status":
       return status(command.cell);

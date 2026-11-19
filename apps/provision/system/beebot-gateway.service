@@ -18,8 +18,8 @@ Environment=GATEWAY_SOCKET=/run/beebot/gateway/gateway.sock
 Environment=GATEWAY_WEB_DIR=/opt/beebot/current/apps/web/dist
 StateDirectory=beebot/gateway
 StateDirectoryMode=0700
-# Its own folder: /run/beebot and /run/beebot/cells stay root's, since root makes each cell's
-# socket folder there.
+# Its own folder: /run/beebot and /run/beebot/cells stay root's, since systemd makes each cell's
+# socket there (beebotd@.socket).
 RuntimeDirectory=beebot/gateway
 RuntimeDirectoryMode=0750
 ExecStart=/usr/bin/node /opt/beebot/current/apps/gateway/dist/index.mjs serve

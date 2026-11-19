@@ -89,12 +89,20 @@ const forwardable = (headers: NodeHttp.IncomingHttpHeaders) =>
     Object.entries(headers).filter(([name]) => !dropped.has(name) && name !== "set-cookie"),
   );
 
-// A cell is untrusted. It sets no cookie on this origin, and a page it serves (a workspace file,
-// say) gets an opaque origin, so its script can't reach the session or /admin/api.
+// A cell is untrusted. It sets no cookie on this origin, opens it to no other origin, clears
+// nothing of the gateway's, and a page it serves (a workspace file, say) gets an opaque origin, so
+// its script can't reach the session or /admin/api.
+const cellPolicy = { "content-security-policy": "sandbox", "x-content-type-options": "nosniff" };
+const keptFromCell = (name: string) =>
+  name !== "set-cookie" &&
+  name !== "clear-site-data" &&
+  !name.startsWith("access-control-") &&
+  !Object.hasOwn(cellPolicy, name);
 const fromCell = (headers: NodeHttp.IncomingHttpHeaders) => ({
-  ...forwardable(headers),
-  "content-security-policy": "sandbox",
-  "x-content-type-options": "nosniff",
+  ...Object.fromEntries(
+    Object.entries(forwardable(headers)).filter(([name]) => keptFromCell(name)),
+  ),
+  ...cellPolicy,
 });
 
 const contentTypes: Record<string, string> = {
@@ -148,8 +156,8 @@ const quotaFields = {
   memory: /^[1-9][0-9]{0,5}[KMGT]$/,
   cpu: /^[1-9][0-9]{0,4}%$/,
   tasks: /^[1-9][0-9]{0,6}$/,
-  boxes: /^[0-9]{1,4}$/,
-  "budget-usd": /^[0-9]{1,6}(\.[0-9]{1,2})?$/,
+  boxes: /^[1-9][0-9]{0,2}$/,
+  "budget-usd": /^(0|[1-9][0-9]{0,6})(\.[0-9]{1,2})?$/,
 };
 
 export function quotaArgs(form: URLSearchParams) {
@@ -188,8 +196,8 @@ function quotaValues(status: Record<string, unknown>): QuotaValues {
     memory: unit ? `${bytes / unit[1]}${unit[0]}` : "",
     cpu: cpu ? `${Math.round(Number(cpu[1]) * (cpu[2] === "s" ? 100 : 0.1))}%` : "",
     tasks: /^\d+$/.test(String(status.tasksMax)) ? String(status.tasksMax) : "",
-    boxes: optional(status.boxes),
-    "budget-usd": optional(status.budgetUsd),
+    boxes: optional(status.maxActiveBoxes),
+    "budget-usd": optional(status.monthlyBudgetUsd),
   };
 }
 
@@ -257,10 +265,12 @@ async function readForm(request: NodeHttp.IncomingMessage, limit = 16 * 1024) {
     : new URLSearchParams(body);
 }
 
+// A cell's answer to an upgrade, held to fromCell's rules.
 const rawHeaderLines = (raw: string[]) =>
   raw
     .flatMap((item, index) => (index % 2 ? [] : [[item, raw[index + 1]] as const]))
-    .filter(([name]) => name.toLowerCase() !== "set-cookie")
+    .filter(([name]) => keptFromCell(name.toLowerCase()))
+    .concat(Object.entries(cellPolicy))
     .reduce((lines, [name, value]) => `${lines}${name}: ${value}\r\n`, "");
 
 export function createGateway({ auth, db, origin, webDir, cellsDir, provision }: Options) {
@@ -271,7 +281,8 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     if (!cellPattern.test(cell)) {
       throw new Error("invalid cell name in the database");
     }
-    return NodePath.join(cellsDir, cell, "beebotd.sock");
+    // systemd makes it (beebotd@.socket) in a folder only root writes, so no cell can swap it.
+    return NodePath.join(cellsDir, `${cell}.sock`);
   };
 
   // Open proxied sockets by user, so logout and suspend can end them.
@@ -285,8 +296,13 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     }
   }
 
+  // Cells this process is setting up now. One left `provisioning` but not here was cut off by a
+  // restart, and is tried again at sign-in.
+  const provisioning = new Set<string>();
+
   async function provisionCell(userId: string, cell: string) {
-    const provisioned = await provision(["add", cell]);
+    provisioning.add(cell);
+    const provisioned = await provision(["add", cell]).finally(() => provisioning.delete(cell));
     if (provisioned.ok) {
       setMemberState(db, userId, "ready");
       log("info", "cell provisioned", { userId, cell });
@@ -326,7 +342,10 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     const { token, user } = (await response.json()) as { token: string; user: { id: string } };
     let member = findMember(db, user.id);
     // A cell that failed to set up is tried again at each sign-in, and stays closed until it works.
-    if (member?.state === "failed" && retryFailedMember(db, user.id)) {
+    if (
+      (member?.state === "failed" && retryFailedMember(db, user.id)) ||
+      (member?.state === "provisioning" && !provisioning.has(member.cell))
+    ) {
       await provisionCell(user.id, member.cell);
       member = findMember(db, user.id);
     }

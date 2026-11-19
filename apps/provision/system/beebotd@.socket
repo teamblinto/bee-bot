@@ -1,0 +1,19 @@
+[Unit]
+Description=Bee Bot cell %i socket
+
+[Socket]
+# The gateway connects here, and beebotd trusts whatever does as the cell's owner. systemd makes
+# the socket as root in a folder only root writes and only the gateway's group enters, so no cell
+# can replace it or put a link to another cell's socket in its place.
+ExecStartPre=/usr/bin/install -d -m 0711 /run/beebot
+ExecStartPre=/usr/bin/install -d -g beebot-gw -m 0710 /run/beebot/cells
+ListenStream=/run/beebot/cells/%i.sock
+SocketUser=root
+SocketGroup=beebot-gw
+SocketMode=0660
+# Gone while the cell is stopped, so a suspended cell has nothing to connect to.
+RemoveOnStop=yes
+Service=beebotd@%i.service
+
+[Install]
+WantedBy=sockets.target
