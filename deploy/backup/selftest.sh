@@ -43,6 +43,16 @@ as_cell sh -c "echo hello >'$data/bots/b1/workspace/notes.txt'"
 as_cell sh -c "echo SECRET >'$data/credentials/acct1/.credentials.json'"
 as_cell sh -c "echo SECRET >'$data/bots/b1/workspace/.claude/.credentials.json'"
 as_cell sqlite3 "$db" "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v);" >/dev/null
+install -d -m 0755 "$t/host/etc/systemd/system/beebotd@$cell.service.d"
+echo "[Service]" >"$t/host/etc/systemd/system/beebotd@$cell.service.d/limits.conf"
+# Hostile cells: one whose database can't be read, one whose database is a FIFO.
+bad=bb0000000bad fifo=bb00000f1f00
+for other in "$bad" "$fifo"; do
+	install -d -m 0700 -o nobody -g nogroup "$t/host/var/lib/beebot/cells/$other"
+	as_cell mkdir "$t/host/var/lib/beebot/cells/$other/data"
+done
+as_cell sh -c "head -c 8192 /dev/urandom >'$t/host/var/lib/beebot/cells/$bad/data/beebot.db'"
+as_cell mkfifo "$t/host/var/lib/beebot/cells/$fifo/data/beebot.db"
 
 # beebotd stand-in: keeps writing while the backup runs.
 setpriv --reuid=nobody --regid=nogroup --clear-groups \
@@ -50,7 +60,8 @@ setpriv --reuid=nobody --regid=nogroup --clear-groups \
 writer=$!
 sleep 1
 before=$(q 'SELECT count(*) FROM t')
-"$here/beebot-backup" backup || fail "backup"
+if timeout 300 "$here/beebot-backup" backup 2>"$t/err"; then fail "backup passed with a cell left out"; fi
+grep -q "could not be copied: $bad\$" "$t/err" || fail "backup didn't name the one cell it left out"
 kill "$writer"
 wait "$writer" 2>/dev/null || true
 writer=
@@ -64,8 +75,11 @@ grep -qx "$db" <<<"$listing" && fail "the live database file is in the backup"
 grep -qx "$t/host/var/lib/beebot-backup/stage$db" <<<"$listing" || fail "no database snapshot in the backup"
 grep -qx "$data/bots/b1/workspace/notes.txt" <<<"$listing" || fail "workspace missing"
 grep -qx "$t/host/etc/beebot/creds/$cell.vault-key.cred" <<<"$listing" || fail "vault cred missing"
+grep -qx "$t/host/etc/systemd/system/beebotd@$cell.service.d/limits.conf" <<<"$listing" || fail "box cap and budget missing"
+grep -q "/cells/$bad" <<<"$listing" && fail "the cell whose database failed is in the backup"
+grep -qx "$t/host/var/lib/beebot/cells/$fifo/data" <<<"$listing" || fail "the FIFO cell's data is missing"
 [ ! -e "$t/host/var/lib/beebot-backup/stage" ] || fail "plaintext snapshots left on disk"
-echo "ok: backup holds workspace, config and a database snapshot; no logins"
+echo "ok: backup holds workspace, config, limits and a database snapshot; no logins; a bad cell is only left out"
 
 # Changes after the backup, then a restore of the cell undoes them and keeps the logins.
 q "INSERT INTO t(v) VALUES('after-backup')"

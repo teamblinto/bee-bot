@@ -32,18 +32,26 @@ die() {
 }
 
 # A consistent copy of a live database, made as the database's owner: root opening it could leave
-# root-owned -wal and -shm files behind that the owner can no longer open.
+# root-owned -wal and -shm files behind that the owner can no longer open. Returns non-zero instead
+# of exiting, so one cell can't stop everyone else's backup; every step checks the last, since
+# errexit is off in a function called as a condition.
 snapshot_db() {
-	local db=$1 out=$stage$1 owner
-	owner=$(stat -c %u:%g "$(dirname "$db")")
+	local db=$1 out=$stage$1 owner as_owner
+	owner=$(stat -c %u:%g "$(dirname "$db")") || return 1
 	# Parents open to traversal but not listing, so the owner reaches the one folder it can write.
-	(umask 066 && mkdir -p "$(dirname "$out")")
-	chown "$owner" "$(dirname "$out")"
-	chmod 0700 "$(dirname "$out")"
-	setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups \
-		sqlite3 -batch -init /dev/null -cmd '.timeout 30000' "$db" "VACUUM INTO '$out'"
-	[ "$(sqlite3 "$out" 'PRAGMA integrity_check')" = ok ] || die "snapshot of $db is corrupt"
+	(umask 066 && mkdir -p "$(dirname "$out")") &&
+		chown "$owner" "$(dirname "$out")" &&
+		chmod 0700 "$(dirname "$out")" || return 1
+	# The owner can swap in a FIFO or a link at any moment, so the check runs as the owner too, and
+	# both under a timeout: a FIFO would block sqlite3 forever.
+	as_owner=(timeout 900 setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups)
+	"${as_owner[@]}" sqlite3 -batch -init /dev/null -cmd '.timeout 30000' "$db" "VACUUM INTO '$out'" &&
+		[ "$("${as_owner[@]}" sqlite3 -batch -init /dev/null -readonly "$out" 'PRAGMA integrity_check')" = ok ]
 }
+
+# A regular file or folder, not a link to one: a cell controls everything in its home.
+real_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+real_dir() { [ -d "$1" ] && [ ! -L "$1" ]; }
 
 list_cells() {
 	[ -d "$cells" ] || return 0
@@ -51,20 +59,29 @@ list_cells() {
 }
 
 backup() {
-	local paths=() cell
+	local paths=() failed=() cell dir
 	rm -rf --one-file-system "$stage"
 	# The snapshots are plaintext, so they never outlive the run.
 	trap 'rm -rf --one-file-system "$stage"' EXIT
 	(umask 066 && mkdir -p "$stage")
 	chmod 0711 "$stage"
-	[ ! -f "$gateway/gateway.db" ] || snapshot_db "$gateway/gateway.db"
+	if [ -f "$gateway/gateway.db" ] && ! snapshot_db "$gateway/gateway.db"; then
+		failed+=(gateway)
+	fi
+	# A cell whose database can't be copied is left out of this snapshot, and the rest go on.
 	for cell in $(list_cells); do
-		[ ! -f "$cells/$cell/data/beebot.db" ] || snapshot_db "$cells/$cell/data/beebot.db"
-		[ ! -d "$cells/$cell/data" ] || paths+=("$cells/$cell/data")
+		if real_file "$cells/$cell/data/beebot.db" && ! snapshot_db "$cells/$cell/data/beebot.db"; then
+			failed+=("$cell")
+			rm -rf --one-file-system "$stage$cells/$cell"
+			continue
+		fi
+		! real_dir "$cells/$cell/data" || paths+=("$cells/$cell/data")
 	done
 	[ ! -d "$etc" ] || paths+=("$etc")
-	# beebot-provision's quota drop-ins.
-	for dir in "$units"/beebot-*.slice.d; do [ ! -d "$dir" ] || paths+=("$dir"); done
+	# beebot-provision's drop-ins: each slice's quota, and each unit's box cap and budget.
+	for dir in "$units"/beebot-*.slice.d "$units"/beebotd@bb*.service.d; do
+		[ ! -d "$dir" ] || paths+=("$dir")
+	done
 	paths+=("$stage")
 
 	restic unlock
@@ -81,6 +98,7 @@ backup() {
 	rm -rf --one-file-system "$stage"
 	restic forget --tag beebot --keep-daily 7 --keep-weekly 4 --prune
 	verify
+	[ ${#failed[@]} -eq 0 ] || die "not backed up, as its database could not be copied: ${failed[*]}"
 }
 
 # Reads back part of the repository, then restores every database from the newest snapshot and
@@ -98,13 +116,16 @@ verify() {
 	echo "beebot-backup: verified $count database(s)"
 }
 
-# Stops a unit if it runs and remembers to start it again.
+# Stops the units that run, together, and remembers to start them again. A cell's socket goes with
+# its service: left listening, the gateway's next connect would start the cell mid-restore.
 stopped=()
-stop_unit() {
-	if systemctl is-active --quiet "$1"; then
-		systemctl stop "$1"
-		stopped+=("$1")
-	fi
+stop_units() {
+	local unit active=()
+	for unit in "$@"; do
+		! systemctl is-active --quiet "$unit" || active+=("$unit")
+	done
+	[ ${#active[@]} -eq 0 ] || systemctl stop "${active[@]}"
+	stopped+=(${active[@]+"${active[@]}"})
 }
 
 # Puts a restored database in place. Its old -wal and -shm go too: SQLite would replay them onto it.
@@ -124,7 +145,7 @@ restore_cell() {
 	# The home and user come from beebot-provision; with the cred back first, it reuses that key.
 	[ -d "$home" ] || die "no cell $cell here: run 'beebot-provision user add $cell', then this again"
 	owner=$(stat -c %u:%g "$home")
-	stop_unit "beebotd@$cell.service"
+	stop_units "beebotd@$cell.socket" "beebotd@$cell.service"
 	restic restore "$snap" --target "$tmp" --include "$home/data" --include "$stage$home/data"
 	[ -d "$tmp$home/data" ] || die "snapshot $snap has no cell $cell"
 	if [ -d "$home/data" ]; then
@@ -149,10 +170,9 @@ restore() {
 	tmp=$(mktemp -d "$cells/.restore-XXXXXX")
 	trap 'rm -rf --one-file-system "$tmp"' EXIT
 	if [ "$target" = all ]; then
-		stop_unit beebot-gateway.service
-		for unit in $(systemctl list-units --plain --no-legend --state=active 'beebotd@*.service' | awk '{ print $1 }'); do
-			stop_unit "$unit"
-		done
+		# shellcheck disable=SC2046
+		stop_units beebot-gateway.service $(systemctl list-units --plain --no-legend --state=active \
+			'beebotd@*.socket' 'beebotd@*.service' | awk '{ print $1 }')
 		restic restore "$snap" --target "$tmp" --include "$etc" --include "$units" --include "$stage$gateway"
 		[ ! -d "$tmp$etc" ] || cp -a "$tmp$etc/." "$etc/"
 		[ ! -d "$tmp$units" ] || cp -a "$tmp$units/." "$units/"
@@ -167,7 +187,7 @@ restore() {
 	else
 		restore_cell "$target" "$snap" "$tmp"
 	fi
-	for unit in ${stopped[@]+"${stopped[@]}"}; do systemctl start "$unit"; done
+	[ ${#stopped[@]} -eq 0 ] || systemctl start "${stopped[@]}"
 	# Their vault keys are back in /etc/beebot/creds, so beebot-provision reuses them.
 	for cell in ${missing[@]+"${missing[@]}"}; do
 		echo "beebot-backup: no cell $cell here: run 'beebot-provision user add $cell', then 'beebot-backup restore $cell'" >&2

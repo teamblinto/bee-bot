@@ -8,6 +8,7 @@ const open = {
   attended: true,
   box: "none",
   unattendedLane: null,
+  engine: "claude",
   lane: "subscription",
   botStatus: "ready",
   runsInLastDay: 0,
@@ -73,6 +74,16 @@ it("refuses an API-key run once this month's spend reaches the budget, and only 
   });
   expect(admit({ ...budgeted, lane: "subscription", spentThisMonthUsd: 50 }).verdict).toBe("admit");
   expect(admit({ ...open, lane: "api_key", spentThisMonthUsd: 1e6 }).verdict).toBe("admit");
+});
+
+it("refuses Codex's API-key lane under any budget, since Codex reports no cost", () => {
+  const codex = { ...open, engine: "codex", lane: "api_key" } as const;
+  expect(admit({ ...codex, monthlyBudgetUsd: 10 })).toEqual({
+    verdict: "refuse",
+    reason: "budget",
+  });
+  expect(admit({ ...codex, monthlyBudgetUsd: 10, lane: "subscription" }).verdict).toBe("admit");
+  expect(admit(codex).verdict).toBe("admit");
 });
 
 it("starts each budget period at the first of the month, UTC", () => {

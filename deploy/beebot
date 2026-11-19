@@ -1,11 +1,13 @@
 #!/bin/bash
 # Bee Bot host commands, as root.
 #   beebot invite <email> [--admin]   prints a sign-up link
-#   beebot update <release.tar.gz> [--box-image <box.tar>]
-# An update unpacks the release, backs up the gateway's and every cell's database, switches
-# /opt/beebot/current, and starts the gateway and the cells that were running before. If any of
-# them does not come back healthy, it puts the old release and the databases back, starts the same
-# set again and exits non-zero: 1 when the rollback is healthy, 2 when it is not.
+#   beebot update <release.tar.gz> [--box-image <box.tar>] [--sha256 <hex>]
+# An update prints the tarball's sha256 (and refuses it unless it matches --sha256, when given),
+# unpacks the release, stops the gateway and every cell's socket and service, backs up the
+# gateway's and every cell's database, switches /opt/beebot/current, and starts again what ran
+# before: the gateway, the sockets that listened and the cells that ran. If any of those does not
+# come back healthy, it stops everything again, puts the old release and the databases back,
+# starts the same set again and exits non-zero: 1 when the rollback is healthy, 2 when it is not.
 # BEEBOT_UPDATE_FORCE_FAIL=1 fails the new release's health check, to try the rollback.
 set -euo pipefail
 say() { echo "beebot: $*" >&2; }
@@ -32,14 +34,23 @@ if [ "${1:-}" != update ] || [ $# -lt 2 ]; then
 	usage
 fi
 tarball=$2
-box=""
+box="" sha256=""
 shift 2
-case "${1:-}" in
---box-image) box=$(readlink -f "${2:?}") ;;
-"") ;;
-*) usage ;;
-esac
+while [ $# -gt 0 ]; do
+	case $1 in
+	--box-image) box=$(readlink -f "${2:?}") && shift 2 ;;
+	--sha256) sha256=${2:-} && shift 2 ;;
+	*) usage ;;
+	esac
+done
 [ -f "$tarball" ] || { say "$tarball is not a file"; exit 1; }
+[ -z "$sha256" ] || [[ $sha256 =~ ^[0-9a-fA-F]{64}$ ]] || usage
+actual=$(sha256sum "$tarball" | cut -d ' ' -f 1)
+say "sha256 $actual $tarball"
+if [ -n "$sha256" ] && [ "$actual" != "${sha256,,}" ]; then
+	say "$tarball does not match --sha256 $sha256; nothing was changed"
+	exit 1
+fi
 
 releases=/opt/beebot/releases
 previous=$(readlink -f /opt/beebot/current)
@@ -66,13 +77,30 @@ if [ ! -d "$release" ]; then
 fi
 
 # Only what runs now comes back: a suspended or failed cell stays as it is.
-mapfile -t cells < <(systemctl list-units --type=service --state=active,activating --plain \
-	--no-legend 'beebotd@*.service' | awk '{ print $1 }' | grep -xE 'beebotd@bb[0-9a-f]{10}\.service' || true)
-units=(beebot-gateway.service "${cells[@]}")
+running() { # service|socket
+	systemctl list-units --type="$1" --state=active,activating --plain --no-legend "beebotd@*.$1" |
+		awk '{ print $1 }' | grep -xE "beebotd@bb[0-9a-f]{10}\.$1" || true
+}
+mapfile -t cells < <(running service)
+mapfile -t sockets < <(running socket)
+units=(beebot-gateway.service "${sockets[@]}" "${cells[@]}")
 
 # A database is copied by its owner, beside itself, so root never follows a path a cell controls.
 # VACUUM INTO makes a consistent copy even of a database in WAL mode.
 databases=(beebot-gw:/var/lib/beebot/gateway/gateway.db)
+# Every cell's units are stopped, not just those that run: a listening socket starts its cell on
+# the gateway's next connect, which would run it while its database is copied or put back.
+stop_all() {
+	local home cell every=(beebot-gateway.service)
+	for home in /var/lib/beebot/cells/bb*; do
+		cell=${home##*/}
+		if [[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null; then
+			[ ! -f /etc/systemd/system/beebotd@.socket ] || every+=("beebotd@$cell.socket")
+			every+=("beebotd@$cell.service")
+		fi
+	done
+	systemctl stop "${every[@]}"
+}
 for home in /var/lib/beebot/cells/bb*; do
 	cell=${home##*/}
 	[[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null &&
@@ -145,10 +173,10 @@ healthy() { # phase
 	for unit in "${cells[@]}"; do
 		cell=${unit#beebotd@}
 		cell=${cell%.service}
-		# Any HTTP answer will do: a cell refuses requests that don't come through the gateway.
+		# beebotd answers a request that names no protocolVersion with 426 protocol_mismatch.
 		until systemctl is-active -q "$unit" && [ "$(runuser -u beebot-gw -- curl -s -o /dev/null \
 			-w '%{http_code}' --max-time 5 --unix-socket "$(cell_socket "$cell")" \
-			http://cell/health)" != 000 ]; do
+			http://cell/health)" = 426 ]; do
 			[ $SECONDS -lt $deadline ] || { why="cell $cell does not answer on its socket"; return 1; }
 			sleep 2
 		done
@@ -156,8 +184,8 @@ healthy() { # phase
 }
 
 from=$(basename "$previous")
-say "updating $from -> $version (gateway and ${#cells[@]} running cells)"
-systemctl stop "${units[@]}"
+say "updating $from -> $version (gateway, ${#sockets[@]} listening sockets and ${#cells[@]} running cells)"
+stop_all
 for db in "${databases[@]}"; do
 	if ! sqlite_copy backup "$db"; then
 		systemctl start "${units[@]}"
@@ -173,7 +201,7 @@ if switch "$release" && systemctl start "${units[@]}" && healthy update; then
 fi
 say "$version is not healthy: $why. Rolling back to $from"
 failed=0
-systemctl stop "${units[@]}" || failed=1
+stop_all || failed=1
 switch "$previous" || failed=1
 restore_box_image || failed=1
 for db in "${databases[@]}"; do

@@ -2845,6 +2845,7 @@ export function openEventStore(dataDir: string) {
         hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
         boundary: bot.boundary,
         unattendedLane: laneOfBox(bot),
+        engine: bot.engineAccountId,
         // As index.ts launches it: a box bot takes its R7 lane, falling back to the account's.
         lane: (bot.boundary === "box" ? laneOfBox(bot) : null) ?? account.lane,
         botStatus: bot.status,

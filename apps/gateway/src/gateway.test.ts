@@ -554,7 +554,9 @@ describe("admin pages", () => {
     expect(form).toContain('name="memory" value="4G"');
     expect(form).toContain('name="cpu" value="200%"');
     expect(form).toContain('name="tasks" value="4096"');
-    expect(form).not.toContain('name="boxes"');
+    // Unset, yet there to fill in: a new cell has no cap or budget of its own.
+    expect(form).toContain('name="boxes" value=""');
+    expect(form).toContain('name="budget-usd" value=""');
 
     const quota = (fields: Record<string, string>) =>
       post("/admin/users/quota", { cell, ...fields }, { cookie: admin });

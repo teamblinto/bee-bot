@@ -128,7 +128,8 @@ const healthTimeoutMs = 2000;
 const within = <T>(ms: number, work: Promise<T>, late: T) =>
   Promise.race([work, new Promise<T>((resolve) => setTimeout(resolve, ms, late).unref())]);
 
-// beebotd answers GET /health on its socket without a token.
+// beebotd answers GET /health on its socket without a token, with 426 protocol_mismatch as this
+// names no protocolVersion.
 function answers(socketPath: string) {
   return new Promise<boolean>((resolve) => {
     const request = NodeHttp.get(
@@ -136,7 +137,7 @@ function answers(socketPath: string) {
       { socketPath, path: "/health", timeout: healthTimeoutMs, agent: false },
       (reply) => {
         reply.resume();
-        resolve(reply.statusCode === 200);
+        resolve(reply.statusCode === 200 || reply.statusCode === 426);
       },
     );
     request.on("timeout", () => request.destroy());
@@ -167,7 +168,7 @@ export function quotaArgs(form: URLSearchParams) {
     if (name === "cpu" && /^\d+$/.test(value)) {
       value += "%";
     }
-    // Boxes and budget are sent only when the form has them, which it does when status reports them.
+    // A blank box cap or budget is left out, which clears it: the default cap, and no budget.
     if (value === "" && (name === "boxes" || name === "budget-usd")) {
       continue;
     }
@@ -191,7 +192,7 @@ function quotaValues(status: Record<string, unknown>): QuotaValues {
   const bytes = Number(status.memoryMax);
   const unit = memoryUnits.find(([, size]) => bytes > 0 && bytes % size === 0);
   const cpu = /^(\d+(?:\.\d+)?)(s|ms)$/.exec(String(status.cpuQuotaPerSec));
-  const optional = (value: unknown) => (value == null ? undefined : String(value));
+  const optional = (value: unknown) => (value == null ? "" : String(value));
   return {
     memory: unit ? `${bytes / unit[1]}${unit[0]}` : "",
     cpu: cpu ? `${Math.round(Number(cpu[1]) * (cpu[2] === "s" ? 100 : 0.1))}%` : "",
@@ -483,11 +484,10 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
   ) {
     const users = await Promise.all(
       listUsers(db).map(async (user) => {
-        const [unit, answering] = await Promise.all([
-          cellStatus(user.cell),
-          answers(cellSocket(user.cell)),
-        ]);
-        return { ...user, unit: unitOf(unit), answering };
+        const unit = unitOf(await cellStatus(user.cell));
+        // A connect would start a stopped or failed cell through its socket.
+        const answering = unit === "active" && (await answers(cellSocket(user.cell)));
+        return { ...user, unit, answering };
       }),
     );
     sendPage(response, status, usersPage(users, selfCell, notice));
@@ -508,7 +508,13 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     sendPage(
       response,
       status,
-      userPage(member, unitOf(reply), quotaValues(reply.ok ? reply : {}), notice),
+      userPage(
+        member,
+        unitOf(reply),
+        quotaValues(reply.ok ? reply : {}),
+        // Saving a blank form would clear the cell's cap and budget.
+        reply.ok ? notice : { error: "This cell's quota couldn't be read.", ...notice },
+      ),
     );
   }
 

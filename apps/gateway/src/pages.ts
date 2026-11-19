@@ -137,13 +137,21 @@ export type QuotaValues = {
   memory: string;
   cpu: string;
   tasks: string;
-  boxes: string | undefined;
-  "budget-usd": string | undefined;
+  // Blank when unset: beebotd's default box cap, and no budget.
+  boxes: string;
+  "budget-usd": string;
 };
 
-const field = (name: string, label: string, value: string, pattern: string, hint: string) =>
+const field = (
+  name: string,
+  label: string,
+  value: string,
+  pattern: string,
+  hint: string,
+  required = true,
+) =>
   `<label for="${name}">${label}</label>
-<input id="${name}" name="${name}" value="${escapeHtml(value)}" pattern="${pattern}" aria-describedby="${name}-hint" required>
+<input id="${name}" name="${name}" value="${escapeHtml(value)}" pattern="${pattern}" aria-describedby="${name}-hint"${required ? " required" : ""}>
 <small id="${name}-hint">${hint}</small>`;
 
 export const userPage = (
@@ -163,8 +171,8 @@ ${saved ? `<p role="status">Quota saved.</p>` : ""}
 ${field("memory", "Memory", quota.memory, "[1-9][0-9]{0,5}[KMGT]", "Like 4G or 512M.")}
 ${field("cpu", "CPU", quota.cpu, "[1-9][0-9]{0,4}%?", "Percent of one core, like 200%.")}
 ${field("tasks", "Tasks", quota.tasks, "[1-9][0-9]{0,6}", "Most processes and threads at once.")}
-${quota.boxes === undefined ? "" : field("boxes", "Boxes", quota.boxes, "[1-9][0-9]{0,2}", "Most boxes running at once.")}
-${quota["budget-usd"] === undefined ? "" : field("budget-usd", "Budget (USD)", quota["budget-usd"], "(0|[1-9][0-9]{0,6})([.][0-9]{1,2})?", "Spending limit in dollars.")}
+${field("boxes", "Boxes", quota.boxes, "[1-9][0-9]{0,2}", "Most boxes running at once. Blank uses the default.", false)}
+${field("budget-usd", "Budget (USD)", quota["budget-usd"], "(0|[1-9][0-9]{0,6})([.][0-9]{1,2})?", "Monthly API-key spending limit in dollars. Blank means no limit.", false)}
 <button type="submit">Save quota</button>
 </form>
 <h2>Delete</h2>

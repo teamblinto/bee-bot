@@ -130,6 +130,46 @@ const cutOffNote =
   "Your turn was stopped while a tool was running, so it may or may not have taken effect. Check before you repeat it, then carry on.";
 const usageTimeoutMs = 15_000;
 
+// USD per million tokens, at or above every Claude model's list price. A turn stopped before its
+// `result` frame never learns its cost, so its tokens are charged at these to keep Stop from
+// slipping past the budget. shortcut: tokens of a request killed before its first frame go
+// uncounted, until the CLI reports a cost on interrupt.
+const ceilingPrices = {
+  input_tokens: 16,
+  output_tokens: 80,
+  cache_creation_input_tokens: 32,
+  cache_read_input_tokens: 1.6,
+};
+const TokenCounts = z.record(z.string(), z.unknown()).catch({});
+
+// Keeps, per API message, the highest of each count any frame reported. A frame without a message
+// id (message_delta) counts toward the last message that had one.
+export function tokenMeter() {
+  const messages = new Map<string, Record<string, number>>();
+  let current = "";
+  return {
+    see(id: unknown, usage: unknown) {
+      current = typeof id === "string" ? id : current;
+      const counts = messages.get(current) ?? {};
+      for (const [key, value] of Object.entries(TokenCounts.parse(usage))) {
+        if (key in ceilingPrices && typeof value === "number" && value > (counts[key] ?? 0)) {
+          counts[key] = value;
+        }
+      }
+      messages.set(current, counts);
+    },
+    ceilingUsd() {
+      let usd = 0;
+      for (const counts of messages.values()) {
+        for (const [key, price] of Object.entries(ceilingPrices)) {
+          usd += ((counts[key] ?? 0) * price) / 1e6;
+        }
+      }
+      return usd;
+    },
+  };
+}
+
 const initializeLine = `${JSON.stringify({
   type: "control_request",
   request_id: "init-1",
@@ -340,12 +380,14 @@ const Frame = z.object({
       index: loose,
       delta: z.object({ type: loose, text: loose, thinking: loose }).optional(),
       content_block: z.object({ type: loose, id: loose, name: loose }).optional(),
+      message: z.object({ id: loose, usage: loose }).optional().catch(undefined),
+      usage: loose,
     })
     .optional(),
   // `.catch`: a user frame's content can be a plain string, and a shape change here must never cost
   // the frame's `error` or the turn's result.
   message: z
-    .object({ content: z.array(Block).catch([]) })
+    .object({ id: loose, usage: loose, content: z.array(Block).catch([]) })
     .optional()
     .catch(undefined),
   rate_limit_info: z
@@ -530,6 +572,7 @@ function runProcess({
     let settled = false;
     let thinking = false;
     let thinkingBlock: unknown;
+    const meter = tokenMeter();
 
     const after = (ms: number, work: () => void) => {
       const timer = setTimeout(work, ms);
@@ -583,6 +626,12 @@ function runProcess({
       }
       onLine(stdout);
       settled = true;
+      if (lane === "api_key" && seen.result === undefined) {
+        const usd = meter.ceilingUsd();
+        if (usd > 0) {
+          onCost?.(usd);
+        }
+      }
       for (const cancel of timers) {
         cancel();
       }
@@ -659,8 +708,10 @@ function runProcess({
           openGate(frame);
         }
       } else if (frame.type === "stream_event") {
+        meter.see(frame.event?.message?.id, frame.event?.message?.usage ?? frame.event?.usage);
         onStreamEvent(frame);
       } else if (frame.type === "assistant") {
+        meter.see(frame.message?.id, frame.message?.usage);
         seen.assistantError = frame.error ?? seen.assistantError;
         for (const { type, id, name, input } of frame.message?.content ?? []) {
           if (type === "tool_use" && typeof id === "string" && typeof name === "string") {

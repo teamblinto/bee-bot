@@ -16,6 +16,7 @@ import {
   probeEngine,
   probeUsage,
   staticClaudeModels,
+  tokenMeter,
   turnArgs,
   writeMcpConfig,
 } from "./claude.ts";
@@ -256,6 +257,20 @@ describe("toolDetail", () => {
     expect(toolDetail("constructor", {}, cwd)).toBeNull();
     expect(toolDetail("Bash", { command: 7 }, cwd)).toBeNull();
     expect(toolDetail("Bash", undefined, cwd)).toBeNull();
+  });
+});
+
+describe("tokenMeter", () => {
+  it("prices each message's highest counts at the ceiling, once per message", () => {
+    const meter = tokenMeter();
+    meter.see("msg_1", { input_tokens: 1000, cache_read_input_tokens: 10_000, output_tokens: 1 });
+    // message_delta carries no id and the running output count.
+    meter.see(undefined, { output_tokens: 500 });
+    meter.see("msg_1", { input_tokens: 1000, output_tokens: 200 });
+    meter.see("msg_2", { input_tokens: 2000, output_tokens: 100, service_tier: "standard" });
+    meter.see("msg_3", "not usage");
+    // (3000 * 16 + 600 * 80 + 10000 * 1.6) / 1e6
+    expect(meter.ceilingUsd()).toBeCloseTo(0.112, 9);
   });
 });
 

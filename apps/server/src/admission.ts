@@ -9,6 +9,7 @@ type Admission = {
   box: "none" | "unavailable" | "ready";
   // R7: the lane an unattended run may use, or null when the owner allowed none.
   unattendedLane: EngineLane | null;
+  engine: Bot["engineAccountId"];
   // The lane this run would take.
   lane: EngineLane;
   botStatus: Bot["status"];
@@ -35,9 +36,12 @@ function unattendedRefusal({ box, unattendedLane }: Admission): RunReason | null
   return unattendedLane === null ? "automated_access" : null;
 }
 
-// The subscription lane is left to the vendor's own limits: Bee can't see what it costs.
-const overBudget = ({ lane, monthlyBudgetUsd, spentThisMonthUsd }: Admission) =>
-  lane === "api_key" && monthlyBudgetUsd !== null && spentThisMonthUsd >= monthlyBudgetUsd;
+// The subscription lane is left to the vendor's own limits: Bee can't see what it costs. Codex
+// reports no cost at all, so under a budget its API-key lane is refused outright.
+const overBudget = ({ engine, lane, monthlyBudgetUsd, spentThisMonthUsd }: Admission) =>
+  lane === "api_key" &&
+  monthlyBudgetUsd !== null &&
+  (engine === "codex" || spentThisMonthUsd >= monthlyBudgetUsd);
 
 // Concurrency 1 per account is not decided here: a Queued run simply isn't claimable yet.
 export function admit(admission: Admission) {
