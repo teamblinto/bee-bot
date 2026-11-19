@@ -1,0 +1,24 @@
+#!/usr/sbin/nft -f
+# Cell users (uids 50000-50999, see beebot-provision.ts) may reach the internet and the DNS
+# resolvers below, nothing on this host and no private or metadata address. Box traffic leaves
+# through pasta, which runs as the cell's uid, so it is fenced too. install.sh fills in resolvers.
+table inet beebot_fence
+delete table inet beebot_fence
+table inet beebot_fence {
+	set resolvers {
+		type ipv4_addr
+		elements = { 127.0.0.53 }
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid 50000-50999 jump cell
+	}
+
+	chain cell {
+		ip daddr @resolvers meta l4proto { tcp, udp } th dport 53 accept
+		fib daddr type { local, broadcast, multicast } reject
+		ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 } reject
+		ip6 daddr { ::/127, ::ffff:0:0/96, 64:ff9b::/96, fc00::/7, fe80::/10, ff00::/8 } reject
+	}
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Bee Bot network fence for cell users
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/beebot/fence.nft
+ExecStop=/usr/sbin/nft delete table inet beebot_fence
+
+[Install]
+WantedBy=multi-user.target

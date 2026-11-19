@@ -1,0 +1,2 @@
+# /etc/sudoers.d/beebot-provision: the gateway may run the cell helper as root, and nothing else.
+beebot-gw ALL=(root) NOPASSWD: /usr/local/sbin/beebot-provision

@@ -1,0 +1,14 @@
+{
+  "name": "@beebot/provision",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Root helper that creates, limits and removes one Bee Bot cell per user on a Linux host",
+  "type": "module",
+  "scripts": {
+    "test": "vp test run"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

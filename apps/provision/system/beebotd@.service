@@ -1,0 +1,59 @@
+[Unit]
+Description=Bee Bot cell %i
+Requires=beebot-fence.service
+After=network-online.target beebot-fence.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+Slice=beebot-%i.slice
+WorkingDirectory=/var/lib/beebot/cells/%i
+EnvironmentFile=/etc/beebot/beebot.env
+Environment=BEEBOT_SERVER_MODE=1
+Environment=BEEBOT_DATA_DIR=/var/lib/beebot/cells/%i/data
+Environment=BEEBOT_SOCKET=/run/beebot/cells/%i/beebotd.sock
+Environment=BEEBOT_BOX_ROOT=/opt/beebot/current
+Environment=XDG_RUNTIME_DIR=/run/beebot/run/%i
+Environment=CONTAINERS_CONF_OVERRIDE=/etc/beebot/containers.conf
+EnvironmentFile=/etc/beebot/box-image.env
+LoadCredentialEncrypted=vault-key:/etc/beebot/creds/%i.vault-key.cred
+RuntimeDirectory=beebot/run/%i
+RuntimeDirectoryMode=0700
+# Fails closed: no fence, no cell.
+ExecStartPre=+/usr/sbin/nft list chain inet beebot_fence cell
+# Only the cell and the gateway enter the socket folder. Not a RuntimeDirectory=: systemd would
+# give it back the cell's own group. setgid, so the socket gets the gateway's group too.
+ExecStartPre=+/usr/bin/install -d -o %i -g beebot-gw -m 2750 /run/beebot/cells/%i
+# Each cell holds the box image in its own store: rootless Podman re-owns an image's files into a
+# box's id range, which it cannot do for layers in a root-owned shared store.
+ExecStartPre=/bin/sh -c 'podman image exists "$BEEBOT_BOX_IMAGE" || exec podman load -q -i /var/lib/beebot/box-image.tar'
+ExecStart=/usr/bin/node /opt/beebot/current/apps/server/dist/index.cjs
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=78 79
+TimeoutStartSec=5min
+TimeoutStopSec=30
+
+# Rootless Podman makes its container cgroups inside ours, so the slice's limits cover the boxes.
+Delegate=yes
+DelegateSubgroup=supervisor
+
+UMask=0077
+PrivateTmp=yes
+ProtectSystem=strict
+# "-": the socket folder is made after systemd has set up the namespace for ExecStartPre.
+ReadWritePaths=/var/lib/beebot/cells/%i -/run/beebot/cells/%i
+ProtectHome=yes
+RemoveIPC=yes
+# Not set, because rootless Podman needs what they take away: NoNewPrivileges= stops the setuid
+# newuidmap/newgidmap that map a box's ids, and every seccomp-based option (RestrictSUIDSGID=,
+# SystemCallFilter=, ProtectKernelModules=, ProtectClock=, LockPersonality=, RestrictNamespaces=,
+# RestrictAddressFamilies=, ...) implies it for a non-root service. ProtectKernelTunables= makes
+# /proc/sys read-only, and crun writes a box's own sysctls there. ProtectControlGroups= would take
+# the delegated cgroup back. PrivateDevices= hides /dev/net/tun; CapabilityBoundingSet= would cap
+# Podman inside its own user namespace.
+
+[Install]
+WantedBy=multi-user.target
