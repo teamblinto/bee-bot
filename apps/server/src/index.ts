@@ -15,6 +15,7 @@ import {
   PowerSignal,
 } from "@beebot/contracts";
 
+import { cellLimits } from "./admission.ts";
 import {
   captureError,
   reportError,
@@ -117,7 +118,12 @@ function wipeRuntime(dataDir: string) {
   }
 }
 
-type Cell = { socketPath: string; publicOrigin: string };
+type Cell = {
+  socketPath: string;
+  publicOrigin: string;
+  maxActiveBoxes: number;
+  monthlyBudgetUsd: number | null;
+};
 
 // Server mode: one beebotd per user on a Linux host, reached only through `socketPath`.
 async function boot(bootstrap: Bootstrap, cell?: Cell) {
@@ -177,6 +183,8 @@ async function boot(bootstrap: Bootstrap, cell?: Cell) {
           return input && { ...input, lane: boxLane(botId, input.lane) };
         },
         relay: () => relay?.(),
+        maxActive: cell?.maxActiveBoxes,
+        boxIds: () => store.boxes.listBoxes().map(({ botId }) => botId),
         // A connector's box is no bot's, so it has no row.
         setBox: (botId, state, reason) =>
           connectorOfBox(botId) === undefined && store.boxes.setBox(botId, state, reason),
@@ -336,12 +344,17 @@ function serverBootstrap({
   BEEBOT_SOCKET: socketPath,
   BEEBOT_PUBLIC_ORIGIN: publicOrigin,
   CREDENTIALS_DIRECTORY: credentials,
+  ...env
 }: NodeJS.ProcessEnv) {
   if (!dataDir || !socketPath || !publicOrigin || !isOrigin(publicOrigin)) {
     return exitWith(
       noRestartExitCodes.invalidBootstrap,
       "server mode needs BEEBOT_DATA_DIR, BEEBOT_SOCKET and an origin in BEEBOT_PUBLIC_ORIGIN",
     );
+  }
+  const limits = cellLimits(env);
+  if ("error" in limits) {
+    return exitWith(noRestartExitCodes.invalidBootstrap, limits.error);
   }
   const vault = readVaultKeyFile({
     BEEBOT_VAULT_KEY_FILE: credentials && NodePath.join(credentials, "vault-key"),
@@ -355,7 +368,7 @@ function serverBootstrap({
   // The token guards only the TCP listener, which server mode never opens.
   const token = NodeCrypto.randomBytes(32).toString("base64url");
   const bootstrap: Bootstrap = { port: 0, token, dataDir, allowedOrigins: [], vault };
-  return { bootstrap, cell: { socketPath, publicOrigin } };
+  return { bootstrap, cell: { socketPath, publicOrigin, ...limits } };
 }
 
 const fileFlag = process.argv.indexOf("--bootstrap", 2);

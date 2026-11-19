@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 39;
+export const protocolVersion = 40;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -237,6 +237,10 @@ export const RunReason = z.enum([
   // Unattended on a box bot while boxes can't run, or with no lane R7 allows.
   "box_unavailable",
   "automated_access",
+  // Server mode: every box this user may run at once is running.
+  "box_limit",
+  // Server mode: this month's API-key spend reached the operator's budget.
+  "budget",
 ]);
 export type RunReason = z.infer<typeof RunReason>;
 

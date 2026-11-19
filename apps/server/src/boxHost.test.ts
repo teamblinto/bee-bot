@@ -12,7 +12,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { boxLayout, proxyKeyPlaceholder } from "./boxEngine.ts";
 import { boxdFiles, boxdSecret, readyBoxRuntime, startBoxHost, windowsPodman } from "./boxHost.ts";
-import { type BoxExec, type BoxRuntime, createFakeBoxRuntime } from "./boxRuntime.ts";
+import {
+  type BoxExec,
+  BoxLimitReached,
+  type BoxRuntime,
+  createFakeBoxRuntime,
+} from "./boxRuntime.ts";
 import { createCdpBrowserRuntime, fetchJson } from "./browserCdp.ts";
 import { machineSsh, podmanEnv } from "./boxdRuntime.ts";
 import { createClaudeRunTurn } from "./claude.ts";
@@ -53,6 +58,36 @@ describe("box host", () => {
     expect(await exited).toBe(0);
     expect(created).toEqual(["claude"]);
     expect(applied).toEqual(["bot-1", "bot-1", "bot-1"]);
+  });
+
+  const capped = (fake: BoxRuntime, maxActive?: number) =>
+    readyBoxRuntime(fake, {
+      account: () => "claude",
+      applyEgress: async () => {},
+      maxActive,
+      boxIds: () => ["a", "b", "c", "d"],
+    });
+
+  it("refuses a box past the cap, at once or one by one, and counts again when a box dies", async () => {
+    const fake = createFakeBoxRuntime();
+    const runtime = capped(fake, 2);
+    const results = await Promise.allSettled(["a", "b", "c"].map((id) => runtime.ready(id)));
+    expect(results.filter((result) => result.status === "rejected")).toEqual([
+      { status: "rejected", reason: expect.any(BoxLimitReached) },
+    ]);
+    await expect(runtime.ready("d")).rejects.toThrow(BoxLimitReached);
+    const running = ["a", "b", "c"].filter((_, index) => results[index]?.status === "fulfilled");
+    // A running box is never refused, so its next turn still gets it.
+    await runtime.ready(running[0] ?? "");
+    // Behind the runtime's back, as a crash or an OOM kill would.
+    await fake.stop(running[0] ?? "");
+    await runtime.ready("d");
+    expect(await fake.snapshot("d")).toBe("running");
+  });
+
+  it("caps nothing without a limit, as on the desktop", async () => {
+    const runtime = capped(createFakeBoxRuntime());
+    await Promise.all(["a", "b", "c", "d"].map((id) => runtime.ready(id)));
   });
 });
 

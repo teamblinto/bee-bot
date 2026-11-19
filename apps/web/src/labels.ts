@@ -178,6 +178,9 @@ const reasonLines: Record<RunReason, string> = {
     "Refused. Nobody was watching, and no API key is saved for this bot's engine on the Usage page.",
   bot_paused: "Refused. This bot is paused. Resume it, then send again.",
   daily_cap: "Refused. This bot reached its daily run cap.",
+  box_limit:
+    "Refused. Your other bots' boxes fill every slot you have. A box frees its slot after 15 idle minutes; send again then.",
+  budget: "Refused. This month's API key budget is used up. Ask your admin to raise it.",
   engine_failed: "The engine couldn't finish this turn. Send again to retry.",
   limited: "Limited. This retries when the limit clears, unless stopped.",
   // Every pause before a turn runs lands here, not only a login: the pause line names the cause.

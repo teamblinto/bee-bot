@@ -9,6 +9,7 @@ import {
   cellIdBase,
   cellSlots,
   freeSlot,
+  limitsText,
   parseArgs,
   parseSubids,
   prepareHome,
@@ -30,6 +31,24 @@ describe("parseArgs", () => {
     expect(
       parseArgs(["user", "quota", cell, "--cpu", "150%", "--tasks", "512", "--memory", "2G"]),
     ).toEqual({ verb: "quota", cell, quota: { memory: "2G", cpu: "150%", tasks: "512" } });
+    const full = ["--memory", "2G", "--cpu", "150%", "--tasks", "512"];
+    expect(
+      parseArgs(["user", "quota", cell, ...full, "--budget-usd", "12.5", "--boxes", "2"]),
+    ).toEqual({
+      verb: "quota",
+      cell,
+      quota: { memory: "2G", cpu: "150%", tasks: "512", boxes: "2", budgetUsd: "12.5" },
+    });
+    expect(parseArgs(["user", "quota", cell, ...full, "--budget-usd", "0"])).toMatchObject({
+      quota: { budgetUsd: "0" },
+    });
+  });
+
+  it("writes only the limits it was given into the unit's drop-in", () => {
+    expect(limitsText({ memory: "2G", cpu: "1%", tasks: "1" })).toBe("[Service]\n");
+    expect(limitsText({ memory: "2G", cpu: "1%", tasks: "1", boxes: "3", budgetUsd: "9.99" })).toBe(
+      "[Service]\nEnvironment=BEEBOT_MAX_ACTIVE_BOXES=3\nEnvironment=BEEBOT_MONTHLY_BUDGET_USD=9.99\n",
+    );
   });
 
   it.each([
@@ -67,6 +86,34 @@ describe("parseArgs", () => {
     ["user", "quota", cell, "--memory", "4G", "--cpu", "200%", "--tasks", "12345678"],
     ["user", "quota", cell, "--memory=4G", "--cpu", "200%", "--tasks", "64", "x"],
     ["user", "quota", cell, "--toString", "1", "--cpu", "200%", "--tasks", "64"],
+    ["user", "quota", cell, "--boxes", "3", "--cpu", "200%", "--tasks", "64"],
+    ...[
+      ["--boxes", "0"],
+      ["--boxes", "-1"],
+      ["--boxes", "1000"],
+      ["--boxes", "03"],
+      ["--boxes", "3\nEnvironment=X=1"],
+      ["--budget-usd", "-5"],
+      ["--budget-usd", "1e3"],
+      ["--budget-usd", "1.234"],
+      ["--budget-usd", "01"],
+      ["--budget-usd", "$10"],
+      ["--budget-usd", "10 "],
+      ["--budget-usd", "Infinity"],
+      ["--budget-usd", "12345678"],
+      ["--boxes", "2", "--boxes", "3"],
+    ].map((extra) => [
+      "user",
+      "quota",
+      cell,
+      "--memory",
+      "4G",
+      "--cpu",
+      "200%",
+      "--tasks",
+      "64",
+      ...extra,
+    ]),
   ])("refuses %j", (...argv) => {
     expect(() => parseArgs(argv)).toThrow(Refusal);
   });

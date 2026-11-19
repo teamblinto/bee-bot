@@ -13,6 +13,9 @@ const quotaPatterns = {
   "--memory": /^[1-9][0-9]{0,5}[KMGT]$/,
   "--cpu": /^[1-9][0-9]{0,4}%$/,
   "--tasks": /^[1-9][0-9]{0,6}$/,
+  // beebotd parses these two again, with the same patterns (apps/server/src/admission.ts).
+  "--boxes": /^[1-9][0-9]{0,2}$/,
+  "--budget-usd": /^(0|[1-9][0-9]{0,6})(\.[0-9]{1,2})?$/,
 };
 const defaultQuota = { memory: "4G", cpu: "200%", tasks: "4096" };
 
@@ -38,7 +41,8 @@ const gatewayGroup = "beebot-gw";
 
 export class Refusal extends Error {}
 
-type Quota = typeof defaultQuota;
+// Leaving out boxes keeps beebotd's default, and leaving out the budget means none.
+type Quota = typeof defaultQuota & { boxes?: string; budgetUsd?: string };
 export type Command =
   | { verb: "add" | "suspend" | "resume" | "status" | "delete"; cell: string }
   | { verb: "quota"; cell: string; quota: Quota };
@@ -57,7 +61,7 @@ export function parseArgs(argv: readonly string[]): Command {
   if (verb === "delete" && rest.length === 1 && rest[0] === "--confirm") {
     return { verb, cell };
   }
-  if (verb === "quota" && rest.length === 6) {
+  if (verb === "quota" && [6, 8, 10].includes(rest.length)) {
     const given = new Map<string, string>();
     for (let index = 0; index < rest.length; index += 2) {
       const [flag = "", value = ""] = rest.slice(index, index + 2);
@@ -69,10 +73,22 @@ export function parseArgs(argv: readonly string[]): Command {
       }
       given.set(flag, value);
     }
-    const quota = {
-      memory: given.get("--memory") ?? "",
-      cpu: given.get("--cpu") ?? "",
-      tasks: given.get("--tasks") ?? "",
+    const [memory, cpu, tasks, boxes, budgetUsd] = [
+      "--memory",
+      "--cpu",
+      "--tasks",
+      "--boxes",
+      "--budget-usd",
+    ].map((flag) => given.get(flag));
+    if (memory === undefined || cpu === undefined || tasks === undefined) {
+      throw new Refusal("quota needs --memory, --cpu and --tasks");
+    }
+    const quota: Quota = {
+      memory,
+      cpu,
+      tasks,
+      ...(boxes !== undefined && { boxes }),
+      ...(budgetUsd !== undefined && { budgetUsd }),
     };
     return { verb, cell, quota };
   }
@@ -204,6 +220,7 @@ const slice = (cell: string) => `beebot-${cell}.slice`;
 const home = (cell: string) => NodePath.join(paths.cells, cell);
 const credFile = (cell: string) => NodePath.join(paths.creds, `${cell}.vault-key.cred`);
 const quotaDir = (cell: string) => NodePath.join(paths.units, `${slice(cell)}.d`);
+const limitsDir = (cell: string) => NodePath.join(paths.units, `${unit(cell)}.d`);
 
 function lookup(cell: string) {
   const user = parseIds(read(paths.passwd)).find((entry) => entry.name === cell);
@@ -224,6 +241,30 @@ function writeQuota(cell: string, quota: Quota) {
   const text = `[Slice]\nMemoryMax=${quota.memory}\nCPUQuota=${quota.cpu}\nTasksMax=${quota.tasks}\n`;
   NodeFs.writeFileSync(NodePath.join(dir, ".quota.conf.new"), text, { mode: 0o644 });
   NodeFs.renameSync(NodePath.join(dir, ".quota.conf.new"), NodePath.join(dir, "quota.conf"));
+}
+
+export const limitsText = ({ boxes, budgetUsd }: Quota) =>
+  [
+    "[Service]",
+    ...(boxes === undefined ? [] : [`Environment=BEEBOT_MAX_ACTIVE_BOXES=${boxes}`]),
+    ...(budgetUsd === undefined ? [] : [`Environment=BEEBOT_MONTHLY_BUDGET_USD=${budgetUsd}`]),
+    "",
+  ].join("\n");
+
+// The unit's own drop-in, as a slice can't carry Environment=. beebotd reads these only at start,
+// so this answers whether they changed and a restart is due.
+function writeLimits(cell: string, quota: Quota) {
+  assertRootOwned(paths.units);
+  const dir = limitsDir(cell);
+  const file = NodePath.join(dir, "limits.conf");
+  const text = limitsText(quota);
+  if (read(file) === text) {
+    return false;
+  }
+  NodeFs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+  NodeFs.writeFileSync(NodePath.join(dir, ".limits.conf.new"), text, { mode: 0o644 });
+  NodeFs.renameSync(NodePath.join(dir, ".limits.conf.new"), file);
+  return true;
 }
 
 function add(cell: string) {
@@ -316,7 +357,13 @@ function status(cell: string) {
   if (!found) {
     return { cell, exists: false };
   }
-  const service = show(unit(cell), ["ActiveState", "SubState", "UnitFileState"]);
+  const service = show(unit(cell), ["ActiveState", "SubState", "UnitFileState", "Environment"]);
+  // KEY=value pairs split by spaces. None of the values it reads here can hold one.
+  const env = new Map(
+    (service.Environment ?? "")
+      .split(" ")
+      .map((pair) => [pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1)]),
+  );
   const limits = show(slice(cell), [
     "MemoryMax",
     "CPUQuotaPerSecUSec",
@@ -334,6 +381,8 @@ function status(cell: string) {
     cpuQuotaPerSec: limits.CPUQuotaPerSecUSec,
     tasksMax: limits.TasksMax,
     memoryCurrent: limits.MemoryCurrent,
+    maxActiveBoxes: env.get("BEEBOT_MAX_ACTIVE_BOXES") ?? null,
+    monthlyBudgetUsd: env.get("BEEBOT_MONTHLY_BUDGET_USD") ?? null,
   };
 }
 
@@ -367,6 +416,7 @@ function remove(cell: string) {
   }
   NodeFs.rmSync(credFile(cell), { force: true });
   NodeFs.rmSync(quotaDir(cell), { recursive: true, force: true });
+  NodeFs.rmSync(limitsDir(cell), { recursive: true, force: true });
   run("systemctl", ["daemon-reload"]);
   return { cell, deleted: true };
 }
@@ -391,11 +441,17 @@ export function execute(command: Command) {
       return status(command.cell);
     case "delete":
       return remove(command.cell);
-    case "quota":
+    case "quota": {
       existing(command.cell);
       writeQuota(command.cell, command.quota);
+      const restarted = writeLimits(command.cell, command.quota);
       run("systemctl", ["daemon-reload"]);
-      return { cell: command.cell, ...command.quota };
+      // A restart interrupts the cell's running turns, so only when its limits changed.
+      if (restarted) {
+        run("systemctl", ["try-restart", unit(command.cell)]);
+      }
+      return { cell: command.cell, ...command.quota, restarted };
+    }
   }
 }
 

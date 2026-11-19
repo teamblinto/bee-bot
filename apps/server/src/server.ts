@@ -189,6 +189,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   socketPath?: string | undefined;
   // Server mode: the gateway's origin, the only one a browser may call from, and where OAuth returns.
   publicOrigin?: string | undefined;
+  // Server mode: the API-key budget for each calendar month, or null for none.
+  monthlyBudgetUsd?: number | null | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -298,6 +300,7 @@ export async function startServer({
   serverMode = false,
   socketPath,
   publicOrigin,
+  monthlyBudgetUsd,
 }: Options) {
   const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
   // Clients whose window can be seen. Electron's main process subscribes too, but never shows.
@@ -608,6 +611,9 @@ export async function startServer({
     runTurn,
     approvals,
     boxOnly: serverMode,
+    monthlyBudgetUsd,
+    // Server mode only, so a desktop box comes up as it always has: on the engine's first use.
+    prepareBox: serverMode && boxes ? boxes.prepare : undefined,
     permissionsUrl: () => `http://127.0.0.1:${listenPort()}/mcp`,
     turnTimeoutMs,
     clock,

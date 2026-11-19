@@ -7,8 +7,9 @@ import type { BoxState } from "@beebot/contracts";
 
 import type { SidecarEndpoint } from "./browserCdp.ts";
 import { recordingBoxRuntime } from "./boxes.ts";
-import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
+import { type BoxAttach, BoxLimitReached, type BoxRuntime } from "./boxRuntime.ts";
 import { type BoxdBootstrap, type BoxdFiles, type BoxdHost, launchBoxd } from "./boxdRuntime.ts";
+import { connectorOfBox } from "./connectorBox.ts";
 import { createEgressControl, type EgressInput } from "./egress.ts";
 import type { Vault } from "./vault.ts";
 
@@ -65,28 +66,58 @@ export function readyBoxRuntime(
   {
     account,
     applyEgress,
+    maxActive,
+    boxIds = () => [],
   }: {
     account: (botId: string) => string | undefined;
     applyEgress: (botId: string) => Promise<void>;
+    // Server mode: how many boxes may run at once.
+    maxActive?: number | undefined;
+    // Every bot that may have a box.
+    boxIds?: (() => string[]) | undefined;
   },
 ): BoxRuntime & { ready: (botId: string) => Promise<void> } {
   const queues = new Map<string, Promise<unknown>>();
-  function serially(botId: string, work: () => Promise<void>) {
-    const run = (queues.get(botId) ?? Promise.resolve()).then(work, work);
+  function serially(key: string, work: () => Promise<void>) {
+    const run = (queues.get(key) ?? Promise.resolve()).then(work, work);
     queues.set(
-      botId,
+      key,
       run.catch(() => {}),
     );
     return run;
   }
+  // No bot ID is empty, so this is the queue every start shares.
+  const startsKey = "";
+  // Counted from what boxd sees now, never from a tally, so a box that died or a restart can't
+  // leave it wrong. One start at a time, so two can't both take the last slot.
+  function admitted(botId: string, bringUp: () => Promise<void>) {
+    // A connector's box serves a bot's turn already under way, so it neither holds nor needs a slot.
+    if (maxActive === undefined || connectorOfBox(botId) !== undefined) {
+      return bringUp();
+    }
+    return serially(startsKey, async () => {
+      const others = boxIds().filter((id) => id !== botId);
+      // A box whose state can't be read counts as running.
+      const states = await Promise.all(
+        others.map((id) => runtime.snapshot(id).catch((): BoxState => "running")),
+      );
+      const active = states.filter((state) => state === "running" || state === "starting");
+      if (active.length >= maxActive) {
+        throw new BoxLimitReached(`${active.length} of ${maxActive} boxes are running`);
+      }
+      await bringUp();
+    });
+  }
   function ready(botId: string) {
     return serially(botId, async () => {
       const state: BoxState = await runtime.snapshot(botId);
-      if (state === "absent") {
-        await runtime.create(botId, account(botId));
-      }
       if (state !== "running") {
-        await runtime.start(botId);
+        await admitted(botId, async () => {
+          if (state === "absent") {
+            await runtime.create(botId, account(botId));
+          }
+          await runtime.start(botId);
+        });
       }
       await applyEgress(botId);
     });
@@ -255,7 +286,11 @@ export async function startBoxHost({
   setBox,
   bootstrap = {},
   files,
+  maxActive,
+  boxIds,
 }: {
+  maxActive?: number | undefined;
+  boxIds?: (() => string[]) | undefined;
   host: BoxdHost;
   installDir: string;
   owner: string;
@@ -279,6 +314,8 @@ export async function startBoxHost({
   const ready = readyBoxRuntime(recordingBoxRuntime(boxd.runtime, setBox), {
     account,
     applyEgress: egress.apply,
+    maxActive,
+    boxIds,
   });
   const idle = stopIdleBoxes(ready);
   return {

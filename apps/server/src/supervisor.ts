@@ -4,6 +4,7 @@ import type { ChatMessage } from "@beebot/contracts";
 
 import { admit } from "./admission.ts";
 import type { Approvals } from "./approvals.ts";
+import { BoxLimitReached } from "./boxRuntime.ts";
 import { recoverTakeovers } from "./browser.ts";
 import { outcomeText } from "./continuations.ts";
 import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
@@ -46,6 +47,11 @@ type Options = {
   onStopBot?: ((botId: string) => void) | undefined;
   // Puts the files a turn's input names into the bot's inbox, before the turn starts.
   copyInbox?: ((botId: string, files: InboxFile[]) => Promise<void>) | undefined;
+  // Server mode: brings the bot's box up before its turn, throwing BoxLimitReached when every slot
+  // is taken.
+  prepareBox?: ((botId: string) => Promise<void>) | undefined;
+  // Server mode: refuses API-key runs once this calendar month's spend reaches it.
+  monthlyBudgetUsd?: number | null | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -86,6 +92,9 @@ function finishedRun(
   }
   if (outcome.kind === "folder_missing") {
     return { status: "Failed", reason: "folder_missing" };
+  }
+  if (outcome.kind === "box_limit") {
+    return { status: "Failed", reason: "box_limit" };
   }
   if (abortReason === "stop") {
     return { status: "Cancelled", reason: "stopped" };
@@ -137,6 +146,8 @@ export function createSupervisor({
   boxOnly = false,
   onStopBot = () => {},
   copyInbox = async () => {},
+  prepareBox,
+  monthlyBudgetUsd = null,
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
@@ -206,7 +217,7 @@ export function createSupervisor({
       return;
     }
     const box = boundary !== "box" ? "none" : boxesReady() ? "ready" : "unavailable";
-    const decision = admit({ ...admission, box, attended: wake.attended, now });
+    const decision = admit({ ...admission, box, attended: wake.attended, monthlyBudgetUsd, now });
     if (decision.verdict === "refuse") {
       store.refuseWake(wake, decision.reason);
     } else if (decision.verdict === "defer") {
@@ -357,6 +368,13 @@ export function createSupervisor({
             console.error(`beebotd: usage of run ${run.id} was not recorded`, error);
           }
         },
+        onCost: (usd) => {
+          try {
+            store.recordSpend(run.id, usd);
+          } catch (error) {
+            console.error(`beebotd: cost of run ${run.id} was not recorded`, error);
+          }
+        },
         permissions: { url: permissionsUrl(), token },
         onDelivered: () => {
           try {
@@ -374,7 +392,15 @@ export function createSupervisor({
             ? approvals.approve(gate, { tool_name: tool, input }, controller.signal)
             : Promise.resolve({ behavior: "deny", message: "Refused: this run has ended." }),
       });
-    const turn = (async () => {
+    const turn = (async (): Promise<TurnOutcome> => {
+      try {
+        await prepareBox?.(launch.botId);
+      } catch (error) {
+        // Any other failure is left to the engine's own start, as without a box limit.
+        if (error instanceof BoxLimitReached) {
+          return { kind: "box_limit" };
+        }
+      }
       if (run.inbox.length > 0) {
         // The turn still runs: a missing file is something the bot can report.
         await copyInbox(launch.botId, run.inbox).catch((error: unknown) => {

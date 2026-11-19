@@ -6,7 +6,9 @@ import * as NodePath from "node:path";
 import type { Bot, RunStatus } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { monthStart } from "./admission.ts";
 import { createApprovals } from "./approvals.ts";
+import { BoxLimitReached } from "./boxRuntime.ts";
 import { callBotTool } from "./botTools.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
@@ -58,7 +60,13 @@ function scriptedEngine() {
 // One "process": a store and the supervisor over it. `kill` leaves Running runs as a crash would.
 function boot(
   runTurn: RunTurn,
-  options: { turnTimeoutMs?: number; silenceMs?: number; clock?: AwakeClock } = {},
+  options: {
+    turnTimeoutMs?: number;
+    silenceMs?: number;
+    clock?: AwakeClock;
+    prepareBox?: (botId: string) => Promise<void>;
+    monthlyBudgetUsd?: number;
+  } = {},
 ) {
   const store = openEventStore(dataDir);
   const approvals = createApprovals({ store, dataDir, onChange: () => {} });
@@ -480,5 +488,56 @@ describe("stop-all", () => {
     expect(store.dueWakes(new Date(Date.now() + 120_000).toISOString())).toEqual([]);
     await ticks(1);
     expect(engine.turns).toHaveLength(turns);
+  });
+});
+
+describe("server mode limits", () => {
+  it("lets a running turn finish over budget, then refuses the next API-key run", async () => {
+    const engine = scriptedEngine();
+    const costly: RunTurn = (turn) => {
+      turn.onCost?.(1.5);
+      return engine.runTurn(turn);
+    };
+    const { store, send } = boot(costly, { monthlyBudgetUsd: 1 });
+    store.setAccountLane("claude", "api_key");
+    const bot = createBot(store);
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+    expect(store.spentSince(monthStart(new Date().toISOString()))).toBe(1.5);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+
+    send(bot, "again");
+    await vi.waitFor(() => expect(latestRun(store, bot)).toMatchObject({ reason: "budget" }));
+    expect(engine.turns).toHaveLength(1);
+  });
+
+  it("counts only this month's spend, and never against a subscription run", async () => {
+    const engine = scriptedEngine();
+    const { store, send } = boot(engine.runTurn, { monthlyBudgetUsd: 1 });
+    store.recordSpend("run-old", 5);
+    const next = new Date();
+    next.setUTCDate(1);
+    next.setUTCMonth(next.getUTCMonth() + 1);
+    expect(store.spentSince(monthStart(next.toISOString()))).toBe(0);
+
+    const bot = createBot(store);
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+  });
+
+  it("fails a turn that finds every box slot taken, without starting the engine", async () => {
+    const engine = scriptedEngine();
+    const { store, send } = boot(engine.runTurn, {
+      prepareBox: async () => {
+        throw new BoxLimitReached("3 of 3 boxes are running");
+      },
+    });
+    const bot = createBot(store);
+    send(bot, "hello");
+    await vi.waitFor(() =>
+      expect(latestRun(store, bot)).toMatchObject({ status: "Failed", reason: "box_limit" }),
+    );
+    expect(engine.turns).toHaveLength(0);
   });
 });

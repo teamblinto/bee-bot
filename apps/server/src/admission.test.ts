@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 
-import { admit, dailyRunCap } from "./admission.ts";
+import { admit, cellLimits, dailyRunCap, defaultMaxActiveBoxes, monthStart } from "./admission.ts";
 
 const now = "2026-11-05T12:00:00.000Z";
 const later = "2026-11-05T13:00:00.000Z";
@@ -8,9 +8,12 @@ const open = {
   attended: true,
   box: "none",
   unattendedLane: null,
+  lane: "subscription",
   botStatus: "ready",
   runsInLastDay: 0,
   blockedUntil: null,
+  monthlyBudgetUsd: null,
+  spentThisMonthUsd: 0,
   now,
 } as const;
 const boxed = { ...open, attended: false, box: "ready", unattendedLane: "api_key" } as const;
@@ -59,4 +62,38 @@ it("refuses at the daily cap, not one run before it", () => {
 it("defers to blocked_until while the account is blocked, and admits once it has passed", () => {
   expect(admit({ ...open, blockedUntil: later })).toEqual({ verdict: "defer", until: later });
   expect(admit({ ...open, blockedUntil: now }).verdict).toBe("admit");
+});
+
+it("refuses an API-key run once this month's spend reaches the budget, and only then", () => {
+  const budgeted = { ...open, lane: "api_key", monthlyBudgetUsd: 10 } as const;
+  expect(admit({ ...budgeted, spentThisMonthUsd: 9.99 }).verdict).toBe("admit");
+  expect(admit({ ...budgeted, spentThisMonthUsd: 10 })).toEqual({
+    verdict: "refuse",
+    reason: "budget",
+  });
+  expect(admit({ ...budgeted, lane: "subscription", spentThisMonthUsd: 50 }).verdict).toBe("admit");
+  expect(admit({ ...open, lane: "api_key", spentThisMonthUsd: 1e6 }).verdict).toBe("admit");
+});
+
+it("starts each budget period at the first of the month, UTC", () => {
+  expect(monthStart("2026-11-30T23:59:59.999Z")).toBe("2026-11-01T00:00:00.000Z");
+  expect(monthStart("2026-12-01T00:00:00.000Z")).toBe("2026-12-01T00:00:00.000Z");
+});
+
+it("reads the operator's limits, failing closed on a malformed one", () => {
+  expect(cellLimits({})).toEqual({ maxActiveBoxes: defaultMaxActiveBoxes, monthlyBudgetUsd: null });
+  expect(cellLimits({ BEEBOT_MAX_ACTIVE_BOXES: "5", BEEBOT_MONTHLY_BUDGET_USD: "12.50" })).toEqual({
+    maxActiveBoxes: 5,
+    monthlyBudgetUsd: 12.5,
+  });
+  for (const env of [
+    { BEEBOT_MAX_ACTIVE_BOXES: "0" },
+    { BEEBOT_MAX_ACTIVE_BOXES: "" },
+    { BEEBOT_MAX_ACTIVE_BOXES: "three" },
+    { BEEBOT_MONTHLY_BUDGET_USD: "" },
+    { BEEBOT_MONTHLY_BUDGET_USD: "-1" },
+    { BEEBOT_MONTHLY_BUDGET_USD: "1e9" },
+  ]) {
+    expect(cellLimits(env)).toHaveProperty("error");
+  }
 });

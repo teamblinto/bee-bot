@@ -8,6 +8,9 @@ import type { BoxState } from "@beebot/contracts";
 import type { BoxLayout } from "./boxEngine.ts";
 import { killTree } from "./engine.ts";
 
+// Server mode: the user already runs as many boxes as the operator allows.
+export class BoxLimitReached extends Error {}
+
 export type BoxExec = { argv: string[]; env: Record<string, string>; cwd?: string };
 
 // `stream` is the process's stdin and stdout. Destroying it kills the process, and a dropped

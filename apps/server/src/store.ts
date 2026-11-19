@@ -31,6 +31,7 @@ import {
 } from "@beebot/contracts";
 import { z } from "zod";
 
+import { monthStart } from "./admission.ts";
 import { chainAudit, openAudit } from "./audit.ts";
 import { type InboxFile, inboxName, openAttachments } from "./attachments.ts";
 import { openBoxes } from "./boxes.ts";
@@ -823,6 +824,16 @@ export const migrations: Array<{
       FROM (SELECT value FROM json_each(messages.tools) ORDER BY key)
     ) WHERE tools != '[]';`,
   },
+  {
+    name: "spend",
+    // What the engine reported each API-key turn cost. No key to runs, so deleting a bot keeps it.
+    sql: `CREATE TABLE spend (
+      run_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      cost_usd REAL NOT NULL CHECK (cost_usd >= 0)
+    );
+    CREATE INDEX spend_at ON spend (at);`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1387,6 +1398,10 @@ export function openEventStore(dataDir: string) {
   const countRecentRuns = db.prepare(
     `SELECT COUNT(*) AS count FROM runs
      WHERE bot_id = ? AND status != 'Refused' AND created_at > ?`,
+  );
+  const insertSpend = db.prepare("INSERT INTO spend (run_id, at, cost_usd) VALUES (?, ?, ?)");
+  const sumSpend = db.prepare(
+    "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM spend WHERE at >= ?",
   );
   const insertRun = db.prepare(
     `INSERT OR IGNORE INTO runs
@@ -2348,6 +2363,8 @@ export function openEventStore(dataDir: string) {
   const automatedAccessAt = () =>
     z.object({ acknowledgedAt: z.string().nullable() }).parse(selectAutomatedAccess.get())
       .acknowledgedAt;
+  const spentSince = (since: string) =>
+    z.object({ total: z.number() }).parse(sumSpend.get(since)).total;
   const laneOfBox = ({ engineAccountId, unattendedLane: chosen }: Bot) =>
     unattendedLane(vaultStatus().apiKeys.includes(engineAccountId), automatedAccessAt(), chosen);
 
@@ -2828,11 +2845,18 @@ export function openEventStore(dataDir: string) {
         hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
         boundary: bot.boundary,
         unattendedLane: laneOfBox(bot),
+        // As index.ts launches it: a box bot takes its R7 lane, falling back to the account's.
+        lane: (bot.boundary === "box" ? laneOfBox(bot) : null) ?? account.lane,
         botStatus: bot.status,
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
+        spentThisMonthUsd: spentSince(monthStart(now)),
       };
     },
+    recordSpend: (runId: string, costUsd: number) => {
+      insertSpend.run(runId, new Date().toISOString(), costUsd);
+    },
+    spentSince,
     closeWake: (id: string) => {
       markWakeDone.run(id);
     },

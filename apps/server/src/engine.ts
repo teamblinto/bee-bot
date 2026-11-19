@@ -20,7 +20,9 @@ export type TurnOutcome =
   | { kind: "session_lost" }
   | { kind: "folder_missing" }
   // A tool now waits on the owner (R17). The turn is over, and the outcome resumes the session.
-  | { kind: "waiting"; text: string };
+  | { kind: "waiting"; text: string }
+  // Server mode: no box slot was free, so the engine never started.
+  | { kind: "box_limit" };
 
 export type EngineChoice = Pick<Bot, "model" | "effort" | "mode">;
 
@@ -136,6 +138,8 @@ export type RunTurn = (turn: {
   onToolEnd: (id: string, failed: boolean, cutOff?: boolean) => void;
   onThinking: (state: ThinkingState) => void;
   onRateLimit: (updates: WindowUpdate[]) => void;
+  // What the engine says an attempt on the API-key lane cost, in dollars, as it ends.
+  onCost?: (usd: number) => void;
   // Where this run asks for tool approval. The token is a secret: never log it or put it on argv.
   permissions: { url: string; token: string };
   // Call once the prompt reached the engine: from then on it must never be sent again.

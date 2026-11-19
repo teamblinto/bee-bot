@@ -333,6 +333,7 @@ const Frame = z.object({
   result: loose,
   api_error: loose,
   api_error_status: loose,
+  total_cost_usd: loose,
   event: z
     .object({
       type: loose,
@@ -488,6 +489,7 @@ type Attempt = {
   onToolEnd: (id: string, failed: boolean) => void;
   onThinking: (state: ThinkingState) => void;
   onRateLimit: (updates: WindowUpdate[]) => void;
+  onCost?: ((usd: number) => void) | undefined;
   onDelivered: () => void;
 };
 
@@ -504,6 +506,7 @@ function runProcess({
   onToolEnd,
   onThinking,
   onRateLimit,
+  onCost,
   onDelivered,
 }: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
@@ -682,6 +685,11 @@ function runProcess({
       } else if (frame.type === "result") {
         setThinking(false);
         seen.result = frame;
+        const cost = frame.total_cost_usd;
+        // On a subscription the figure is an estimate nobody is billed.
+        if (lane === "api_key" && typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
+          onCost?.(cost);
+        }
         sessionMissing ||= JSON.stringify(frame.errors ?? "").includes("No conversation found");
         after(lingerMs, stop);
       }
@@ -806,6 +814,7 @@ export function createClaudeRunTurn({
     onToolEnd,
     onThinking,
     onRateLimit,
+    onCost,
     onDelivered,
     onSteerable,
     permissions,
@@ -863,6 +872,7 @@ export function createClaudeRunTurn({
         },
         onThinking,
         onRateLimit,
+        onCost,
         onDelivered: delivered,
       });
 
