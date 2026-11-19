@@ -22,7 +22,7 @@ import {
   spawnInBox,
 } from "./boxEngine.ts";
 import { waitingPattern } from "./continuations.ts";
-import { conflictingClaudeCredentials, engineEnv } from "./engineEnv.ts";
+import { engineEnv } from "./engineEnv.ts";
 import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
@@ -815,10 +815,6 @@ export function createClaudeRunTurn({
       return { kind: "folder_missing" };
     }
     const env = box ? boxEnv(box.layout, launch, permissions.token, dataDir) : childEnv();
-    if (conflictingClaudeCredentials(env)) {
-      console.error("beebotd: run refused, its environment holds both an API key and a token");
-      return { kind: "auth_failed", pauseReason: "credential_source" };
-    }
     const cwd = box ? box.layout.workdir : workingFolder(dataDir, launch.botId, projectPath);
     const privateFolder = workspacePath(dataDir, launch.botId);
     const personaPath = NodePath.join(NodePath.dirname(privateFolder), "persona.md");

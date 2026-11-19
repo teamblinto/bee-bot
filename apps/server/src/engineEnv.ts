@@ -61,8 +61,3 @@ export function engineEnv(parent: NodeJS.ProcessEnv, also: readonly string[] = [
   }
   return env;
 }
-
-// With both, the CLI picks one by its own precedence and the run is billed to whichever won.
-export const conflictingClaudeCredentials = (env: Record<string, string | undefined>) =>
-  Boolean(env.ANTHROPIC_API_KEY) &&
-  Boolean(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_AUTH_TOKEN);

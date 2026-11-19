@@ -5,7 +5,7 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import type { Duplex } from "node:stream";
+import { type Duplex, duplexPair } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import {
@@ -187,6 +187,8 @@ type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" |
   serverMode?: boolean | undefined;
   // Listens here instead of on TCP. The socket's file permission is the only gate in front of it.
   socketPath?: string | undefined;
+  // Server mode: the gateway's origin, the only one a browser may call from, and where OAuth returns.
+  publicOrigin?: string | undefined;
 };
 
 function refuseUpgrade(socket: Duplex, status: number, body: unknown) {
@@ -235,6 +237,11 @@ function parseCommand(text: string | undefined) {
 
 // A crash leaves the socket file behind. Only a dead one is removed, never a live server's.
 async function claimSocket(path: string) {
+  // The socket trusts whoever reaches it, so its directory must keep other users out.
+  const folder = await NodeFS.stat(NodePath.dirname(path));
+  if (folder.uid !== process.getuid?.() || (folder.mode & 0o007) !== 0) {
+    throw new Error(`beebotd: ${NodePath.dirname(path)} must be this user's and closed to others`);
+  }
   const code = await new Promise<string | undefined>((resolve) => {
     const probe = NodeNet.connect(path);
     probe.once("connect", () => {
@@ -290,6 +297,7 @@ export async function startServer({
   cuaDriver,
   serverMode = false,
   socketPath,
+  publicOrigin,
 }: Options) {
   const boxesReady = () => (boxes ? boxes.ready() : box !== undefined);
   // Clients whose window can be seen. Electron's main process subscribes too, but never shows.
@@ -593,7 +601,8 @@ export async function startServer({
     const address = server.address();
     return typeof address === "object" && address ? address.port : 0;
   };
-  const oauthRedirect = () => `http://127.0.0.1:${listenPort()}${oauthCallbackPath}`;
+  const oauthRedirect = () =>
+    `${publicOrigin ?? `http://127.0.0.1:${listenPort()}`}${oauthCallbackPath}`;
   const supervisor = createSupervisor({
     store,
     runTurn,
@@ -678,12 +687,13 @@ export async function startServer({
   const history = createUsageHistory(projectsDir);
 
   // Invariant: only the cell owner (through the gateway that authenticated them) can open the
-  // socket, so whatever arrives on it is the owner's and no token or Origin check applies.
+  // socket, so whatever arrives on it is the owner's and no token check applies. Origin still
+  // does: the owner's browser sends the gateway its cookie whichever site makes the call.
   const ownerSocket = socketPath !== undefined;
 
   // Non-browser clients send no Origin; they still need the token.
   const originAllowed = (origin: string | undefined) =>
-    ownerSocket || origin === undefined || allowedOrigins.includes(origin);
+    origin === undefined || allowedOrigins.includes(origin) || origin === publicOrigin;
 
   function tokenMatches(presented: string | null | undefined) {
     const candidate = Buffer.from(presented ?? "");
@@ -1766,6 +1776,11 @@ export async function startServer({
       sendJson(response, 400, { code: "bad_request" });
       return;
     }
+    // Box bots' transcripts live in their boxes; this host's Claude folder is nobody's here.
+    if (serverMode) {
+      sendJson(response, 200, { status: "unavailable" });
+      return;
+    }
     // shortcut: the owner's own Claude sessions in a project folder count to its bot, and two bots
     // sharing a folder resolve to the later one, until attribution is by session.
     const folders = store.botIds().flatMap((id): Array<[string, string]> => {
@@ -1780,6 +1795,31 @@ export async function startServer({
     sendJson(response, 200, { outcome } satisfies UsageRefreshResult);
   }
 
+  // What an engine calls with its run's token. A box reaches nothing else of beebotd.
+  function engineRoute(
+    url: URL,
+    request: NodeHttp.IncomingMessage,
+    response: NodeHttp.ServerResponse,
+  ) {
+    const handle =
+      url.pathname === "/mcp"
+        ? handleMcp
+        : url.pathname === "/mcp/connectors"
+          ? handleConnectors
+          : url.pathname === preToolUsePath
+            ? handleHook
+            : undefined;
+    handle?.(request, response).catch(() => response.destroy());
+    return handle !== undefined;
+  }
+
+  const botServer = NodeHttp.createServer((request, response) => {
+    const url = URL.parse(request.url ?? "", "http://127.0.0.1");
+    if (!url || !engineRoute(url, request, response)) {
+      sendJson(response, 404, { code: "not_found" });
+    }
+  });
+
   const server = NodeHttp.createServer((request, response) => {
     const url = URL.parse(request.url ?? "", "http://127.0.0.1");
     if (!url) {
@@ -1787,16 +1827,7 @@ export async function startServer({
       return;
     }
 
-    if (url.pathname === "/mcp") {
-      handleMcp(request, response).catch(() => response.destroy());
-      return;
-    }
-    if (url.pathname === "/mcp/connectors") {
-      handleConnectors(request, response).catch(() => response.destroy());
-      return;
-    }
-    if (url.pathname === preToolUsePath) {
-      handleHook(request, response).catch(() => response.destroy());
+    if (engineRoute(url, request, response)) {
       return;
     }
     // The owner's browser, back from signing in: the one-time `state` stands in for the token.
@@ -2039,6 +2070,15 @@ export async function startServer({
 
   return {
     port: listenPort(),
+    // boxd's relay: one connection per request a box makes to `/bee/*`, served by `botServer` alone.
+    relay: () => {
+      const [served, box] = duplexPair();
+      // A pair's ends don't take each other down.
+      served.once("close", () => box.destroy());
+      box.once("close", () => served.destroy());
+      botServer.emit("connection", served);
+      return box;
+    },
     // Fills the model catalog too, so the first picker shows what the CLI offers.
     refreshLimits: () => void limits.refresh("claude").catch(logUsageFailure),
     checkCodex,
@@ -2068,6 +2108,7 @@ export async function startServer({
       host?.close();
       cua?.close();
       await browser.close();
+      botServer.closeAllConnections();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     },

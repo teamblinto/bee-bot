@@ -41,7 +41,16 @@ afterEach(async () => {
   await vi.waitFor(() => NodeFS.rmSync(dataDir, { recursive: true, force: true }));
 });
 
-async function start(options: { socketPath?: string; runTurn?: () => never } = {}) {
+const publicOrigin = "https://bee.example.test";
+
+async function start(
+  options: {
+    socketPath?: string;
+    runTurn?: () => never;
+    serverMode?: boolean;
+    publicOrigin?: string;
+  } = {},
+) {
   const store = openEventStore(dataDir);
   const server = await startServer({
     port: 0,
@@ -129,16 +138,52 @@ describe("server mode", () => {
     );
     expect(runTurn).not.toHaveBeenCalled();
   });
+
+  it("answers usage without reading this host's Claude folder", async () => {
+    const { base } = await start();
+    const usage = await fetch(`${base}/usage?days=7&protocolVersion=${protocolVersion}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(await usage.json()).toEqual({ status: "unavailable" });
+  });
 });
 
-function socketRequest(socketPath: string, path: string) {
-  return new Promise<number>((resolve, reject) => {
-    NodeHttp.get({ socketPath, path: `${path}?protocolVersion=${protocolVersion}` }, (response) => {
+type Reached = { status: number; headers: NodeHttp.IncomingHttpHeaders };
+
+function request(options: NodeHttp.RequestOptions, body?: string) {
+  return new Promise<Reached>((resolve, reject) => {
+    NodeHttp.request(options, (response) => {
       response.resume();
-      resolve(response.statusCode ?? 0);
-    }).on("error", reject);
+      resolve({ status: response.statusCode ?? 0, headers: response.headers });
+    })
+      .on("error", reject)
+      .end(body);
   });
 }
+
+const socketRequest = async (socketPath: string, path: string) =>
+  (await request({ socketPath, path: `${path}?protocolVersion=${protocolVersion}` })).status;
+
+describe.each([false, true])("a box's relay with serverMode %s", (serverMode) => {
+  it("reaches only the engine routes, never the owner's", async () => {
+    const { server } = await start({ serverMode });
+    const relayed = (method: string, path: string, body?: string) =>
+      request(
+        {
+          createConnection: () => server.relay(),
+          method,
+          path: `${path}?protocolVersion=${protocolVersion}`,
+          headers: { Authorization: `Bearer ${token}`, Connection: "close" },
+        },
+        body,
+      );
+    const create = JSON.stringify({ type: "create-bot", name: "Mallory", personality: "" });
+    expect((await relayed("POST", "/commands", create)).status).toBe(404);
+    expect((await relayed("GET", "/state")).status).toBe(404);
+    // The owner's token is no run's, so even the engine route turns it away.
+    expect((await relayed("POST", "/mcp", "{}")).status).toBe(401);
+  });
+});
 
 // Node on Windows listens on named pipes, not socket files.
 describe.skipIf(process.platform === "win32")("the server mode socket", () => {
@@ -165,7 +210,68 @@ describe.skipIf(process.platform === "win32")("the server mode socket", () => {
     expect(await socketRequest(socketPath, "/health")).toBe(200);
     await expect(start({ socketPath })).rejects.toThrow(/in use/);
   });
+
+  it("refuses a socket in a folder other users can enter", async () => {
+    const folder = NodePath.join(dataDir, "open");
+    NodeFS.mkdirSync(folder, { mode: 0o755 });
+    NodeFS.chmodSync(folder, 0o755);
+    await expect(start({ socketPath: NodePath.join(folder, "beebotd.sock") })).rejects.toThrow(
+      /closed to others/,
+    );
+  });
+
+  it("serves a browser only from the public origin", async () => {
+    const socketPath = NodePath.join(dataDir, "beebotd.sock");
+    await start({ socketPath, publicOrigin });
+    const path = `/health?protocolVersion=${protocolVersion}`;
+    const own = await request({ socketPath, path, headers: { Origin: publicOrigin } });
+    expect(own.status).toBe(200);
+    expect(own.headers["access-control-allow-origin"]).toBe(publicOrigin);
+    const hostile = await request({ socketPath, path, headers: { Origin: "https://evil.test" } });
+    expect(hostile.status).toBe(403);
+    expect(hostile.headers["access-control-allow-origin"]).toBeUndefined();
+
+    const upgrade = (origin: string) =>
+      new Promise<number>((resolve, reject) => {
+        const socket = new WebSocket(
+          `ws+unix://${socketPath}:/ws?protocolVersion=${protocolVersion}`,
+          {
+            origin,
+          },
+        );
+        socket.once("open", () => {
+          socket.terminate();
+          resolve(101);
+        });
+        socket.once("unexpected-response", (_, response) => {
+          socket.terminate();
+          resolve(response.statusCode ?? 0);
+        });
+        socket.once("error", reject);
+      });
+    expect(await upgrade("https://evil.test")).toBe(403);
+    expect(await upgrade(publicOrigin)).toBe(101);
+  });
 });
+
+it(
+  "fails closed in server mode without an exact public origin",
+  async () => {
+    const daemon = spawnBeebotd("", {
+      env: {
+        BEEBOT_SERVER_MODE: "1",
+        BEEBOT_DATA_DIR: dataDir,
+        BEEBOT_SOCKET: NodePath.join(dataDir, "beebotd.sock"),
+        BEEBOT_PUBLIC_ORIGIN: "https://bee.example.test/",
+      },
+    });
+    cleanups.push(daemon.kill);
+    expect(await daemon.exited).toBe(noRestartExitCodes.invalidBootstrap);
+    expect(daemon.output()).toContain("BEEBOT_PUBLIC_ORIGIN");
+    expect(NodeFS.existsSync(NodePath.join(dataDir, "beebot.db"))).toBe(false);
+  },
+  daemonTestTimeoutMs,
+);
 
 it(
   "fails closed in server mode without a vault key",
@@ -175,6 +281,7 @@ it(
         BEEBOT_SERVER_MODE: "1",
         BEEBOT_DATA_DIR: dataDir,
         BEEBOT_SOCKET: NodePath.join(dataDir, "beebotd.sock"),
+        BEEBOT_PUBLIC_ORIGIN: "https://bee.example.test",
         CREDENTIALS_DIRECTORY: dataDir,
       },
     });

@@ -41,7 +41,7 @@ export type BoxdConnection = {
 };
 
 // `relay` opens a connection to beebotd for each request a box makes to `/bee/*`.
-export type BoxdHooks = { relay?: () => Duplex };
+export type BoxdHooks = { relay?: () => Duplex | undefined };
 
 // boxd can't run until its Podman machine starts again (its cgroup fix applies at boot).
 export class MachineRestartNeeded extends Error {}

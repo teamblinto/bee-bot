@@ -286,24 +286,6 @@ describe("Claude in a box", () => {
     expect(env).not.toContain("ANTHROPIC_API_KEY");
   });
 
-  it("refuses to start with both an API key and a token in its environment", async () => {
-    const attached: Seen[] = [];
-    const { runtime } = await boxRuntime([botId], (seen) => attached.push(seen));
-    const layout = testLayout(botId);
-    const runTurn = createClaudeRunTurn({
-      command: [process.execPath, fakeClaude, "success", logPath],
-      dataDir,
-      box: { runtime, layout: { ...layout, env: { ...layout.env, CLAUDE_CODE_OAUTH_TOKEN: "t" } } },
-    });
-    const errors = vi.spyOn(console, "error").mockImplementation(noop);
-    expect(await turn(runTurn, launchFor(botId, "claude", "api_key"))).toEqual({
-      kind: "auth_failed",
-      pauseReason: "credential_source",
-    });
-    errors.mockRestore();
-    expect(attached).toEqual([]);
-  });
-
   it("points the API lane at the proxy with a placeholder, and accepts that as the lane's key", async () => {
     const { runtime } = await boxRuntime([botId]);
     const runTurn = createClaudeRunTurn({

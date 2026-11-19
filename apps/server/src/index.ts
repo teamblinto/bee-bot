@@ -1,9 +1,9 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
-import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
+import type { Duplex } from "node:stream";
 
 import {
   Bootstrap,
@@ -117,9 +117,11 @@ function wipeRuntime(dataDir: string) {
   }
 }
 
+type Cell = { socketPath: string; publicOrigin: string };
+
 // Server mode: one beebotd per user on a Linux host, reached only through `socketPath`.
-async function boot(bootstrap: Bootstrap, socketPath?: string) {
-  const serverMode = socketPath !== undefined;
+async function boot(bootstrap: Bootstrap, cell?: Cell) {
+  const serverMode = cell !== undefined;
   const store = openStore(bootstrap.dataDir);
   if (bootstrap.telemetry) {
     startAnalytics({
@@ -138,8 +140,9 @@ async function boot(bootstrap: Bootstrap, socketPath?: string) {
   // The egress proxy reads API keys from here, so none ever enters a box, argv, env or a log.
   const vault = openVault(store.vaultStore, vaultKey);
 
+  // The server's relay for boxes, set once it listens; boxes refresh only after that.
+  let relay: (() => Duplex) | undefined;
   // Box bots run in boxd's containers in a Podman machine (Windows; see boxdRuntime.ts).
-  let port = 0;
   // The per-user Podman installer puts podman.exe on PATH instead of under Program Files.
   const podmanBin =
     process.platform === "win32" && NodeFS.existsSync(windowsPodman) ? windowsPodman : "podman";
@@ -173,10 +176,7 @@ async function boot(bootstrap: Bootstrap, socketPath?: string) {
           const input = store.egress.egressInput(botId);
           return input && { ...input, lane: boxLane(botId, input.lane) };
         },
-        relay: () =>
-          socketPath === undefined
-            ? NodeNet.connect(port, "127.0.0.1")
-            : NodeNet.connect(socketPath),
+        relay: () => relay?.(),
         // A connector's box is no bot's, so it has no row.
         setBox: (botId, state, reason) =>
           connectorOfBox(botId) === undefined && store.boxes.setBox(botId, state, reason),
@@ -225,15 +225,29 @@ async function boot(bootstrap: Bootstrap, socketPath?: string) {
     vault,
     clock,
     runTurn,
-    probeEngine: probe,
-    probeCodex: (lane, onModels) => probeCodex(codexCommand, dataDir, lane, onModels),
-    probeUsage: (onModels) => probeUsage(claudeCommand, dataDir, onModels),
-    summarize: createClaudeSummarize({
-      command: claudeCommand,
-      dataDir,
-      clock,
-      lane: () => store.accountLane("claude"),
-    }),
+    // Server mode never runs a CLI on the host: its login, limits and models are nobody's there.
+    // `unknown` blocks nothing, since each box run checks its own login.
+    probeEngine: serverMode
+      ? async () => ({
+          cliFound: true,
+          version: null,
+          auth: "unknown",
+          email: null,
+          pauseReason: null,
+        })
+      : probe,
+    probeCodex: serverMode
+      ? undefined
+      : (lane, onModels) => probeCodex(codexCommand, dataDir, lane, onModels),
+    probeUsage: serverMode ? undefined : (onModels) => probeUsage(claudeCommand, dataDir, onModels),
+    summarize: serverMode
+      ? undefined
+      : createClaudeSummarize({
+          command: claudeCommand,
+          dataDir,
+          clock,
+          lane: () => store.accountLane("claude"),
+        }),
     box,
     boxes,
     browserRuntime: createCdpBrowserRuntime(boxes.sidecar),
@@ -243,23 +257,22 @@ async function boot(bootstrap: Bootstrap, socketPath?: string) {
       : undefined,
     cuaDriver: hostControl && cuaDriver ? () => spawnCuaDriver(cuaDriver) : undefined,
     serverMode,
-    socketPath,
+    ...cell,
   });
-  port = server.port;
+  relay = server.relay;
   void boxes.refresh();
-  if (serverMode) {
-    console.info(`beebotd: listening on ${socketPath}`);
+  if (cell) {
+    console.info(`beebotd: listening on ${cell.socketPath}`);
   } else {
     console.error(`beebotd: listening on 127.0.0.1:${server.port}`);
+    const { pauseReason } = await probe(store.accountLane("claude"));
+    if (pauseReason) {
+      console.error(`beebotd: Claude bots paused: ${pauseReason}`);
+      store.pauseReadyBots("claude", pauseReason);
+    }
+    server.refreshLimits();
+    await server.checkCodex();
   }
-  const { pauseReason } = await probe(store.accountLane("claude"));
-  // The host's own CLI says nothing about box bots, the only ones server mode runs.
-  if (pauseReason && !serverMode) {
-    console.error(`beebotd: Claude bots paused: ${pauseReason}`);
-    store.pauseReadyBots("claude", pauseReason);
-  }
-  server.refreshLimits();
-  await server.checkCodex();
   const pruning = setInterval(() => {
     try {
       pruneEvents(store);
@@ -294,11 +307,11 @@ for (const event of ["uncaughtException", "unhandledRejection"] as const) {
   });
 }
 
-function start(bootstrap: Bootstrap | undefined, socketPath?: string) {
+function start(bootstrap: Bootstrap | undefined, cell?: Cell) {
   if (!bootstrap) {
     exitWith(noRestartExitCodes.invalidBootstrap, "invalid bootstrap");
   }
-  const running = boot(bootstrap, socketPath);
+  const running = boot(bootstrap, cell);
   running.catch(async (error: unknown) => {
     console.error(error);
     await crash(error);
@@ -314,16 +327,20 @@ function readBootstrapFile(path: string | undefined) {
   }
 }
 
-// Fails closed: without its own vault key a cell never starts.
+// The origin alone, as browsers send it: scheme, host and port, no path or trailing slash.
+const isOrigin = (value: string) => URL.parse(value)?.origin === value;
+
+// Fails closed: without its own vault key and its public origin a cell never starts.
 function serverBootstrap({
   BEEBOT_DATA_DIR: dataDir,
   BEEBOT_SOCKET: socketPath,
+  BEEBOT_PUBLIC_ORIGIN: publicOrigin,
   CREDENTIALS_DIRECTORY: credentials,
 }: NodeJS.ProcessEnv) {
-  if (!dataDir || !socketPath) {
+  if (!dataDir || !socketPath || !publicOrigin || !isOrigin(publicOrigin)) {
     return exitWith(
       noRestartExitCodes.invalidBootstrap,
-      "server mode needs BEEBOT_DATA_DIR and BEEBOT_SOCKET",
+      "server mode needs BEEBOT_DATA_DIR, BEEBOT_SOCKET and an origin in BEEBOT_PUBLIC_ORIGIN",
     );
   }
   const vault = readVaultKeyFile({
@@ -338,15 +355,15 @@ function serverBootstrap({
   // The token guards only the TCP listener, which server mode never opens.
   const token = NodeCrypto.randomBytes(32).toString("base64url");
   const bootstrap: Bootstrap = { port: 0, token, dataDir, allowedOrigins: [], vault };
-  return { bootstrap, socketPath };
+  return { bootstrap, cell: { socketPath, publicOrigin } };
 }
 
 const fileFlag = process.argv.indexOf("--bootstrap", 2);
 
 if (process.env.BEEBOT_SERVER_MODE === "1") {
   logJson();
-  const { bootstrap, socketPath } = serverBootstrap(process.env);
-  const running = start(bootstrap, socketPath);
+  const { bootstrap, cell } = serverBootstrap(process.env);
+  const running = start(bootstrap, cell);
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => void running.then(({ stop }) => stop()).then(() => process.exit(0)));
   }

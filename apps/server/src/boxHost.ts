@@ -262,8 +262,8 @@ export async function startBoxHost({
   vault: Vault;
   account: (botId: string) => string | undefined;
   egressInput: (botId: string) => EgressInput | null;
-  // A connection to beebotd for each request a box makes to it.
-  relay: () => NodeStream.Duplex;
+  // A connection to beebotd for each request a box makes to it, or none yet.
+  relay: () => NodeStream.Duplex | undefined;
   setBox: (botId: string, state: BoxState, reason?: string | null) => unknown;
   bootstrap?: Partial<BoxdBootstrap>;
   files?: BoxdFiles;

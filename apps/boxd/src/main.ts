@@ -77,8 +77,13 @@ async function boot(bootstrap: Bootstrap) {
   const result = await setup(podman, runSpec.engine);
   process.stderr.write(`boxd: setup ${JSON.stringify(result)}\n`);
   // beebotd's endpoints reach the egress proxy through this socket; only that container mounts it.
-  const relayDir = NodePath.join(dir, "relay");
-  NodeFs.mkdirSync(relayDir, { recursive: true, mode: 0o755 });
+  // The proxy runs as another uid, so the socket is open to all, but no other user on this host can
+  // get past the 0700 directory above it: the container mounts the inner one directly.
+  const relayParent = NodePath.join(dir, "relay");
+  const relayDir = NodePath.join(relayParent, "proxy");
+  NodeFs.mkdirSync(relayDir, { recursive: true });
+  NodeFs.chmodSync(relayParent, 0o700);
+  NodeFs.chmodSync(relayDir, 0o755);
   NodeFs.rmSync(NodePath.join(relayDir, "bee.sock"), { force: true });
   // No proxy, no boxes: boxd never serves without one.
   const script = NodePath.join(dir, "egress.mjs");
@@ -125,7 +130,6 @@ async function boot(bootstrap: Bootstrap) {
   await boxd.rebind();
   const relay = NodeNet.createServer((socket) => boxd.relay(socket));
   await new Promise<void>((resolve) => relay.listen(NodePath.join(relayDir, "bee.sock"), resolve));
-  // The proxy runs as another user; the directory is mounted into its container alone.
   NodeFs.chmodSync(NodePath.join(relayDir, "bee.sock"), 0o666);
   return boxd;
 }
