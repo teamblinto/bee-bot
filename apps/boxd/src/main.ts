@@ -73,8 +73,10 @@ async function boot(bootstrap: Bootstrap) {
   if (!NodeFs.existsSync(seccomp)) {
     throw new Error("seccomp-chromium.json is missing");
   }
+  // beebotd's server mode starts boxd beside it on the host, and boxd inherits its environment.
+  const native = process.env.BEEBOT_SERVER_MODE === "1";
   const podman = createPodman();
-  const result = await setup(podman, runSpec.engine);
+  const result = await setup(podman, runSpec.engine, undefined, native);
   process.stderr.write(`boxd: setup ${JSON.stringify(result)}\n`);
   // beebotd's endpoints reach the egress proxy through this socket; only that container mounts it.
   // The proxy runs as another uid, so the socket is open to all, but no other user on this host can
@@ -93,8 +95,6 @@ async function boot(bootstrap: Bootstrap) {
   // A Podman machine gets its own Node installed beside boxd; a native host's boxd runs on the
   // host's Node, so the proxy uses the image's.
   const nodeDir = NodePath.join(dir, "node");
-  // beebotd's server mode starts boxd beside it on the host, and boxd inherits its environment.
-  const native = process.env.BEEBOT_SERVER_MODE === "1";
   const egress = createPodmanEgress({
     podman,
     prefix: bootstrap.prefix,

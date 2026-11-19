@@ -1760,7 +1760,9 @@ export async function startServer({
       ]);
       if (status.pauseReason) {
         store.pauseReadyBots("claude", status.pauseReason);
-      } else {
+      } else if (!serverMode) {
+        // Server mode's check never looks at a login, so it can't vouch for one: only a box run
+        // lifts its pause.
         store.clearEnginePauses("claude");
       }
       sendJson(response, 200, status);

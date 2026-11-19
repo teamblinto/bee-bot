@@ -80,6 +80,20 @@ export function setMemberState(
   db.prepare("UPDATE member SET state = ?, error = ? WHERE user_id = ?").run(state, error, userId);
 }
 
+// Atomic, so two sign-ins at once start one retry.
+export function retryFailedMember(db: DatabaseSync, userId: string) {
+  const { changes } = db
+    .prepare("UPDATE member SET state = 'provisioning' WHERE user_id = ? AND state = 'failed'")
+    .run(userId);
+  return changes === 1;
+}
+
+export function findMemberByCell(db: DatabaseSync, cell: string) {
+  return db.prepare("SELECT user_id, state FROM member WHERE cell = ?").get(cell) as
+    | { user_id: string; state: MemberState }
+    | undefined;
+}
+
 export function findMember(db: DatabaseSync, userId: string): Member | undefined {
   const row = db.prepare("SELECT cell, admin, state FROM member WHERE user_id = ?").get(userId) as
     | { cell: string; admin: number; state: MemberState }

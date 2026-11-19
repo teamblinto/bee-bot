@@ -14,20 +14,25 @@ import {
   claimInvite,
   createInvite,
   findMember,
+  findMemberByCell,
   listUsers,
   newCellName,
   openInvite,
+  retryFailedMember,
   setMemberState,
 } from "./store.ts";
 
-export type Provision = (cell: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+export type Provision = (
+  verb: "add" | "suspend" | "resume",
+  cell: string,
+) => Promise<{ ok: true } | { ok: false; error: string }>;
 
 // The root helper prints one JSON object: {"ok":true,...} or {"ok":false,"error":"..."}.
-export const sudoProvision: Provision = (cell) =>
+export const sudoProvision: Provision = (verb, cell) =>
   new Promise((resolve) => {
     NodeChildProcess.execFile(
       "sudo",
-      ["-n", "/usr/local/sbin/beebot-provision", "user", "add", cell],
+      ["-n", "/usr/local/sbin/beebot-provision", "user", verb, cell],
       { timeout: 5 * 60_000 },
       (error, stdout, stderr) => {
         let reply: { ok?: unknown; error?: unknown } | undefined;
@@ -71,7 +76,17 @@ const dropped = new Set([
 ]);
 
 const forwardable = (headers: NodeHttp.IncomingHttpHeaders) =>
-  Object.fromEntries(Object.entries(headers).filter(([name]) => !dropped.has(name)));
+  Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !dropped.has(name) && name !== "set-cookie"),
+  );
+
+// A cell is untrusted. It sets no cookie on this origin, and a page it serves (a workspace file,
+// say) gets an opaque origin, so its script can't reach the session or /admin/api.
+const fromCell = (headers: NodeHttp.IncomingHttpHeaders) => ({
+  ...forwardable(headers),
+  "content-security-policy": "sandbox",
+  "x-content-type-options": "nosniff",
+});
 
 const contentTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -156,7 +171,10 @@ async function readForm(request: NodeHttp.IncomingMessage, limit = 16 * 1024) {
 }
 
 const rawHeaderLines = (raw: string[]) =>
-  raw.reduce((lines, item, index) => lines + (index % 2 ? `${item}\r\n` : `${item}: `), "");
+  raw
+    .flatMap((item, index) => (index % 2 ? [] : [[item, raw[index + 1]] as const]))
+    .filter(([name]) => name.toLowerCase() !== "set-cookie")
+    .reduce((lines, [name, value]) => `${lines}${name}: ${value}\r\n`, "");
 
 export function createGateway({ auth, db, origin, webDir, cellsDir, provision }: Options) {
   const webRoot = NodePath.resolve(webDir);
@@ -168,6 +186,29 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     }
     return NodePath.join(cellsDir, cell, "beebotd.sock");
   };
+
+  // Open proxied sockets by user, so logout and suspend can end them.
+  const sockets = new Map<string, Set<{ sessionId: string; socket: NodeNet.Socket }>>();
+
+  function closeSockets(userId: string, sessionId?: string) {
+    for (const open of sockets.get(userId) ?? []) {
+      if (sessionId === undefined || open.sessionId === sessionId) {
+        open.socket.destroy();
+      }
+    }
+  }
+
+  async function provisionCell(userId: string, cell: string) {
+    const provisioned = await provision("add", cell);
+    if (provisioned.ok) {
+      setMemberState(db, userId, "ready");
+      log("info", "cell provisioned", { userId, cell });
+    } else {
+      setMemberState(db, userId, "failed", provisioned.error);
+      log("error", "provision failed", { userId, cell, error: provisioned.error });
+    }
+    return provisioned;
+  }
 
   async function signIn(
     request: NodeHttp.IncomingMessage,
@@ -196,7 +237,12 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       return { status: 401, error: "That email and password don't match an account." };
     }
     const { token, user } = (await response.json()) as { token: string; user: { id: string } };
-    const member = findMember(db, user.id);
+    let member = findMember(db, user.id);
+    // A cell that failed to set up is tried again at each sign-in, and stays closed until it works.
+    if (member?.state === "failed" && retryFailedMember(db, user.id)) {
+      await provisionCell(user.id, member.cell);
+      member = findMember(db, user.id);
+    }
     if (member?.state !== "ready") {
       await (await auth.$context).internalAdapter.deleteSession(token);
       return {
@@ -204,7 +250,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
         error:
           member?.state === "suspended"
             ? "This account is suspended."
-            : "This account isn't set up yet. Ask your admin.",
+            : "This account isn't set up yet. Try again later, or ask your admin.",
       };
     }
     return { cookies: response.headers.getSetCookie() };
@@ -274,22 +320,18 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     const cell = newCellName();
     addMember(db, user.id, cell, invite.admin);
     log("info", "account created", { userId: user.id, cell });
-    const provisioned = await provision(cell);
+    const provisioned = await provisionCell(user.id, cell);
     if (!provisioned.ok) {
-      setMemberState(db, user.id, "failed", provisioned.error);
-      log("error", "provision failed", { userId: user.id, cell, error: provisioned.error });
       sendPage(
         response,
         502,
         messagePage(
           "Setup failed",
-          `Your account was created, but its space couldn't be set up, so it can't be used yet: ${provisioned.error}. Ask your admin.`,
+          `Your account was created, but its space couldn't be set up, so it can't be used yet: ${provisioned.error}. Signing in tries again.`,
         ),
       );
       return;
     }
-    setMemberState(db, user.id, "ready");
-    log("info", "cell provisioned", { userId: user.id, cell });
     const signedIn = await signIn(request, invite.email, password);
     if ("error" in signedIn) {
       redirect(response, "/login");
@@ -306,9 +348,14 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       sendPage(response, 200, logoutPage());
       return;
     }
+    const headers = toHeaders(request.headers);
+    const session = await auth.api.getSession({ headers }).catch(() => null);
     const signedOut = await auth.api
-      .signOut({ headers: toHeaders(request.headers), returnHeaders: true })
+      .signOut({ headers, returnHeaders: true })
       .catch(() => undefined);
+    if (session) {
+      closeSockets(session.user.id, session.session.id);
+    }
     redirect(response, "/login", signedOut?.headers.getSetCookie() ?? []);
   }
 
@@ -317,8 +364,34 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     response: NodeHttp.ServerResponse,
     url: URL,
   ) {
+    const toggle = /^\/admin\/api\/users\/(suspend|resume)$/.exec(url.pathname)?.[1];
     if (request.method === "GET" && url.pathname === "/admin/api/users") {
       sendJson(response, 200, { users: listUsers(db) });
+    } else if (request.method === "POST" && (toggle === "suspend" || toggle === "resume")) {
+      const cell = (await readForm(request)).get("cell") ?? "";
+      const member = cellPattern.test(cell) ? findMemberByCell(db, cell) : undefined;
+      if (!member) {
+        sendJson(response, 404, { code: "not_found" });
+        return;
+      }
+      if (toggle === "resume" && member.state !== "suspended") {
+        sendJson(response, 409, { code: "not_suspended" });
+        return;
+      }
+      // Fails closed: the gateway stops proxying before the cell stops, and starts after it starts.
+      if (toggle === "suspend") {
+        setMemberState(db, member.user_id, "suspended");
+        closeSockets(member.user_id);
+      }
+      const result = await provision(toggle, cell);
+      if (result.ok && toggle === "resume") {
+        setMemberState(db, member.user_id, "ready");
+      }
+      log(result.ok ? "info" : "error", `${toggle} ${result.ok ? "done" : "failed"}`, {
+        cell,
+        ...(!result.ok && { error: result.error }),
+      });
+      sendJson(response, result.ok ? 200 : 502, result);
     } else if (request.method === "POST" && url.pathname === "/admin/api/invites") {
       const form = await readForm(request);
       const email = form.get("email")?.trim() ?? "";
@@ -361,7 +434,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
         headers: forwardable(request.headers),
       },
       (reply) => {
-        response.writeHead(reply.statusCode ?? 502, forwardable(reply.headers));
+        response.writeHead(reply.statusCode ?? 502, fromCell(reply.headers));
         reply.pipe(response);
       },
     );
@@ -392,6 +465,11 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       },
     });
     upstream.on("upgrade", (reply, cellSocket, cellHead) => {
+      // Logged out or suspended while the cell answered.
+      if (socket.destroyed) {
+        cellSocket.destroy();
+        return;
+      }
       socket.write(`HTTP/1.1 101 Switching Protocols\r\n${rawHeaderLines(reply.rawHeaders)}\r\n`);
       socket.write(cellHead);
       cellSocket.write(head);
@@ -425,7 +503,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     if (member.state !== "ready") {
       return { status: 503, code: "cell_unavailable", member } as const;
     }
-    return { member, socketPath: cellSocket(member.cell) };
+    return { member, session, socketPath: cellSocket(member.cell) };
   }
 
   async function handle(request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) {
@@ -499,6 +577,16 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       refuseUpgrade(socket, resolved.status, resolved.code);
       return;
     }
+    const userId = resolved.session.user.id;
+    const open = { sessionId: resolved.session.session.id, socket };
+    const mine = sockets.get(userId) ?? new Set();
+    sockets.set(userId, mine.add(open));
+    socket.on("close", () => {
+      mine.delete(open);
+      if (mine.size === 0 && sockets.get(userId) === mine) {
+        sockets.delete(userId);
+      }
+    });
     proxyUpgrade(request, socket, head, resolved.socketPath);
   }
 

@@ -111,13 +111,14 @@ export async function setup(
   podman: Podman,
   image: RoleImage,
   confPath = NodePath.join(NodeOs.homedir(), ".config", "containers", "containers.conf"),
+  native = false,
 ): Promise<SetupResult> {
   let bootstrapChanged = false;
   let fixed = false;
-  // Only a Podman WSL machine has this file. Elsewhere (Linux, macOS) sudo or the file is
-  // missing and this step does nothing; those hosts are untested.
-  const current = await podman.host("sudo", ["-n", "cat", "/root/bootstrap"]);
-  if (current.code === 0) {
+  // Only a Podman WSL machine has this file, and a native host's sudo is never asked. Elsewhere
+  // (macOS) sudo or the file is missing and this step does nothing.
+  const current = native ? undefined : await podman.host("sudo", ["-n", "cat", "/root/bootstrap"]);
+  if (current?.code === 0) {
     const patched = patchBootstrap(current.stdout);
     if (patched === null) {
       throw new Error("unrecognised /root/bootstrap; cannot apply the cgroup fix");

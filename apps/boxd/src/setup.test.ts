@@ -124,6 +124,22 @@ describe("setup", () => {
     await expect(failure).rejects.not.toBeInstanceOf(MachineRestartNeeded);
     await NodeFs.rm(dir, { recursive: true });
   });
+
+  it("never runs sudo on a native host", async () => {
+    const dir = await NodeFs.mkdtemp(NodePath.join(NodeOs.tmpdir(), "boxd-setup-"));
+    const { podman } = host("67108864\n32\n50000 100000\n");
+    const native: Podman = {
+      ...podman,
+      host: async () => {
+        throw new Error("sudo ran");
+      },
+    };
+    expect(await setup(native, testRunSpec.engine, NodePath.join(dir, "c.conf"), true)).toEqual({
+      bootstrapChanged: false,
+      confChanged: true,
+    });
+    await NodeFs.rm(dir, { recursive: true });
+  });
 });
 
 describe("limit check", () => {

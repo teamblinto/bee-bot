@@ -139,6 +139,17 @@ describe("server mode", () => {
     expect(runTurn).not.toHaveBeenCalled();
   });
 
+  it("keeps a bot's login pause when the engine is checked", async () => {
+    const { store, base } = await start();
+    const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+    store.pauseReadyBots("claude", "auth_failed");
+    const engine = await fetch(`${base}/engine?protocolVersion=${protocolVersion}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(engine.status).toBe(200);
+    expect(store.state().bots.find((b) => b.id === bot.id)?.pauseReason).toBe("auth_failed");
+  });
+
   it("answers usage without reading this host's Claude folder", async () => {
     const { base } = await start();
     const usage = await fetch(`${base}/usage?days=7&protocolVersion=${protocolVersion}`, {
