@@ -377,7 +377,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     const result = await signIn(request, form.get("email") ?? "", form.get("password") ?? "");
     if ("error" in result) {
       log("info", "sign-in refused", { status: result.status });
-      sendPage(response, result.status, loginPage(next, result.error));
+      sendPage(response, result.status, loginPage(next, result.error, result.status === 401));
       return;
     }
     redirect(response, next, result.cookies);
@@ -480,7 +480,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     response: NodeHttp.ServerResponse,
     status: number,
     selfCell: string,
-    notice: { invite?: string; error?: string } = {},
+    notice: Parameters<typeof usersPage>[2] = {},
   ) {
     const users = await Promise.all(
       listUsers(db).map(async (user) => {
@@ -497,7 +497,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
     response: NodeHttp.ServerResponse,
     status: number,
     cell: string,
-    notice: { error?: string; saved?: boolean } = {},
+    notice: Parameters<typeof userPage>[3] = {},
   ) {
     const member = cellPattern.test(cell) ? findMemberByCell(db, cell) : undefined;
     if (!member) {
@@ -591,7 +591,10 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
         if (api) {
           sendJson(response, 400, { code: "bad_request" });
         } else {
-          await showUsers(response, 400, actor.cell, { error: "Enter an email address." });
+          await showUsers(response, 400, actor.cell, {
+            error: "Enter an email address.",
+            field: "email",
+          });
         }
         return;
       }
@@ -612,6 +615,7 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       } else if (verb === "quota" || verb === "delete") {
         await showUser(response, result.status, form.get("cell") ?? "", {
           error: result.body.error,
+          ...(result.body.code === "unconfirmed" && { field: "confirm" as const }),
         });
       } else {
         await showUsers(response, result.status, actor.cell, { error: result.body.error });

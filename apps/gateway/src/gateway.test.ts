@@ -309,6 +309,13 @@ describe("sessions", () => {
     await signUp("ed@example.test");
     const wrong = await post("/login", { email: "ed@example.test", password: "nope nope nope" });
     expect(wrong.status).toBe(401);
+    const policy = wrong.headers.get("content-security-policy")!;
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).not.toContain("script-src");
+    const html = await wrong.text();
+    expect(html).not.toContain("<script");
+    expect(html).toContain('role="alert" id="error"');
+    expect(html).toMatch(/id="password"[^>]*aria-invalid="true" aria-describedby="error"/);
     const right = await post("/login", {
       email: "ed@example.test",
       password,
@@ -500,7 +507,11 @@ describe("admin pages", () => {
     const html = await reply.text();
     expect(html).not.toContain("<script");
     expect(html).toContain(provisioned[1]);
-    expect(html.match(/<td>active<\/td>\n<td>answering<\/td>/g)).toHaveLength(2);
+    expect(
+      html.split(
+        '<td><span class="status ok">active</span></td>\n<td><span class="status ok">answering</span></td>',
+      ),
+    ).toHaveLength(3);
   });
 
   it("create an invite and show its link once", async () => {
@@ -643,6 +654,9 @@ describe("admin pages", () => {
     const socket = await openSocket(user);
     const wrong = await post("/admin/users/delete", { cell, confirm: "nope" }, { cookie: admin });
     expect(wrong.status).toBe(400);
+    expect(await wrong.text()).toMatch(
+      /id="confirm"[^>]*aria-invalid="true" aria-describedby="error"/,
+    );
     expect(provisionCalls.some(([verb]) => verb === "delete")).toBe(false);
 
     const done = await post(
@@ -683,8 +697,12 @@ describe("admin pages", () => {
     expect(Date.now() - started).toBeLessThan(4000);
     expect(reply.status).toBe(200);
     const html = await reply.text();
-    expect(html).toContain("<td>active</td>\n<td>answering</td>");
-    expect(html).toContain("<td>unknown</td>\n<td>not answering</td>");
+    expect(html).toContain(
+      '<td><span class="status ok">active</span></td>\n<td><span class="status ok">answering</span></td>',
+    );
+    expect(html).toContain(
+      '<td><span class="status neutral">unknown</span></td>\n<td><span class="status neutral">not answering</span></td>',
+    );
   });
 });
 
