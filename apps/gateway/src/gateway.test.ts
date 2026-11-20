@@ -377,6 +377,26 @@ describe("with a session", () => {
     expect((await escape.json()).path).toBe("/..%2fsecret.txt");
   });
 
+  it("sends a page load at any other path to the app, but not the cell's OAuth callback", async () => {
+    const cookie = await signUp("hi@example.test");
+    const accept = "text/html,application/xhtml+xml,*/*;q=0.8";
+    const deep = await fetch(`${base}/computers`, {
+      headers: { cookie, accept },
+      redirect: "manual",
+    });
+    expect(deep.status).toBe(303);
+    expect(deep.headers.get("location")).toBe("/");
+    const signedOut = await fetch(`${base}/computers`, { headers: { accept }, redirect: "manual" });
+    expect(signedOut.headers.get("location")).toBe("/login?next=%2Fcomputers");
+    const callback = await fetch(`${base}/connectors/oauth/callback?state=s`, {
+      headers: { cookie, accept },
+    });
+    expect((await callback.json()).path).toBe("/connectors/oauth/callback?state=s");
+    expect((await (await fetch(`${base}/computers`, { headers: { cookie } })).json()).path).toBe(
+      "/computers",
+    );
+  });
+
   it("is 503 when the cell isn't answering, never another cell", async () => {
     await signUp("ia@example.test");
     const cookie = await signUp("io@example.test");

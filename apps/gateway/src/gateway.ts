@@ -775,8 +775,14 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       }
       return;
     }
+    // The app routes by hash, so a page load at any other path is a deep link or a stale URL, not
+    // the cell's API. The cell's OAuth callback is the one page a browser opens on the cell.
+    const navigation =
+      safe &&
+      request.headers.accept?.includes("text/html") &&
+      !url.pathname.startsWith("/connectors/");
     if (resolved.status === 401) {
-      if (safe && (url.pathname === "/" || url.pathname === "/index.html")) {
+      if (navigation || (safe && (url.pathname === "/" || url.pathname === "/index.html"))) {
         redirect(response, `/login?next=${encodeURIComponent(url.pathname + url.search)}`);
       } else {
         sendJson(response, 401, { code: "unauthorized" });
@@ -800,6 +806,10 @@ export function createGateway({ auth, db, origin, webDir, cellsDir, provision }:
       } else {
         NodeFS.createReadStream(file.file).pipe(response);
       }
+      return;
+    }
+    if (navigation) {
+      redirect(response, "/");
       return;
     }
     proxy(request, response, resolved.socketPath);
