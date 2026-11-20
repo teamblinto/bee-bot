@@ -181,6 +181,8 @@ const reasonLines: Record<RunReason, string> = {
   box_limit:
     "Refused. Your other bots' boxes fill every slot you have. A box frees its slot after 15 idle minutes; send again then.",
   budget: "Refused. This month's API key budget is used up. Ask your admin to raise it.",
+  credential_conflict:
+    "Refused. Claude is set to use both your subscription and a saved API key. Remove the key on the Usage page, or set every Claude bot to the API key.",
   engine_failed: "The engine couldn't finish this turn. Send again to retry.",
   limited: "Limited. This retries when the limit clears, unless stopped.",
   // Every pause before a turn runs lands here, not only a login: the pause line names the cause.

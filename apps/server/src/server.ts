@@ -1045,6 +1045,11 @@ export async function startServer({
   function runCommand(command: Command) {
     const notFound = { status: 404, body: { code: "not_found" } };
     const ok = { status: 200, body: { ok: true } };
+    // Server mode: Claude's subscription is the box's own login, so Bee Bot never also holds a key.
+    const credentialConflict = { status: 409, body: { code: "credential_conflict" } };
+    const claudeServer = (accountId: string) => serverMode && accountId === "claude";
+    const keySaved = (accountId: string, lane: EngineLane) =>
+      lane === "subscription" && claudeServer(accountId) && store.hasApiKey(accountId);
     // shortcut: any open client counts, not the sender's own. Tie it to the sender once a token can
     // be held by something other than the owner's own clients.
     const attended = subscribers.size > 0;
@@ -1223,6 +1228,9 @@ export async function startServer({
         supervisor.stopAll();
         return ok;
       case "set-account-lane":
+        if (keySaved(command.engineAccountId, command.lane)) {
+          return credentialConflict;
+        }
         store.setAccountLane(command.engineAccountId, command.lane);
         supervisor.pump();
         return ok;
@@ -1374,6 +1382,12 @@ export async function startServer({
         return result === "started" ? ok : { status: 409, body: { code: result } };
       }
       case "store-api-key":
+        if (
+          claudeServer(command.engineAccountId) &&
+          store.subscriptionChosen(command.engineAccountId)
+        ) {
+          return credentialConflict;
+        }
         return storeApiKey(vault, command.engineAccountId, command.key);
       case "delete-api-key":
         return deleteApiKey(vault, command.engineAccountId);
@@ -1440,6 +1454,10 @@ export async function startServer({
       case "set-bot-unattended-lane": {
         if (command.lane === "subscription" && !store.automatedAccessAt()) {
           return { status: 409, body: { code: "automated_access_unacknowledged" } };
+        }
+        const engine = store.getBot(command.botId)?.engineAccountId;
+        if (engine && keySaved(engine, command.lane)) {
+          return credentialConflict;
         }
         const bot = store.policy.setBotUnattendedLane(command.botId, command.lane);
         return bot ? applyEgress(bot) : notFound;
