@@ -2367,6 +2367,19 @@ export function openEventStore(dataDir: string) {
     z.object({ total: z.number() }).parse(sumSpend.get(since)).total;
   const laneOfBox = ({ engineAccountId, unattendedLane: chosen }: Bot) =>
     unattendedLane(vaultStatus().apiKeys.includes(engineAccountId), automatedAccessAt(), chosen);
+  const hasApiKey = (accountId: string) => vaultStatus().apiKeys.includes(accountId);
+  // The account's own lane, or any live bot's unattended choice.
+  const subscriptionChosen = (accountId: string) =>
+    EngineAccount.parse(selectAccount.get(accountId)).lane === "subscription" ||
+    z
+      .array(BotRow)
+      .parse(selectBots.all())
+      .some(
+        (bot) =>
+          bot.engineAccountId === accountId &&
+          bot.archivedAt === null &&
+          bot.unattendedLane === "subscription",
+      );
 
   // `automatic`: the routine runs on its own, so no person's click is needed.
   const startFiring = (id: string, attended: boolean, automatic: boolean) =>
@@ -2646,6 +2659,8 @@ export function openEventStore(dataDir: string) {
     clearEnginePauses: (engineAccountId: string) =>
       transaction(() => clearEnginePauses(engineAccountId)),
     accountLane: (id: string) => EngineAccount.parse(selectAccount.get(id)).lane,
+    hasApiKey,
+    subscriptionChosen,
     // Credential pauses are lifted so the next run's gate checks the CLI against the new lane.
     setAccountLane: (id: string, lane: EngineLane) =>
       transaction(() => {
@@ -2845,6 +2860,8 @@ export function openEventStore(dataDir: string) {
         hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
         boundary: bot.boundary,
         unattendedLane: laneOfBox(bot),
+        bothClaudeCredentials:
+          bot.engineAccountId === "claude" && hasApiKey("claude") && subscriptionChosen("claude"),
         engine: bot.engineAccountId,
         // As index.ts launches it: a box bot takes its R7 lane, falling back to the account's.
         lane: (bot.boundary === "box" ? laneOfBox(bot) : null) ?? account.lane,

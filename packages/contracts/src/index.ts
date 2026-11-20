@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 40;
+export const protocolVersion = 41;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -241,6 +241,8 @@ export const RunReason = z.enum([
   "box_limit",
   // Server mode: this month's API-key spend reached the operator's budget.
   "budget",
+  // Server mode: a Claude API key is saved while the subscription lane is chosen.
+  "credential_conflict",
 ]);
 export type RunReason = z.infer<typeof RunReason>;
 

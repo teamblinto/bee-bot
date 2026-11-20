@@ -203,7 +203,8 @@ export function createSupervisor({
   }
 
   function settleWake(wake: Wake, now: string) {
-    const { hasActiveRun, hasInput, boundary, ...admission } = store.wakeContext(wake, now);
+    const { hasActiveRun, hasInput, boundary, bothClaudeCredentials, ...admission } =
+      store.wakeContext(wake, now);
     if (hasActiveRun) {
       return;
     }
@@ -214,6 +215,10 @@ export function createSupervisor({
     }
     if (boxOnly && boundary !== "box") {
       store.refuseWake(wake, "box_unavailable");
+      return;
+    }
+    if (boxOnly && bothClaudeCredentials) {
+      store.refuseWake(wake, "credential_conflict");
       return;
     }
     const box = boundary !== "box" ? "none" : boxesReady() ? "ready" : "unavailable";

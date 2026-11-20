@@ -17,6 +17,7 @@ import { WebSocket } from "ws";
 import { daemonTestTimeoutMs, spawnBeebotd } from "./fixtures/beebotd.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
+import { openVault } from "./vaultStore.ts";
 
 const token = "t".repeat(43);
 const healthy: EngineStatus = {
@@ -59,6 +60,7 @@ async function start(
     allowedOrigins: [],
     store,
     probeEngine: async () => healthy,
+    vault: openVault(store.vaultStore, { status: "ready", key: "k".repeat(43) + "=" }),
     serverMode: true,
     hostDriver: async () => {
       throw new Error("server mode never drives the host");
@@ -137,6 +139,49 @@ describe("server mode", () => {
       expect(store.state().runs[0]).toMatchObject({ status: "Refused", reason: "box_unavailable" }),
     );
     expect(runTurn).not.toHaveBeenCalled();
+  });
+
+  it("never holds a Claude API key while the subscription lane is chosen", async () => {
+    const { store, base } = await start();
+    const refused = async (body: unknown) => {
+      const response = await command(base, body);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ code: "credential_conflict" });
+    };
+    const key = { type: "store-api-key", engineAccountId: "claude", key: "sk-ant-test" };
+
+    await refused(key);
+    expect(
+      await (
+        await command(base, {
+          type: "set-account-lane",
+          engineAccountId: "claude",
+          lane: "api_key",
+        })
+      ).json(),
+    ).toEqual({ ok: true });
+    expect(await (await command(base, key)).json()).toEqual({ ok: true });
+    await refused({ type: "set-account-lane", engineAccountId: "claude", lane: "subscription" });
+    const bot = (await (
+      await command(base, { type: "create-bot", name: "Ada", personality: "" })
+    ).json()) as Bot;
+    await command(base, { type: "acknowledge-automated-access" });
+    await refused({ type: "set-bot-unattended-lane", botId: bot.id, lane: "subscription" });
+
+    // State from before the rule: a run never starts with both.
+    store.setAccountLane("claude", "subscription");
+    await command(base, {
+      type: "send-message",
+      messageId: crypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hi",
+    });
+    await vi.waitFor(() =>
+      expect(store.state().runs[0]).toMatchObject({
+        status: "Refused",
+        reason: "credential_conflict",
+      }),
+    );
   });
 
   it("keeps a bot's login pause when the engine is checked", async () => {

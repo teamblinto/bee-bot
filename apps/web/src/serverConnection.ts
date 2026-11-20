@@ -679,6 +679,8 @@ const errorSentences: Record<string, string> = {
     "Enter site names only, like pypi.org: no https://, path, port, wildcard, IP address or local name.",
   automated_access_unacknowledged:
     "Read the notice about bots that run on their own first. It's on the Usage page.",
+  credential_conflict:
+    "Claude can use your subscription or a saved API key here, not both. Remove the key on the Usage page, or set every Claude bot to the API key, then try again.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   ambiguous_mention: "More than one bot here goes by that name. Pick one from the @ list.",
