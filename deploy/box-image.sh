@@ -25,7 +25,8 @@ elif [ -s "$tar" ] && grep -qxF "BEEBOT_BOX_IMAGE=$image" /etc/beebot/box-image.
 	exit 0
 else
 	echo "building the box image $image; this takes a while" >&2
-	podman build -t "$image" "$release/images/box"
+	# Host network: root's default bridge would add netavark chains to the host's iptables tables.
+	podman build --network=host -t "$image" "$release/images/box"
 	rm -f "$tar.new"
 	podman save -q -o "$tar.new" "$image"
 	chmod 0644 "$tar.new"

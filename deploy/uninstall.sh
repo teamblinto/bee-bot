@@ -52,6 +52,7 @@ main() {
 		/usr/local/sbin/beebot /usr/local/sbin/beebot-provision /usr/local/sbin/beebot-backup \
 		/etc/beebot /var/lib/beebot /run/beebot /var/lib/beebot-backup /var/cache/beebot-backup \
 		/opt/beebot /var/lib/systemd/timers/stamp-beebot-backup.timer
+	rmdir /var/lib/cni 2>/dev/null || true
 	# The parent of every cell's slice, which systemd made for them.
 	systemctl stop beebot.slice 2>/dev/null || true
 	systemctl daemon-reload
