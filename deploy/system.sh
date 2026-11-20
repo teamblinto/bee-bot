@@ -9,11 +9,23 @@ system=$release/apps/provision/system
 # beebot-gw opens every cell's socket; beebot-web opens only the gateway's, and is Caddy's group.
 getent group beebot-gw >/dev/null || groupadd --system beebot-gw
 getent group beebot-web >/dev/null || groupadd --system beebot-web
+getent group beebot-cells >/dev/null || groupadd --system beebot-cells
 getent passwd beebot-gw >/dev/null ||
 	useradd --system --gid beebot-gw --home-dir /var/lib/beebot/gateway --no-create-home \
 		--shell /usr/sbin/nologin beebot-gw
 install -d -m 0755 /var/lib/beebot
 install -d -m 0711 /var/lib/beebot/cells
+# Each cell's home denies beebot-cells, the group every cell is in, so no cell can pass through
+# another's home (see cellsGroup in beebot-provision.ts). For cells made before that; an update runs
+# this while every cell is stopped, so they start with the group.
+command -v setfacl >/dev/null || apt-get install -y -q acl
+for home in /var/lib/beebot/cells/bb*; do
+	cell=${home##*/}
+	if [[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null; then
+		usermod --append --groups beebot-cells "$cell"
+		setfacl -P -m g:beebot-cells:--- "$home"
+	fi
+done
 # Podman 4's rootless netns mounts a tmpfs on the nearest existing of /var/lib/cni, /var/lib, ...;
 # landing on /var/lib it hides the cells' homes, and with them their network configs. The marker
 # tells uninstall.sh it may remove the directory.

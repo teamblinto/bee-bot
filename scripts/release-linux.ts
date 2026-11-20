@@ -24,6 +24,7 @@ const boxFiles = new Set([
   "Containerfile",
   ".containerignore",
   "runSpec.json",
+  "claude-code.sha256",
   "seccomp-chromium.json",
   "engine.sh",
   "browser.sh",
