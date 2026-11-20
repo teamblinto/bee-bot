@@ -43,11 +43,6 @@ const paths = {
   ],
 };
 const gatewayGroup = "beebot-gw";
-// Every cell joins this group, and every cell's home denies it (system.sh does the same for cells
-// made before it). The home can't simply stay 0700: Podman adds --x for everyone to each folder
-// above a box's root filesystem on every box start, since a box's root is an unmapped subordinate
-// uid that crun needs to pass through, and one ACL entry can't name a range of uids.
-const cellsGroup = "beebot-cells";
 
 export class Refusal extends Error {}
 
@@ -280,10 +275,8 @@ function writeLimits(cell: string, quota: Quota) {
 }
 
 function add(cell: string) {
-  for (const group of [gatewayGroup, cellsGroup]) {
-    if (!parseIds(read(paths.group)).some((entry) => entry.name === group)) {
-      throw new Refusal(`group ${group} is missing; install first`);
-    }
+  if (!parseIds(read(paths.group)).some((entry) => entry.name === gatewayGroup)) {
+    throw new Refusal(`group ${gatewayGroup} is missing; install first`);
   }
   let found = lookup(cell);
   const created = found === undefined;
@@ -326,10 +319,8 @@ function add(cell: string) {
   }
   denyScheduling(cell);
   run("loginctl", ["disable-linger", cell]);
-  run("usermod", ["--append", "--groups", cellsGroup, cell]);
   assertRootOwned(paths.cells);
   prepareHome(home(cell), uid, gid);
-  run("setfacl", ["-P", "-m", `g:${cellsGroup}:---`, home(cell)]);
   // A cred that exists is never replaced: the cell's vault is sealed with it.
   assertRootOwned(paths.creds);
   if (!NodeFs.existsSync(credFile(cell))) {

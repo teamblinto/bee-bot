@@ -35,7 +35,7 @@ die() {
 # root-owned -wal and -shm files behind that the owner can no longer open. Returns non-zero instead
 # of exiting, so one cell can't stop everyone else's backup; every step checks the last, since
 # errexit is off in a function called as a condition.
-snapshot_db() {
+snapshot_db() { # <db> <the folder under $cells or $gateway it is in>
 	local db=$1 out=$stage$1 owner as_owner
 	owner=$(stat -c %u:%g "$(dirname "$db")") || return 1
 	# Parents open to traversal but not listing, so the owner reaches the one folder it can write.
@@ -44,9 +44,18 @@ snapshot_db() {
 		chmod 0700 "$(dirname "$out")" || return 1
 	# The owner can swap in a FIFO or a link at any moment, so the check runs as the owner too, and
 	# both under a timeout: a FIFO would block sqlite3 forever.
-	as_owner=(timeout 900 setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups)
+	as_owner=(in_own_folder "$2" timeout 900 setpriv --reuid="${owner%:*}" --regid="${owner#*:}" --clear-groups)
 	"${as_owner[@]}" sqlite3 -batch -init /dev/null -cmd '.timeout 30000' "$db" "VACUUM INTO '$out'" &&
 		[ "$("${as_owner[@]}" sqlite3 -batch -init /dev/null -readonly "$out" 'PRAGMA integrity_check')" = ok ]
+}
+
+# Runs a command in <folder>, in a mount namespace where the folder is the only entry in its parent,
+# as a cell's unit sees its home: on the host only root can pass through $cells, and
+# SQLite opens even a relative path by its full one. The folder is bound from a handle opened
+# before the tmpfs hides its path, and mount must not resolve that handle to the path.
+in_own_folder() { # <folder> command...
+	unshare --mount bash -c 'exec 3<"$1" && mount -t tmpfs -o mode=0755 tmpfs "${1%/*}" &&
+		mkdir "$1" && mount --no-canonicalize --bind /proc/self/fd/3 "$1" && exec 3<&- && cd "$1" && shift && exec "$@"' - "$@"
 }
 
 # A regular file or folder, not a link to one: a cell controls everything in its home.
@@ -65,12 +74,12 @@ backup() {
 	trap 'rm -rf --one-file-system "$stage"' EXIT
 	(umask 066 && mkdir -p "$stage")
 	chmod 0711 "$stage"
-	if [ -f "$gateway/gateway.db" ] && ! snapshot_db "$gateway/gateway.db"; then
+	if [ -f "$gateway/gateway.db" ] && ! snapshot_db "$gateway/gateway.db" "$gateway"; then
 		failed+=(gateway)
 	fi
 	# A cell whose database can't be copied is left out of this snapshot, and the rest go on.
 	for cell in $(list_cells); do
-		if real_file "$cells/$cell/data/beebot.db" && ! snapshot_db "$cells/$cell/data/beebot.db"; then
+		if real_file "$cells/$cell/data/beebot.db" && ! snapshot_db "$cells/$cell/data/beebot.db" "$cells/$cell"; then
 			failed+=("$cell")
 			rm -rf --one-file-system "$stage$cells/$cell"
 			continue
@@ -166,7 +175,7 @@ restore() {
 	local target=${1:-} snap=${2:-latest} cell unit missing=()
 	[[ $target == all || $target =~ $cell_pattern ]] || die "restore <cell>|all [snapshot]"
 	[[ $snap =~ ^(latest|[0-9a-f]{8,64})$ ]] || die "bad snapshot id $snap"
-	install -d -m 0711 "$cells"
+	install -d -m 0700 "$cells"
 	tmp=$(mktemp -d "$cells/.restore-XXXXXX")
 	trap 'rm -rf --one-file-system "$tmp"' EXIT
 	if [ "$target" = all ]; then

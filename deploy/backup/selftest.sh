@@ -23,40 +23,45 @@ cell=bb0123456789
 home=$t/host/var/lib/beebot/cells/$cell
 data=$home/data
 db=$data/beebot.db
-as_cell() { setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"; }
+# As the cell, in a mount namespace where its home is the only entry in cells/, as its unit sees it:
+# like on a real host, only root can pass through cells/.
+in_home='exec 3<"$1" && mount -t tmpfs -o mode=0755 tmpfs "${1%/*}" && mkdir "$1" &&
+	mount --no-canonicalize --bind /proc/self/fd/3 "$1" && exec 3<&- && shift &&
+	exec setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"'
+as_cell() { unshare --mount bash -c "$in_home" - "$@"; } # <home> command...
 # The database is only ever opened as the cell, as beebotd would.
-q() { as_cell sqlite3 -cmd ".timeout 5000" "$db" "$1"; }
+q() { as_cell "$home" sqlite3 -cmd ".timeout 5000" "$db" "$1"; }
 
 install -d -m 0700 "$t/conf"
 head -c 48 /dev/urandom | base64 -w 0 >"$t/conf/key"
 restic init -q
 install -d -m 0755 "$t/host/var/lib/beebot" "$t/host/etc/beebot/creds" "$t/host/etc/systemd/system/beebot-$cell.slice.d"
-install -d -m 0711 "$t/host/var/lib/beebot/cells"
+install -d -m 0700 "$t/host/var/lib/beebot/cells"
 install -d -m 0700 "$t/host/var/lib/beebot/gateway"
 echo BEEBOT_PUBLIC_ORIGIN=https://bee.test >"$t/host/etc/beebot/beebot.env"
 echo sealed >"$t/host/etc/beebot/creds/$cell.vault-key.cred"
 echo "[Slice]" >"$t/host/etc/systemd/system/beebot-$cell.slice.d/quota.conf"
 sqlite3 "$t/host/var/lib/beebot/gateway/gateway.db" "PRAGMA journal_mode=WAL; CREATE TABLE members(cell); INSERT INTO members VALUES('$cell');" >/dev/null
 install -d -m 0700 -o nobody -g nogroup "$home"
-as_cell mkdir -p "$data/bots/b1/workspace/.claude" "$data/credentials/acct1" "$data/runtime"
-as_cell sh -c "echo hello >'$data/bots/b1/workspace/notes.txt'"
-as_cell sh -c "echo SECRET >'$data/credentials/acct1/.credentials.json'"
-as_cell sh -c "echo SECRET >'$data/bots/b1/workspace/.claude/.credentials.json'"
-as_cell sqlite3 "$db" "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v);" >/dev/null
+as_cell "$home" mkdir -p "$data/bots/b1/workspace/.claude" "$data/credentials/acct1" "$data/runtime"
+as_cell "$home" sh -c "echo hello >'$data/bots/b1/workspace/notes.txt'"
+as_cell "$home" sh -c "echo SECRET >'$data/credentials/acct1/.credentials.json'"
+as_cell "$home" sh -c "echo SECRET >'$data/bots/b1/workspace/.claude/.credentials.json'"
+as_cell "$home" sqlite3 "$db" "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v);" >/dev/null
 install -d -m 0755 "$t/host/etc/systemd/system/beebotd@$cell.service.d"
 echo "[Service]" >"$t/host/etc/systemd/system/beebotd@$cell.service.d/limits.conf"
 # Hostile cells: one whose database can't be read, one whose database is a FIFO.
 bad=bb0000000bad fifo=bb00000f1f00
 for other in "$bad" "$fifo"; do
 	install -d -m 0700 -o nobody -g nogroup "$t/host/var/lib/beebot/cells/$other"
-	as_cell mkdir "$t/host/var/lib/beebot/cells/$other/data"
+	as_cell "$t/host/var/lib/beebot/cells/$other" mkdir "$t/host/var/lib/beebot/cells/$other/data"
 done
-as_cell sh -c "head -c 8192 /dev/urandom >'$t/host/var/lib/beebot/cells/$bad/data/beebot.db'"
-as_cell mkfifo "$t/host/var/lib/beebot/cells/$fifo/data/beebot.db"
+as_cell "$t/host/var/lib/beebot/cells/$bad" sh -c "head -c 8192 /dev/urandom >'$t/host/var/lib/beebot/cells/$bad/data/beebot.db'"
+as_cell "$t/host/var/lib/beebot/cells/$fifo" mkfifo "$t/host/var/lib/beebot/cells/$fifo/data/beebot.db"
 
-# beebotd stand-in: keeps writing while the backup runs.
-setpriv --reuid=nobody --regid=nogroup --clear-groups \
-	bash -c "while [ -e '$db' ]; do sqlite3 -cmd '.timeout 5000' '$db' \"INSERT INTO t(v) VALUES(randomblob(2000))\"; done" &
+# beebotd stand-in: keeps writing while the backup runs. Exec'd, so $! is the writer itself.
+(exec unshare --mount bash -c "$in_home" - "$home" \
+	bash -c "while [ -e '$db' ]; do sqlite3 -cmd '.timeout 5000' '$db' \"INSERT INTO t(v) VALUES(randomblob(2000))\"; done") &
 writer=$!
 sleep 1
 before=$(q 'SELECT count(*) FROM t')

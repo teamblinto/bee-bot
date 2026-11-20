@@ -41,6 +41,11 @@ UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/beebot/cells/%i
+# On the host only root can enter /var/lib/beebot/cells, so this is the cell's one way to its home,
+# and no cell sees another's. File modes can't do it: Podman gives everyone --x on every folder
+# above a box's root filesystem, and any cell can become "everyone" through its subordinate ids.
+TemporaryFileSystem=/var/lib/beebot/cells:mode=0755
+BindPaths=/var/lib/beebot/cells/%i
 ProtectHome=yes
 RemoveIPC=yes
 # Not set, because rootless Podman needs what they take away: NoNewPrivileges= stops the setuid

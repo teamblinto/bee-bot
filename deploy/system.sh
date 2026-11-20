@@ -9,23 +9,19 @@ system=$release/apps/provision/system
 # beebot-gw opens every cell's socket; beebot-web opens only the gateway's, and is Caddy's group.
 getent group beebot-gw >/dev/null || groupadd --system beebot-gw
 getent group beebot-web >/dev/null || groupadd --system beebot-web
-getent group beebot-cells >/dev/null || groupadd --system beebot-cells
 getent passwd beebot-gw >/dev/null ||
 	useradd --system --gid beebot-gw --home-dir /var/lib/beebot/gateway --no-create-home \
 		--shell /usr/sbin/nologin beebot-gw
 install -d -m 0755 /var/lib/beebot
-install -d -m 0711 /var/lib/beebot/cells
-# Each cell's home denies beebot-cells, the group every cell is in, so no cell can pass through
-# another's home (see cellsGroup in beebot-provision.ts). For cells made before that; an update runs
-# this while every cell is stopped, so they start with the group.
-command -v setfacl >/dev/null || apt-get install -y -q acl
-for home in /var/lib/beebot/cells/bb*; do
-	cell=${home##*/}
-	if [[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null; then
-		usermod --append --groups beebot-cells "$cell"
-		setfacl -P -m g:beebot-cells:--- "$home"
-	fi
-done
+# Only root enters: each cell reaches its own home through its unit's mounts (beebotd@.service).
+install -d -m 0700 /var/lib/beebot/cells
+# The beebot-cells group and the ACL that denied it on every home, from a release before that.
+if getent group beebot-cells >/dev/null; then
+	for home in /var/lib/beebot/cells/bb*; do
+		[ ! -d "$home" ] || setfacl -P -b "$home" 2>/dev/null || true
+	done
+	groupdel beebot-cells
+fi
 # Podman 4's rootless netns mounts a tmpfs on the nearest existing of /var/lib/cni, /var/lib, ...;
 # landing on /var/lib it hides the cells' homes, and with them their network configs. The marker
 # tells uninstall.sh it may remove the directory.
@@ -52,6 +48,9 @@ install -m 0440 "$system/sudoers" /etc/sudoers.d/beebot-provision
 # Through current, so an update or rollback moves them along with the code.
 ln -sfn /opt/beebot/current/apps/provision/src/beebot-provision.ts /usr/local/sbin/beebot-provision
 ln -sfn /opt/beebot/current/deploy/beebot /usr/local/sbin/beebot
+# backup/install.sh's copy, kept in step: it has to reach the cells' homes the way this release does.
+[ ! -f /usr/local/sbin/beebot-backup ] ||
+	install -m 0755 "$release/deploy/backup/beebot-backup" /usr/local/sbin/beebot-backup
 
 systemctl daemon-reload
 systemctl enable --quiet beebot-fence.service beebot-gateway.service
