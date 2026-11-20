@@ -32,6 +32,10 @@ const loginCommands = {
   codex: ["codex", "login", "--device-auth"],
 };
 export type LoginEngine = keyof typeof loginCommands;
+const cliNames = { claude: "Claude Code", codex: "Codex" };
+
+// tmux exits 0 whatever its pane did, so the pane itself says when the login failed.
+const sayFailure = String.raw`"$@" || printf "\r\n%s exited with status %s.\r\n" "$1" "$?"`;
 
 // tmux control mode needs no terminal on the exec, which a box attach doesn't have: output comes
 // back as `%output` lines and input goes in as `send-keys`.
@@ -54,6 +58,10 @@ export function attachArgs(
     "-y",
     String(rows),
     ...Object.entries(env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+    "sh",
+    "-c",
+    sayFailure,
+    "sh",
     ...loginCommands[engine],
   ];
 }
@@ -172,6 +180,14 @@ export function createTerminals({ runtime, layout, dataDir, bot }: Options) {
     client.on("error", end);
 
     void (async () => {
+      const [cli = ""] = loginCommands[engine];
+      // A pane that fails at once loses its output before tmux attaches, so this is asked first.
+      if ((await run(botId, ["sh", "-c", 'command -v "$1" >/dev/null', "sh", cli])) !== 0) {
+        const message = `${cliNames[engine]} isn't installed in this box, so its login can't start.`;
+        client.send(Buffer.from(`${message}\r\n`), { binary: true });
+        end();
+        return;
+      }
       const env = await loginEnv(botId, engine, accountId);
       await run(botId, ["tmux", "kill-session", "-t", session]);
       const attach = await runtime.execAttach(botId, {
@@ -190,6 +206,8 @@ export function createTerminals({ runtime, layout, dataDir, bot }: Options) {
       stream.on("data", parse);
       stream.on("error", end);
       stream.on("close", end);
+      // Our side stays writable for input, so the stream doesn't close when tmux exits.
+      void attach.exited.then(end);
     })().catch(() => {
       if (!ended) {
         client.close(1011, "box unavailable");

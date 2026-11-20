@@ -23,6 +23,15 @@ COPY xfce/ /etc/xdg/xfce4/
 COPY chromium.flags /etc/chromium.d/bee
 COPY chromium-policy.json /etc/chromium/policies/managed/bee.json
 
+# Server mode's box-image.sh names a pinned Claude Code; the desktop's build leaves it out. The
+# vendor's installer checks the download's checksum, and the binary is copied out unchanged.
+ARG CLAUDE_CODE_VERSION=
+RUN if [ -n "$CLAUDE_CODE_VERSION" ]; then \
+      curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION" \
+      && install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude \
+      && rm -rf /root/.local /root/.claude /root/.claude.json /root/.cache; \
+    fi
+
 # /home/bee is the persistent volume the vendor installers write into (~/.local/bin).
 ENV HOME=/home/bee \
     PATH=/home/bee/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
