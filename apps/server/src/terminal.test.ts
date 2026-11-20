@@ -59,6 +59,10 @@ it("logs in with a device code for Codex, with the box's own environment", () =>
     "24",
     "-e",
     "CODEX_HOME=/home/bee/.codex",
+    "sh",
+    "-c",
+    `"$@" || printf "\\r\\n%s exited with status %s.\\r\\n" "$1" "$?"`,
+    "sh",
     "codex",
     "login",
     "--device-auth",
@@ -127,13 +131,57 @@ describe("the login terminal", () => {
       });
     }
     const execs: BoxExec[] = [];
-    const runtime: BoxRuntime = {
-      ...createFakeBoxRuntime(),
-      execAttach: async (_botId, exec) => {
-        execs.push(exec);
-        return exec.argv[1] === "-C" ? controlModeTmux() : done();
-      },
-    };
+    const { socket, received, store } = await openTerminal(async (_botId, exec) => {
+      execs.push(exec);
+      return exec.argv[1] === "-C" ? controlModeTmux() : done();
+    });
+    socket.send(JSON.stringify({ cols: 120, rows: 40 }));
+    socket.send(Buffer.from(`${secret}\r`), { binary: true });
+    await vi.waitFor(() => expect(Buffer.concat(received).toString()).toBe(`${secret}\r`));
+    socket.close();
+    await vi.waitFor(() =>
+      expect(execs.at(-1)?.argv).toEqual(["tmux", "kill-session", "-t", "bee-login"]),
+    );
+
+    const attach = execs.find(({ argv }) => argv[1] === "-C");
+    expect(attach?.argv.slice(-4)).toEqual(["claude", "auth", "login", "--claudeai"]);
+    expect(JSON.stringify(store.eventsAfter(0))).not.toContain(secret);
+    expect(JSON.stringify(store.state())).not.toContain(secret);
+    for (const file of NodeFS.readdirSync(dataDir, { recursive: true, encoding: "utf8" })) {
+      const path = NodePath.join(dataDir, file);
+      if (NodeFS.statSync(path).isFile()) {
+        expect(NodeFS.readFileSync(path).includes(secret), file).toBe(false);
+      }
+    }
+    expect(printed.join("\n")).not.toContain(secret);
+  });
+
+  it("says so and ends when the box has no CLI to log in with", async () => {
+    let attached = false;
+    const { received, closed } = await openTerminal(async (_botId, exec) => {
+      attached ||= exec.argv[1] === "-C";
+      return exec.argv.includes('command -v "$1" >/dev/null')
+        ? { ...done(), exited: Promise.resolve(1) }
+        : done();
+    });
+    expect(await closed).toBe(1000);
+    expect(Buffer.concat(received).toString()).toContain("Claude Code isn't installed");
+    expect(attached).toBe(false);
+  });
+
+  it("ends when the login exits, though its input is still open", async () => {
+    const { closed } = await openTerminal(async (_botId, exec) => {
+      if (exec.argv[1] !== "-C") {
+        return done();
+      }
+      const stream = Duplex.from({ readable: new PassThrough(), writable: new PassThrough() });
+      return { stream, exited: Promise.resolve(0) };
+    });
+    expect(await closed).toBe(1000);
+  });
+
+  async function openTerminal(execAttach: BoxRuntime["execAttach"]) {
+    const runtime: BoxRuntime = { ...createFakeBoxRuntime(), execAttach };
     const layout: BoxLayout = boxLayout(dataDir);
     const store = openEventStore(dataDir);
     const server = await startServer({
@@ -177,27 +225,10 @@ describe("the login terminal", () => {
     const socket = new WebSocket(`ws://127.0.0.1:${server.port}/terminal?${query}`);
     const received: Buffer[] = [];
     socket.on("message", (data: Buffer) => received.push(data));
+    const closed = new Promise<number>((resolve) => socket.once("close", resolve));
     await new Promise((resolve) => socket.once("open", resolve));
-    socket.send(JSON.stringify({ cols: 120, rows: 40 }));
-    socket.send(Buffer.from(`${secret}\r`), { binary: true });
-    await vi.waitFor(() => expect(Buffer.concat(received).toString()).toBe(`${secret}\r`));
-    socket.close();
-    await vi.waitFor(() =>
-      expect(execs.at(-1)?.argv).toEqual(["tmux", "kill-session", "-t", "bee-login"]),
-    );
-
-    const attach = execs.find(({ argv }) => argv[1] === "-C");
-    expect(attach?.argv.slice(-4)).toEqual(["claude", "auth", "login", "--claudeai"]);
-    expect(JSON.stringify(store.eventsAfter(0))).not.toContain(secret);
-    expect(JSON.stringify(store.state())).not.toContain(secret);
-    for (const file of NodeFS.readdirSync(dataDir, { recursive: true, encoding: "utf8" })) {
-      const path = NodePath.join(dataDir, file);
-      if (NodeFS.statSync(path).isFile()) {
-        expect(NodeFS.readFileSync(path).includes(secret), file).toBe(false);
-      }
-    }
-    expect(printed.join("\n")).not.toContain(secret);
-  });
+    return { socket, received, closed, store };
+  }
 
   it("is only for box bots", async () => {
     const store = openEventStore(dataDir);

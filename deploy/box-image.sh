@@ -26,7 +26,9 @@ elif [ -s "$tar" ] && grep -qxF "BEEBOT_BOX_IMAGE=$image" /etc/beebot/box-image.
 else
 	echo "building the box image $image; this takes a while" >&2
 	# Host network: root's default bridge would add netavark chains to the host's iptables tables.
-	podman build --network=host -t "$image" "$release/images/box"
+	# The version the Claude driver and egress policy were measured on. Cells keep an image by its
+	# tag, so a new pin needs a new tag in runSpec.json.
+	podman build --network=host --build-arg CLAUDE_CODE_VERSION=2.1.319 -t "$image" "$release/images/box"
 	rm -f "$tar.new"
 	podman save -q -o "$tar.new" "$image"
 	chmod 0644 "$tar.new"

@@ -28,6 +28,6 @@ it("names a new image tag whenever what the image is built from changes", () => 
   }
   const { image } = JSON.parse(readFileSync(join(imageDir, "runSpec.json"), "utf8"));
   expect(`${image} ${hash.digest("hex").slice(0, 16)}`).toBe(
-    "localhost/beebot-box:4 ddd784bccc57ee97",
+    "localhost/beebot-box:5 e6996b507c3bcb69",
   );
 });
