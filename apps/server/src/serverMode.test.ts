@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { PassThrough } from "node:stream";
 
 import {
   type Bot,
@@ -14,6 +15,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { WebSocket } from "ws";
 
+import { boxLayout } from "./boxEngine.ts";
+import { createBoxEngineProbe } from "./claude.ts";
 import { daemonTestTimeoutMs, spawnBeebotd } from "./fixtures/beebotd.ts";
 import { startServer } from "./server.ts";
 import { openEventStore } from "./store.ts";
@@ -50,6 +53,7 @@ async function start(
     runTurn?: () => never;
     serverMode?: boolean;
     publicOrigin?: string;
+    probeEngine?: () => Promise<EngineStatus & { live?: true }>;
   } = {},
 ) {
   const store = openEventStore(dataDir);
@@ -184,15 +188,69 @@ describe("server mode", () => {
     );
   });
 
-  it("keeps a bot's login pause when the engine is checked", async () => {
-    const { store, base } = await start();
-    const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
-    store.pauseReadyBots("claude", "auth_failed");
-    const engine = await fetch(`${base}/engine?protocolVersion=${protocolVersion}`, {
-      headers: { Authorization: `Bearer ${token}` },
+  it.each([
+    ["unknown", undefined, "auth_failed"],
+    ["authenticated", undefined, "auth_failed"],
+    ["authenticated", true, null],
+  ] as const)(
+    "when the box login is %s (live: %s), a login pause becomes %s",
+    async (auth, live, pause) => {
+      const { store, base } = await start({
+        probeEngine: async () => ({ ...healthy, auth, ...(live && { live }) }),
+      });
+      const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+      store.pauseReadyBots("claude", "auth_failed");
+      const engine = await fetch(`${base}/engine?protocolVersion=${protocolVersion}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(engine.status).toBe(200);
+      expect(store.state().bots.find((b) => b.id === bot.id)?.pauseReason).toBe(pause);
+    },
+  );
+
+  it("keeps a run's login pause on a page load while the box is stopped and its login file stays", async () => {
+    let boxUp = true;
+    const answer = (text: string) => {
+      const stream = new PassThrough();
+      stream.push(text);
+      stream.push(null);
+      return { stream, exited: Promise.resolve(0) };
+    };
+    const loggedIn = { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" };
+    const probeEngine = createBoxEngineProbe({
+      command: ["claude"],
+      layout: boxLayout(dataDir),
+      dataDir,
+      claudeBoxes: () => ({ running: "ada", any: "ada" }),
+      execIfRunning: async (_, { argv }) => {
+        if (!boxUp) {
+          throw new Error("box isn't running");
+        }
+        return answer(
+          argv.includes("--version") ? "2.1.318 (Claude Code)\n" : JSON.stringify(loggedIn),
+        );
+      },
+      hasLogin: async () => true,
+      apiKeySaved: () => false,
+      lastTurn: () => undefined,
     });
-    expect(engine.status).toBe(200);
+    const { store, base } = await start({ probeEngine: () => probeEngine("subscription") });
+    const bot = store.createBot({ name: "Ada", personality: "", engineAccountId: "claude" });
+    const check = async () =>
+      (await fetch(`${base}/engine?protocolVersion=${protocolVersion}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then((response) => response.json())) as EngineStatus;
+    expect(await check()).toMatchObject({ auth: "authenticated" });
+
+    // Still shown as logged in from the box's last answer, which isn't fresh enough to lift a pause.
+    boxUp = false;
+    store.pauseReadyBots("claude", "auth_failed");
+    expect(await check()).toEqual({ ...healthy, auth: "authenticated", email: null });
     expect(store.state().bots.find((b) => b.id === bot.id)?.pauseReason).toBe("auth_failed");
+
+    boxUp = true;
+    await check();
+    expect(store.state().bots.find((b) => b.id === bot.id)?.pauseReason).toBeNull();
   });
 
   it("answers usage without reading this host's Claude folder", async () => {

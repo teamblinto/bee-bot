@@ -125,6 +125,22 @@ describe("boxd", () => {
     });
   });
 
+  it("says whether an account's login exists, through podman's user namespace and with no box", async () => {
+    const { call, fake, stateDir } = harness();
+    expect(await call("login", { account: "../x" })).toMatchObject({ error: "bad account" });
+    expect(await call("login")).toMatchObject({ error: "bad account" });
+    expect(await call("login", { account: "claude" })).toEqual({ id: 3, ok: true, login: false });
+    const folder = NodePath.join(stateDir, "credentials", "claude");
+    NodeFs.mkdirSync(folder, { recursive: true });
+    NodeFs.writeFileSync(NodePath.join(folder, ".credentials.json"), "{}");
+    expect(await call("login", { account: "claude" })).toMatchObject({ ok: true, login: true });
+    expect(fake.calls.map(({ args }) => args.slice(0, 3))).toEqual([
+      ["unshare", "test", "-e"],
+      ["unshare", "test", "-e"],
+    ]);
+    expect(await call("snapshot")).toMatchObject({ state: "absent" });
+  });
+
   it("keeps only the listed skills in the bot's read-only skills mount", async () => {
     const { call, fake, stateDir } = harness();
     await call("create");

@@ -14,6 +14,7 @@ import {
 import { z } from "zod";
 
 import {
+  type BoxLayout,
   type BoxOptions,
   credentialMapping,
   type EngineProcess,
@@ -23,6 +24,7 @@ import {
 } from "./boxEngine.ts";
 import { waitingPattern } from "./continuations.ts";
 import { engineEnv } from "./engineEnv.ts";
+import type { BoxRuntime } from "./boxRuntime.ts";
 import { syncBoxSkills } from "./skills.ts";
 import {
   type BotLaunch,
@@ -439,10 +441,15 @@ type Credential = { firstParty: boolean; plan: boolean; apiKeySource: unknown; t
 
 // The one check for the run gate and the startup probe. A login the lane doesn't use is never
 // switched to: the bot pauses until the owner logs the CLI in the lane's way.
-function credentialPause(lane: EngineLane, credential: Credential, keySource = consoleKeySource) {
+function credentialPause(
+  lane: EngineLane,
+  credential: Credential,
+  keySource = consoleKeySource,
+  loggedOut = authPause(),
+) {
   const { plan, apiKeySource, token } = credential;
   if (!plan && !apiKeySource && (token === undefined || token === "none")) {
-    return authPause();
+    return loggedOut;
   }
   return resolvedLane(credential, keySource) === lane ? undefined : "credential_source";
 }
@@ -1191,9 +1198,11 @@ const AuthStatus = z.object({
   email: loose,
 });
 
+type CliRun = (...args: string[]) => Promise<{ stdout: string }>;
+
 // A logged-out CLI exits non-zero but still prints the JSON. Undefined when this CLI version has no
 // `auth status`, or answers in a shape it doesn't know.
-async function readAuthStatus(run: (...args: string[]) => Promise<{ stdout: string }>) {
+async function readAuthStatus(run: CliRun) {
   const stdout = await run("auth", "status", "--json").then(
     (result) => result.stdout,
     (error: { stdout?: unknown }) => String(error.stdout ?? ""),
@@ -1208,20 +1217,138 @@ async function readAuthStatus(run: (...args: string[]) => Promise<{ stdout: stri
 
 // Holds the owner's org, so nothing from either command may be logged or stored. The email goes
 // only to the owner's screen.
-export async function probeEngine(
-  command: readonly string[],
-  cwd: string,
-  lane: EngineLane,
-): Promise<EngineStatus> {
+export function probeEngine(command: readonly string[], cwd: string, lane: EngineLane) {
   const [file = "", ...prefix] = command;
-  const run = (...args: string[]) =>
-    execFile(file, [...prefix, ...args], {
-      cwd,
-      env: childEnv(),
-      timeout: gateTimeoutMs,
-      windowsHide: true,
+  return probeCli(
+    (...args) =>
+      execFile(file, [...prefix, ...args], {
+        cwd,
+        env: childEnv(),
+        timeout: gateTimeoutMs,
+        windowsHide: true,
+      }),
+    lane,
+  );
+}
+
+const unchecked = { version: null, auth: "unknown", email: null } as const;
+
+// Server mode. A box run's login is the account's credential folder as the box's own CLI reads it,
+// so a running Claude box is asked: only that answer is `live`, and only a live login may lift a
+// pause. A check never brings a box up. Without a live answer the evidence is the later of the last
+// one and the account's last turn, and only while boxd still finds a login file or a key is saved.
+export function createBoxEngineProbe({
+  command,
+  layout,
+  dataDir,
+  claudeBoxes,
+  execIfRunning,
+  hasLogin,
+  apiKeySaved,
+  lastTurn,
+}: {
+  command: readonly string[];
+  layout: BoxLayout;
+  dataDir: string;
+  // A Claude box bot whose box looks up, and any Claude box bot.
+  claudeBoxes: () => { running: string | undefined; any: string | undefined };
+  execIfRunning: BoxRuntime["execAttach"];
+  hasLogin: (botId: string) => Promise<boolean>;
+  apiKeySaved: () => boolean;
+  // The lane's last turn that finished or was refused on auth, and when it ended.
+  lastTurn: (lane: EngineLane) => { ok: boolean; at: number } | undefined;
+}) {
+  const env = {
+    ...layout.env,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    ...credentialMapping({ engine: "claude", accountId: "claude", dataDir, layout }).env,
+  };
+  let live: { status: EngineStatus; at: number } | undefined;
+
+  // Undefined unless the CLI answered both questions cleanly: a box that's slow, stopping or
+  // broken says nothing about the login.
+  async function askBox(botId: string, lane: EngineLane) {
+    // One deadline for the whole check, waiting for the box's queue and attach included.
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timed out")), gateTimeoutMs);
     });
-  const unchecked = { version: null, auth: "unknown", email: null } as const;
+    late.catch(() => {});
+    const run: CliRun = async (...args) => {
+      const attaching = execIfRunning(botId, {
+        argv: [...command, ...args],
+        env,
+        cwd: layout.home,
+      });
+      try {
+        const { stream, exited } = await Promise.race([attaching, late]);
+        stream.end();
+        const output = Promise.all([stream.toArray(), exited]);
+        // Destroying the stream fails a read that lost the race.
+        output.catch(() => {});
+        const [chunks, code] = await Promise.race([output, late]);
+        const stdout = Buffer.concat(chunks).toString("utf8");
+        if (code !== 0) {
+          throw Object.assign(new Error("exited"), { stdout });
+        }
+        return { stdout };
+      } finally {
+        // Also a stream that attached after the deadline.
+        void attaching.then(
+          ({ stream }) => stream.destroy(),
+          () => {},
+        );
+      }
+    };
+    try {
+      const version = cliVersion((await run("--version")).stdout);
+      const auth = await readAuthStatus(run);
+      return auth && authStatus(auth, version, lane, "auth_failed");
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return async (lane: EngineLane): Promise<EngineStatus & { live?: true }> => {
+    const { running, any } = claudeBoxes();
+    // The proxy injects the key, so no login is involved: only a turn can prove it.
+    const asked = lane === "subscription" && running ? await askBox(running, lane) : undefined;
+    if (asked) {
+      live = { status: asked, at: Date.now() };
+      return { ...asked, live: true };
+    }
+    const shown = {
+      cliFound: true,
+      version: live?.status.version ?? null,
+      auth: "unknown",
+      email: null,
+      pauseReason: null,
+    } satisfies EngineStatus;
+    const credential =
+      lane === "api_key"
+        ? apiKeySaved()
+        : any === undefined
+          ? undefined
+          : await hasLogin(any).catch(() => undefined);
+    if (credential === false) {
+      return lane === "api_key"
+        ? shown
+        : { ...shown, auth: "unauthenticated", pauseReason: "auth_failed" };
+    }
+    const turn = lastTurn(lane);
+    const verified =
+      lane === "subscription" && live && live.at > (turn?.at ?? -Infinity)
+        ? live.status.auth === "authenticated"
+        : turn?.ok === true;
+    return credential && verified
+      ? { ...shown, auth: "authenticated", email: live?.status.email ?? null }
+      : shown;
+  };
+}
+
+async function probeCli(run: CliRun, lane: EngineLane): Promise<EngineStatus> {
   let version: string | null;
   try {
     version = cliVersion((await run("--version")).stdout);
@@ -1231,16 +1358,29 @@ export async function probeEngine(
       : { ...unchecked, cliFound: true, pauseReason: "cli_failed" };
   }
   const auth = await readAuthStatus(run);
-  if (!auth) {
-    return { ...unchecked, cliFound: true, version, pauseReason: null };
-  }
+  return auth
+    ? authStatus(auth, version, lane, authPause())
+    : { ...unchecked, cliFound: true, version, pauseReason: null };
+}
+
+function authStatus(
+  auth: z.infer<typeof AuthStatus>,
+  version: string | null,
+  lane: EngineLane,
+  loggedOut: PauseReason,
+): EngineStatus {
   const pauseReason =
-    credentialPause(lane, {
-      firstParty: auth.apiProvider === "firstParty",
-      plan: auth.authMethod === "claude.ai",
-      apiKeySource: auth.apiKeySource,
-      token: auth.loggedIn === false ? "none" : auth.authMethod,
-    }) ?? null;
+    credentialPause(
+      lane,
+      {
+        firstParty: auth.apiProvider === "firstParty",
+        plan: auth.authMethod === "claude.ai",
+        apiKeySource: auth.apiKeySource,
+        token: auth.loggedIn === false ? "none" : auth.authMethod,
+      },
+      consoleKeySource,
+      loggedOut,
+    ) ?? null;
   const signedIn = pauseReason === null || pauseReason === "credential_source";
   return {
     cliFound: true,

@@ -63,6 +63,7 @@ function setup(
         sidecar: async () => Promise.reject(new Error("no sidecar")),
         display: async () => Promise.reject(new Error("no display")),
         control: async () => Promise.reject(new Error("no display")),
+        execIfRunning: async () => Promise.reject(new Error("no box")),
         stderr: () => "",
         closed: new Promise((resolve) => closers.push(() => resolve())),
         close: async () => {

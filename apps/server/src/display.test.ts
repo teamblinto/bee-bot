@@ -93,6 +93,7 @@ async function start(
       sidecar: async () => Promise.reject(new Error("no sidecar")),
       display: display ?? (async () => ({ stream: box, exited: new Promise<null>(() => {}) })),
       control,
+      execIfRunning: async () => Promise.reject(new Error("no box")),
       stderr: () => "",
       closed: new Promise(() => {}),
       close: async () => {},

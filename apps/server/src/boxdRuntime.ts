@@ -399,6 +399,7 @@ export async function connectBoxd(
     },
     snapshot: async (botId): Promise<BoxState> =>
       (await request("snapshot", botId)).state ?? "absent",
+    hasLogin: async (botId, account) => (await request("login", botId, { account })).login === true,
     execAttach,
   };
   return {

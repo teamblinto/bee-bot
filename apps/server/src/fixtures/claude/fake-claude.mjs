@@ -266,6 +266,13 @@ if (args[0] === "--version") {
   console.log(`${scenario.version ?? "2.1.318"} (Claude Code)`);
   process.exit(0);
 }
+// Logged in once a login wrote its credential file where CLAUDE_CONFIG_DIR points.
+if (args[0] === "auth" && scenarioName === "config-dir-login") {
+  const file = NodePath.join(process.env.CLAUDE_CONFIG_DIR ?? "", ".credentials.json");
+  const found = NodeFS.existsSync(file);
+  console.log(JSON.stringify(found ? loggedIn : { loggedIn: false }));
+  process.exit(found ? 0 : 1);
+}
 if (args[0] === "auth") {
   console.log(
     typeof scenario.auth === "string" ? scenario.auth : JSON.stringify(scenario.auth ?? loggedIn),

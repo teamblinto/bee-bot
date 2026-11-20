@@ -6,7 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { CircleX, LoaderCircle, SquareTerminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { terminalSocketUrl } from "../serverConnection";
+import { checkEngine, terminalSocketUrl } from "../serverConnection";
 import { SidePanel } from "./SidePanel";
 import { iconProps } from "./ui";
 
@@ -40,7 +40,11 @@ function LoginScreen({ botId, onStatus }: { botId: string; onStatus: (status: St
         terminal.write(new Uint8Array(data));
       }
     };
-    socket.onclose = () => onStatus("closed");
+    // The login may have just finished, or failed.
+    socket.onclose = () => {
+      onStatus("closed");
+      void checkEngine();
+    };
     const typed = terminal.onData((text) => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(encoder.encode(text));

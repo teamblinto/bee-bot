@@ -1,5 +1,6 @@
 import {
   CircleCheck,
+  CircleDashed,
   CircleX,
   Download,
   LoaderCircle,
@@ -20,15 +21,25 @@ import { iconProps } from "./ui";
 
 function statusLine({ status, engine }: ConnectionState) {
   if (status === "connecting") {
-    return { Icon: LoaderCircle, text: connectionLines.connecting, error: false };
+    return { Icon: LoaderCircle, text: connectionLines.connecting, tone: "busy" } as const;
   }
   const problem =
     status === "connected" ? engine && engineFix(engine)?.label : connectionLines[status];
   if (problem) {
-    return { Icon: CircleX, text: problem, error: true };
+    return { Icon: CircleX, text: problem, tone: "error" } as const;
   }
-  return { Icon: CircleCheck, text: engine ? "Claude ready" : "Connected", error: false };
+  if (engine?.auth === "unknown") {
+    return { Icon: CircleDashed, text: "Claude login not checked", tone: "neutral" } as const;
+  }
+  return { Icon: CircleCheck, text: engine ? "Claude ready" : "Connected", tone: "ok" } as const;
 }
+
+const iconTones = {
+  busy: "motion-safe:animate-spin",
+  error: "text-danger-status",
+  neutral: "",
+  ok: "text-success-status",
+};
 
 const themes = [
   { value: "light", label: "Light", Icon: Sun },
@@ -130,19 +141,9 @@ export function SidebarFooter({
       <p
         role="status"
         data-status={connection.status}
-        className={`flex items-center gap-2 text-caption ${status.error ? "text-danger" : "text-ink-secondary"}`}
+        className={`flex items-center gap-2 text-caption ${status.tone === "error" ? "text-danger" : "text-ink-secondary"}`}
       >
-        <status.Icon
-          {...iconProps}
-          size={12}
-          className={`shrink-0 ${
-            status.error
-              ? "text-danger-status"
-              : status.Icon === LoaderCircle
-                ? "motion-safe:animate-spin"
-                : "text-success-status"
-          }`}
-        />
+        <status.Icon {...iconProps} size={12} className={`shrink-0 ${iconTones[status.tone]}`} />
         {status.text}
       </p>
       <UpdateLine />

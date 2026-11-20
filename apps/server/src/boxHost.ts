@@ -76,7 +76,10 @@ export function readyBoxRuntime(
     // Every bot that may have a box.
     boxIds?: (() => string[]) | undefined;
   },
-): BoxRuntime & { ready: (botId: string) => Promise<void> } {
+): BoxRuntime & {
+  ready: (botId: string) => Promise<void>;
+  execIfRunning: BoxRuntime["execAttach"];
+} {
   const queues = new Map<string, Promise<unknown>>();
   function serially(key: string, work: () => Promise<void>) {
     const run = (queues.get(key) ?? Promise.resolve()).then(work, work);
@@ -148,6 +151,15 @@ export function readyBoxRuntime(
       return runtime.control(botId, lease);
     },
     ready,
+    // For a look that must cost no box: never brings one up.
+    execIfRunning: async (botId, exec) => {
+      await serially(botId, async () => {
+        if ((await runtime.snapshot(botId)) !== "running") {
+          throw new Error(`box ${botId} isn't running`);
+        }
+      });
+      return runtime.execAttach(botId, exec);
+    },
   };
 }
 
@@ -330,6 +342,7 @@ export async function startBoxHost({
     sidecar: async (botId: string) => sidecarEndpoint(idle.runtime, botId, idle.touch),
     display: (botId: string, lease?: string) => displayView(idle.runtime, botId, idle.touch, lease),
     control: (botId: string, lease: string) => idle.runtime.control(botId, lease),
+    execIfRunning: ready.execIfRunning,
     stderr: boxd.stderr,
     closed: boxd.closed,
     close: async () => {

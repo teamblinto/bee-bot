@@ -69,6 +69,17 @@ it("follows pushed update state and restarts into a ready update", async () => {
   expect(install).toHaveBeenCalledOnce();
 });
 
+it.each([
+  ["authenticated", "Claude ready"],
+  ["unknown", "Claude login not checked"],
+  ["unauthenticated", "Claude isn't logged in"],
+] as const)("calls Claude ready only for a checked login: %s", async (auth, line) => {
+  const engine = { cliFound: true, version: null, auth, email: null, pauseReason: null };
+  const connection = { ...getConnectionState(), status: "connected", engine } as const;
+  await act(async () => root.render(<SidebarFooter connection={connection} onUsage={() => {}} />));
+  expect(host.querySelector('[role="status"]')?.textContent).toBe(line);
+});
+
 it("turns usage data on and off from its switch", async () => {
   const chat = { ...getConnectionState().chat, usageData: true };
   await act(async () =>

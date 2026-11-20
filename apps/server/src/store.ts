@@ -53,7 +53,7 @@ import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
-import { openVaultEntries } from "./vault.ts";
+import { apiKeyName, openVaultEntries } from "./vault.ts";
 import { openVaultStore, unattendedLane } from "./vaultStore.ts";
 import {
   buildMemory,
@@ -834,6 +834,13 @@ export const migrations: Array<{
     );
     CREATE INDEX spend_at ON spend (at);`,
   },
+  {
+    name: "run_lane",
+    // The lane a run's engine was launched on, so its outcome vouches for that credential alone.
+    // Null for runs from before, which then vouch for nothing.
+    sql: `ALTER TABLE runs ADD COLUMN lane TEXT;
+    CREATE INDEX runs_account_ended ON runs (engine_account_id, ended_at);`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1385,6 +1392,17 @@ export function openEventStore(dataDir: string) {
     `SELECT ${runColumns} FROM runs
      WHERE rowid IN (SELECT MAX(rowid) FROM runs GROUP BY bot_id) ORDER BY rowid`,
   );
+  // The last turn that proved a lane's credential: one that finished, or one refused on auth. By
+  // when it ended, since a parked run's row is reused when it goes again. On the API-key lane only
+  // a turn since the key was last saved, as an earlier one used another key.
+  const selectCredentialTurn = db.prepare(
+    `SELECT status, ended_at AS endedAt FROM runs
+     WHERE engine_account_id = $account AND lane = $lane AND ended_at IS NOT NULL
+       AND (status = 'Completed' OR reason = 'auth_failed')
+       AND ($lane != 'api_key' OR ended_at > (SELECT updated_at FROM vault_entries WHERE name = $key))
+     ORDER BY ended_at DESC LIMIT 1`,
+  );
+  const setRunLane = db.prepare("UPDATE runs SET lane = ? WHERE id = ?");
   const selectLatestRunId = db.prepare(
     "SELECT id FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1",
   );
@@ -2659,6 +2677,13 @@ export function openEventStore(dataDir: string) {
     clearEnginePauses: (engineAccountId: string) =>
       transaction(() => clearEnginePauses(engineAccountId)),
     accountLane: (id: string) => EngineAccount.parse(selectAccount.get(id)).lane,
+    credentialTurn: (id: string, lane: EngineLane) => {
+      const row = z
+        .object({ status: z.string(), endedAt: z.string() })
+        .optional()
+        .parse(selectCredentialTurn.get({ account: id, lane, key: apiKeyName(id) }));
+      return row && { ok: row.status === "Completed", at: Date.parse(row.endedAt) };
+    },
     hasApiKey,
     subscriptionChosen,
     // Credential pauses are lifted so the next run's gate checks the CLI against the new lane.
@@ -2903,8 +2928,11 @@ export function openEventStore(dataDir: string) {
           return undefined;
         }
         const run = RunRow.parse(row);
-        const { name, personality, model, effort, mode, projectPath, control, boundary } =
-          BotRow.parse(selectBot.get(run.botId));
+        const bot = BotRow.parse(selectBot.get(run.botId));
+        const { name, personality, model, effort, mode, projectPath, control, boundary } = bot;
+        const accountLane = EngineAccount.parse(selectAccount.get(run.engineAccountId)).lane;
+        // As index.ts launches it: a box bot takes its R7 lane, falling back to the account's.
+        setRunLane.run((boundary === "box" ? laneOfBox(bot) : null) ?? accountLane, id);
         const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
         let scope = getScope(run.scopeId);
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
@@ -2942,7 +2970,7 @@ export function openEventStore(dataDir: string) {
             name,
             personality,
             engineAccountId: run.engineAccountId,
-            lane: EngineAccount.parse(selectAccount.get(run.engineAccountId)).lane,
+            lane: accountLane,
             model,
             effort,
             mode,

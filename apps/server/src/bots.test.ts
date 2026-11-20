@@ -7,7 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { type EventStore, openEventStore } from "./store.ts";
+import { type EventStore, type FinishedRun, openEventStore } from "./store.ts";
+import { apiKeyName } from "./vault.ts";
+import { openVault } from "./vaultStore.ts";
 
 let dataDir: string;
 let store: EventStore;
@@ -44,6 +46,75 @@ function runOnce(botId: string, reply: string) {
   store.ingestRun(runId);
   return runId;
 }
+
+describe("a lane's last credential turn", () => {
+  // Apart by a few milliseconds, so turns that end in order also differ in `ended_at`.
+  async function finish(bot: { id: string; roomId: string }, finished: FinishedRun) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    send(bot.roomId, "hi");
+    const wake = store.dueWakes(farFuture).find((row) => row.botId === bot.id);
+    if (!wake) {
+      throw new Error("no wake");
+    }
+    store.queueRun(wake);
+    const runId = store.queuedRuns().find((run) => run.botId === bot.id)?.id ?? "";
+    store.claimRun(runId, "boot", new Date().toISOString());
+    store.finishRun(runId, "boot", finished);
+  }
+  const completed = { status: "Completed", reason: null, reply: "ok" } as const;
+  const refused = { status: "Failed", reason: "auth_failed" } as const;
+  const claudeBot = (name: string) =>
+    store.createBot({ name, personality: "", engineAccountId: "claude" });
+  const vault = () => openVault(store.vaultStore, { status: "ready", key: "k".repeat(43) + "=" });
+
+  it("is the later of a completed turn and one refused on auth, skipping other failures", async () => {
+    const ada = newBot("Ada");
+    const lane = store.accountLane("fake");
+    expect(store.credentialTurn("fake", lane)).toBeUndefined();
+    await finish(ada, completed);
+    expect(store.credentialTurn("fake", lane)).toMatchObject({ ok: true });
+    await finish(ada, refused);
+    expect(store.credentialTurn("fake", lane)).toMatchObject({ ok: false });
+    await finish(ada, { status: "Failed", reason: "folder_missing" });
+    expect(store.credentialTurn("fake", lane)).toMatchObject({ ok: false });
+  });
+
+  it("goes by when a turn ended, also for a parked run's reused row", async () => {
+    const ada = newBot("Ada");
+    const grace = newBot("Grace");
+    const lane = store.accountLane("fake");
+    await finish(ada, { status: "WaitingUser", reason: null, reply: "which one?" });
+    await finish(grace, refused);
+    // Ada's answer goes again in her parked run's older row, and gets through.
+    await finish(ada, completed);
+    expect(store.credentialTurn("fake", lane)).toMatchObject({ ok: true });
+  });
+
+  it("never lets a subscription turn vouch for a key saved after a lane switch", async () => {
+    const ada = claudeBot("Ada");
+    await finish(ada, completed);
+    expect(store.credentialTurn("claude", "subscription")).toMatchObject({ ok: true });
+    store.setAccountLane("claude", "api_key");
+    await vault().put(apiKeyName("claude"), "sk-ant-wrong");
+    expect(store.credentialTurn("claude", "api_key")).toBeUndefined();
+
+    await finish(ada, completed);
+    expect(store.credentialTurn("claude", "api_key")).toMatchObject({ ok: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await vault().put(apiKeyName("claude"), "sk-ant-replaced");
+    expect(store.credentialTurn("claude", "api_key")).toBeUndefined();
+  });
+
+  it("never lets a box bot's unattended API-key turn vouch for the subscription login", async () => {
+    await vault().put(apiKeyName("claude"), "sk-ant-test");
+    const ada = claudeBot("Ada");
+    store.policy.setBotBoundary(ada.id, "box");
+    expect(store.accountLane("claude")).toBe("subscription");
+    await finish(ada, completed);
+    expect(store.credentialTurn("claude", "subscription")).toBeUndefined();
+    expect(store.credentialTurn("claude", "api_key")).toMatchObject({ ok: true });
+  });
+});
 
 describe("archiving a bot", () => {
   it("cancels its wakes and refuses its DM until restored", () => {

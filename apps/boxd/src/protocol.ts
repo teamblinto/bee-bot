@@ -86,7 +86,8 @@ export type Verb =
   | "control"
   | "input"
   | "skills"
-  | "skill";
+  | "skill"
+  | "login";
 
 export type SkillCopy = { name: string; sha256: string; files: { path: string; data: string }[] };
 
@@ -143,7 +144,7 @@ export function validKeys(keys: string) {
 }
 
 export type Response =
-  | { id: number; ok: true; state?: BoxState; missing?: string[] }
+  | { id: number; ok: true; state?: BoxState; missing?: string[]; login?: boolean }
   | { id: number; ok: false; error: string };
 
 // `restartMachine`: boxd can't run until its Podman machine starts again.

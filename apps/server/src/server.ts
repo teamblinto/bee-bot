@@ -156,7 +156,8 @@ const maxMcpBodyBytes = 16 * 1024 * 1024;
 type Options = Pick<Bootstrap, "port" | "token" | "dataDir" | "allowedOrigins" | "fakeEngine"> & {
   store: EventStore;
   vault?: Vault | undefined;
-  probeEngine: (lane: EngineLane) => Promise<EngineStatus>;
+  // `live`: server mode's answer came from a box's CLI just now.
+  probeEngine: (lane: EngineLane) => Promise<EngineStatus & { live?: true }>;
   probeCodex?:
     | ((lane: EngineLane, onModels: (models: EngineModel[]) => void) => Promise<EngineStatus>)
     | undefined;
@@ -1782,15 +1783,15 @@ export async function startServer({
 
   async function handleEngine(response: NodeHttp.ServerResponse) {
     try {
-      const [status] = await Promise.all([
-        probeEngine(store.accountLane("claude")).then(EngineStatus.parse),
+      const [{ live, ...checked }] = await Promise.all([
+        probeEngine(store.accountLane("claude")),
         checkCodex(),
       ]);
+      const status = EngineStatus.parse(checked);
       if (status.pauseReason) {
         store.pauseReadyBots("claude", status.pauseReason);
-      } else if (!serverMode) {
-        // Server mode's check never looks at a login, so it can't vouch for one: only a box run
-        // lifts its pause.
+      } else if (!serverMode || live) {
+        // Server mode: only a box's CLI answering now may lift a pause a turn set.
         store.clearEnginePauses("claude");
       }
       sendJson(response, 200, status);

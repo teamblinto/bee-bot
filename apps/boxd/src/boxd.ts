@@ -94,6 +94,7 @@ const verbs = new Set<string>([
   "inbox",
   "skills",
   "skill",
+  "login",
 ]);
 const maxSkillFiles = 200;
 
@@ -137,9 +138,10 @@ function parseRequest(payload: Buffer): Request | { id: number; error: string } 
   const field = (object: unknown, key: string) =>
     object && typeof object === "object" ? Reflect.get(object, key) : undefined;
   switch (verb) {
-    case "create": {
+    case "create":
+    case "login": {
       const account = get("account");
-      if (account === undefined) {
+      if (account === undefined && verb === "create") {
         return base;
       }
       return typeof account === "string" && accountPattern.test(account)
@@ -466,6 +468,18 @@ export function createBoxd(options: BoxdOptions) {
     return binds;
   }
 
+  // Whether the account's CLI has written its login, without reading it. The engine user owns the
+  // folder, so only podman's user namespace can look inside, as for the chown above.
+  async function hasLogin(account: string) {
+    const file = account === "codex" ? "auth.json" : ".credentials.json";
+    const path = NodePath.join(stateDir, "credentials", account, file);
+    const result = await podman.run(["unshare", "test", "-e", path]);
+    if (result.code !== 0 && result.code !== 1) {
+      throw new Error(result.stderr.trim() || "podman unshare failed");
+    }
+    return result.code === 0;
+  }
+
   async function create(box: Box, account: string | undefined) {
     const current = await state(box);
     if (current.state !== "absent") {
@@ -758,6 +772,11 @@ export function createBoxd(options: BoxdOptions) {
           return { id, ok: true };
         case "snapshot":
           return { id, ok: true, state: await serially(botId, () => retireStale(box)) };
+        case "login":
+          if (request.account === undefined) {
+            return { id, ok: false, error: "bad account" };
+          }
+          return { id, ok: true, login: await hasLogin(request.account) };
         case "exec":
           if (request.exec === undefined) {
             return { id, ok: false, error: "bad exec request" };

@@ -174,7 +174,8 @@ export function createFakePodman({ failCreate }: { failCreate?: (name: string) =
         return ok();
       }
       if (verb === "unshare") {
-        return ok();
+        const path = args.at(-1) ?? "";
+        return sub !== "test" || NodeFs.existsSync(path) ? ok() : { ...fail(""), code: 1 };
       }
       if (verb === "ps") {
         const list = [...resources.container].filter(([, item]) => item.running);

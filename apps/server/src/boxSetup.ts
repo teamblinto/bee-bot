@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { SidecarEndpoint } from "./browserCdp.ts";
 import { MachineRestartNeeded, machineSsh, podmanEnv } from "./boxdRuntime.ts";
 import { boxRoot } from "./boxHost.ts";
-import type { BoxAttach, BoxRuntime } from "./boxRuntime.ts";
+import type { BoxAttach, BoxExec, BoxRuntime } from "./boxRuntime.ts";
 import {
   buildProgress,
   initProgress,
@@ -221,6 +221,7 @@ export type BoxHost = {
   sidecar: (botId: string) => Promise<SidecarEndpoint>;
   display: (botId: string, lease?: string) => Promise<BoxAttach>;
   control: (botId: string, lease: string) => Promise<BoxAttach>;
+  execIfRunning: BoxRuntime["execAttach"];
   // The tail of boxd's own log, for when it stops on its own.
   stderr: () => string;
   closed: Promise<void>;
@@ -438,6 +439,7 @@ ${started.stderr()}`);
     start: async (botId) => current().runtime.start(botId),
     stop: async (botId) => current().runtime.stop(botId),
     snapshot: async (botId): Promise<BoxState> => current().runtime.snapshot(botId),
+    hasLogin: async (botId, account) => current().runtime.hasLogin(botId, account),
     execAttach: async (botId, exec) => current().runtime.execAttach(botId, exec),
   };
 
@@ -447,6 +449,7 @@ ${started.stderr()}`);
     display: async (botId: string, lease?: string) => current().display(botId, lease),
     control: async (botId: string, lease: string) => current().control(botId, lease),
     prepare: async (botId: string) => current().prepare(botId),
+    execIfRunning: async (botId: string, exec: BoxExec) => current().execIfRunning(botId, exec),
     // With no host up there is no proxy to tell: a box's policy is pushed when it comes up.
     applyEgress: async (botId: string) => host?.host.applyEgress(botId),
     availability: () => status,

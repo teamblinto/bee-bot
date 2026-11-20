@@ -43,6 +43,8 @@ export type BoxRuntime = {
   start: (botId: string) => Promise<void>;
   stop: (botId: string) => Promise<void>;
   snapshot: (botId: string) => Promise<BoxState>;
+  // Whether the account's CLI has a login in the credential folder boxes mount. Needs no box.
+  hasLogin: (botId: string, account: string) => Promise<boolean>;
   execAttach: (botId: string, exec: BoxExec) => Promise<BoxAttach>;
 };
 
@@ -88,6 +90,7 @@ export function createFakeBoxRuntime(): BoxRuntime {
       states.set(botId, "stopped");
     },
     snapshot: async (botId) => states.get(botId) ?? "absent",
+    hasLogin: async () => false,
     writeBotFile: async (botId) => expect(botId, ["stopped", "running"]),
     keepSkills: async (botId) => {
       expect(botId, ["stopped", "running"]);

@@ -27,7 +27,13 @@ import { boxLayout } from "./boxEngine.ts";
 import { startBoxHost, windowsPodman } from "./boxHost.ts";
 import { createBoxService, defaultBoxMachine, nativePodman, podmanMachine } from "./boxSetup.ts";
 import { createCdpBrowserRuntime } from "./browserCdp.ts";
-import { createClaudeRunTurn, createClaudeSummarize, probeEngine, probeUsage } from "./claude.ts";
+import {
+  createBoxEngineProbe,
+  createClaudeRunTurn,
+  createClaudeSummarize,
+  probeEngine,
+  probeUsage,
+} from "./claude.ts";
 import { createCodexRunTurn, probeCodex } from "./codex.ts";
 import { connectorOfBox } from "./connectorBox.ts";
 import { spawnCuaDriver } from "./cuaScreen.ts";
@@ -234,14 +240,25 @@ async function boot(bootstrap: Bootstrap, cell?: Cell) {
     clock,
     runTurn,
     // Server mode never runs a CLI on the host: its login, limits and models are nobody's there.
-    // `unknown` blocks nothing, since each box run checks its own login.
     probeEngine: serverMode
-      ? async () => ({
-          cliFound: true,
-          version: null,
-          auth: "unknown",
-          email: null,
-          pauseReason: null,
+      ? createBoxEngineProbe({
+          command: ["claude"],
+          layout: box.layout,
+          dataDir,
+          claudeBoxes: () => {
+            const ids = store.botIds().filter((id) => {
+              const bot = store.getBot(id);
+              return bot?.boundary === "box" && bot.engineAccountId === "claude";
+            });
+            const running = store.boxes
+              .listBoxes()
+              .find(({ botId, state }) => state === "running" && ids.includes(botId));
+            return { running: running?.botId, any: ids[0] };
+          },
+          execIfRunning: boxes.execIfRunning,
+          hasLogin: (botId) => boxes.runtime.hasLogin(botId, "claude"),
+          apiKeySaved: () => store.hasApiKey("claude"),
+          lastTurn: (lane) => store.credentialTurn("claude", lane),
         })
       : probe,
     probeCodex: serverMode

@@ -12,7 +12,8 @@ import {
   type BoxRuntime,
   createFakeBoxRuntime,
 } from "./boxRuntime.ts";
-import { boxTurnArgs, createClaudeRunTurn } from "./claude.ts";
+import { readyBoxRuntime } from "./boxHost.ts";
+import { boxTurnArgs, createBoxEngineProbe, createClaudeRunTurn } from "./claude.ts";
 import { createCodexRunTurn } from "./codex.ts";
 import type { BotLaunch, RunTurn } from "./engine.ts";
 
@@ -425,5 +426,162 @@ describe("Codex in a box", () => {
     expect(outcome).toEqual({ kind: "failed" });
     const { pid = 0 } = logged();
     await vi.waitFor(() => expect(gone(pid)).toBe(true));
+  });
+});
+
+describe("Claude's login in a server's boxes", () => {
+  const login = () => NodePath.join(dataDir, "login", ".credentials.json");
+  const fake = createFakeBoxRuntime();
+  // Production's runtime, which brings a box up on its first use.
+  const runtime = readyBoxRuntime(fake, { account: () => "claude", applyEgress: async () => {} });
+  const both = { running: "bot-claude", any: "bot-claude" };
+  let hasLogin = vi.fn(async () => NodeFS.existsSync(login()));
+  let turn: { ok: boolean; at: number } | undefined;
+  let execs = 0;
+
+  function probe(
+    boxes: { running?: string; any?: string },
+    {
+      apiKeySaved = false,
+      scenario = "config-dir-login",
+      exec = runtime.execIfRunning,
+    }: { apiKeySaved?: boolean; scenario?: string; exec?: BoxRuntime["execAttach"] } = {},
+  ) {
+    const layout = { ...testLayout("bot-claude"), credentialDir: NodePath.dirname(login()) };
+    NodeFS.mkdirSync(layout.credentialDir, { recursive: true });
+    NodeFS.mkdirSync(layout.home, { recursive: true });
+    return createBoxEngineProbe({
+      command: [process.execPath, fakeClaude, scenario, logPath],
+      layout,
+      dataDir,
+      claudeBoxes: () => ({ running: boxes.running, any: boxes.any }),
+      execIfRunning: (botId, request) => {
+        execs += 1;
+        return exec(botId, request);
+      },
+      hasLogin,
+      apiKeySaved: () => apiKeySaved,
+      lastTurn: () => turn,
+    });
+  }
+
+  beforeEach(async () => {
+    hasLogin = vi.fn(async () => NodeFS.existsSync(login()));
+    turn = undefined;
+    execs = 0;
+    await fake.destroy("bot-claude");
+    await fake.create("bot-claude");
+  });
+
+  it("asks a running box's CLI live, following its credential folder both ways", async () => {
+    vi.stubEnv("CLAUDE_CONFIG_DIR", "beebotd-own-dir");
+    await fake.start("bot-claude");
+    const check = probe(both);
+    expect(await check("subscription")).toMatchObject({
+      auth: "unauthenticated",
+      pauseReason: "auth_failed",
+      live: true,
+    });
+    NodeFS.writeFileSync(login(), "{}");
+    expect(await check("subscription")).toEqual({
+      cliFound: true,
+      version: "2.1.318",
+      auth: "authenticated",
+      email: "owner@example.com",
+      pauseReason: null,
+      live: true,
+    });
+    NodeFS.rmSync(login());
+    expect(await check("subscription")).toMatchObject({ auth: "unauthenticated" });
+    vi.unstubAllEnvs();
+  });
+
+  it("never brings a stopped box up, and then goes by the later of the last answer and turn", async () => {
+    await fake.start("bot-claude");
+    const check = probe(both);
+    NodeFS.writeFileSync(login(), "{}");
+    expect(await check("subscription")).toMatchObject({ auth: "authenticated", live: true });
+    await fake.stop("bot-claude");
+
+    // The box row can lag: it still says running, and the box isn't.
+    const stale = await check("subscription");
+    expect(stale).toMatchObject({ auth: "authenticated", email: "owner@example.com" });
+    expect(stale).not.toHaveProperty("live");
+    turn = { ok: false, at: Date.now() + 1 };
+    expect(await check("subscription")).toEqual({
+      cliFound: true,
+      version: "2.1.318",
+      auth: "unknown",
+      email: null,
+      pauseReason: null,
+    });
+    turn = { ok: true, at: Date.now() + 2 };
+    expect(await check("subscription")).toMatchObject({ auth: "authenticated" });
+    NodeFS.rmSync(login());
+    expect(await check("subscription")).toMatchObject({
+      auth: "unauthenticated",
+      pauseReason: "auth_failed",
+    });
+    expect(await fake.snapshot("bot-claude")).toBe("stopped");
+  });
+
+  it("learns nothing from a box CLI that fails or doesn't answer in time", async () => {
+    await fake.start("bot-claude");
+    const brokenCli = probe(both, { scenario: "broken" });
+    NodeFS.writeFileSync(login(), "{}");
+    const broken = await brokenCli("subscription");
+    expect(broken).toMatchObject({ auth: "unknown", pauseReason: null });
+    expect(broken).not.toHaveProperty("live");
+    const silent = async () => ({ stream: new PassThrough(), exited: new Promise<null>(() => {}) });
+    expect(await probe(both, { exec: silent })("subscription")).toMatchObject({
+      auth: "unknown",
+      pauseReason: null,
+    });
+  }, 15_000);
+
+  it("gives up within the deadline while the box's queue is held", async () => {
+    await fake.start("bot-claude");
+    NodeFS.mkdirSync(NodePath.dirname(login()), { recursive: true });
+    NodeFS.writeFileSync(login(), "{}");
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A start or stop in the box's queue: its next look waits behind it.
+    const busy = readyBoxRuntime(
+      { ...fake, snapshot: async (botId) => held.then(() => fake.snapshot(botId)) },
+      { account: () => "claude", applyEgress: async () => {} },
+    );
+    const started = Date.now();
+    const answer = await probe(both, { exec: busy.execIfRunning })("subscription");
+    expect(answer).toMatchObject({ auth: "unknown", pauseReason: null });
+    expect(answer).not.toHaveProperty("live");
+    expect(Date.now() - started).toBeLessThan(6000);
+    release();
+  }, 15_000);
+
+  it("is unknown with no Claude box, a login file but no evidence yet, or boxd down", async () => {
+    NodeFS.mkdirSync(NodePath.dirname(login()), { recursive: true });
+    NodeFS.writeFileSync(login(), "{}");
+    expect(await probe({ any: "bot-claude" })("subscription")).toMatchObject({ auth: "unknown" });
+    expect(await probe({})("subscription")).toMatchObject({ auth: "unknown", pauseReason: null });
+    hasLogin = vi.fn(async () => Promise.reject(new Error("boxd is down")));
+    expect(await probe({ any: "bot-claude" })("subscription")).toMatchObject({ auth: "unknown" });
+    expect(execs).toBe(0);
+  });
+
+  it("calls the API-key lane ready only after a turn got through with a saved key", async () => {
+    await fake.start("bot-claude");
+    const keyed = probe(both, { apiKeySaved: true });
+    expect(await keyed("api_key")).toMatchObject({ auth: "unknown", pauseReason: null });
+    turn = { ok: true, at: Date.now() };
+    const ready = await keyed("api_key");
+    expect(ready).toMatchObject({ auth: "authenticated", pauseReason: null });
+    expect(ready).not.toHaveProperty("live");
+    expect(await probe(both)("api_key")).toMatchObject({ auth: "unknown", pauseReason: null });
+    turn = { ok: false, at: Date.now() + 1 };
+    expect(await keyed("api_key")).toMatchObject({ auth: "unknown", pauseReason: null });
+    expect(execs).toBe(0);
+    expect(hasLogin).not.toHaveBeenCalled();
   });
 });
