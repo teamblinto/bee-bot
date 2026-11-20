@@ -127,7 +127,9 @@ export function createTerminals({ runtime, layout, dataDir, bot }: Options) {
       }
       return { CODEX_HOME: codexHome };
     }
-    return mapping.env;
+    // An update would land in ~/.local/bin, ahead of the image's pinned binary on PATH. Engine turns
+    // have it off through CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC.
+    return { ...mapping.env, DISABLE_AUTOUPDATER: "1" };
   }
 
   function serve(
@@ -206,8 +208,10 @@ export function createTerminals({ runtime, layout, dataDir, bot }: Options) {
       stream.on("data", parse);
       stream.on("error", end);
       stream.on("close", end);
-      // Our side stays writable for input, so the stream doesn't close when tmux exits.
-      void attach.exited.then(end);
+      // Our side stays writable for input, so the stream doesn't close when tmux exits. The exit
+      // can arrive before the last output, which may say the login failed.
+      const drained = new Promise((resolve) => attach.stream.once("end", resolve));
+      void Promise.all([attach.exited, drained]).then(end);
     })().catch(() => {
       if (!ended) {
         client.close(1011, "box unavailable");

@@ -145,6 +145,7 @@ describe("the login terminal", () => {
 
     const attach = execs.find(({ argv }) => argv[1] === "-C");
     expect(attach?.argv.slice(-4)).toEqual(["claude", "auth", "login", "--claudeai"]);
+    expect(attach?.argv).toContain("DISABLE_AUTOUPDATER=1");
     expect(JSON.stringify(store.eventsAfter(0))).not.toContain(secret);
     expect(JSON.stringify(store.state())).not.toContain(secret);
     for (const file of NodeFS.readdirSync(dataDir, { recursive: true, encoding: "utf8" })) {
@@ -174,10 +175,26 @@ describe("the login terminal", () => {
       if (exec.argv[1] !== "-C") {
         return done();
       }
-      const stream = Duplex.from({ readable: new PassThrough(), writable: new PassThrough() });
+      const output = new PassThrough();
+      output.end();
+      const stream = Duplex.from({ readable: output, writable: new PassThrough() });
       return { stream, exited: Promise.resolve(0) };
     });
     expect(await closed).toBe(1000);
+  });
+
+  it("passes on the output that arrives after the login's exit", async () => {
+    const { received, closed } = await openTerminal(async (_botId, exec) => {
+      if (exec.argv[1] !== "-C") {
+        return done();
+      }
+      const output = new PassThrough();
+      setTimeout(() => output.end("%output %0 claude exited with status 1.\\015\\012\n"), 50);
+      const stream = Duplex.from({ readable: output, writable: new PassThrough() });
+      return { stream, exited: Promise.resolve(0) };
+    });
+    expect(await closed).toBe(1000);
+    expect(Buffer.concat(received).toString()).toBe("claude exited with status 1.\r\n");
   });
 
   async function openTerminal(execAttach: BoxRuntime["execAttach"]) {

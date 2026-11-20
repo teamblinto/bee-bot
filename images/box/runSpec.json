@@ -1,5 +1,5 @@
 {
-  "image": "localhost/beebot-box:5",
+  "image": "localhost/beebot-box:6",
   "user": "10001:10001",
   "engine": {
     "command": ["bee-engine"],

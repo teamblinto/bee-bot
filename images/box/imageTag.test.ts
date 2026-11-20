@@ -13,6 +13,7 @@ const buildInputs = [
   "tmux.conf",
   "chromium-policy.json",
   "chromium.flags",
+  "claude-code.sha256",
   "xfce/helpers.rc",
   "xfce/xfconf/xfce-perchannel-xml/xfce4-desktop.xml",
   "xfce/xfconf/xfce-perchannel-xml/xfce4-panel.xml",
@@ -28,6 +29,6 @@ it("names a new image tag whenever what the image is built from changes", () => 
   }
   const { image } = JSON.parse(readFileSync(join(imageDir, "runSpec.json"), "utf8"));
   expect(`${image} ${hash.digest("hex").slice(0, 16)}`).toBe(
-    "localhost/beebot-box:5 e6996b507c3bcb69",
+    "localhost/beebot-box:6 1934bd8e7606dc7b",
   );
 });

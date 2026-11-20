@@ -15,8 +15,12 @@ getent passwd beebot-gw >/dev/null ||
 install -d -m 0755 /var/lib/beebot
 install -d -m 0711 /var/lib/beebot/cells
 # Podman 4's rootless netns mounts a tmpfs on the nearest existing of /var/lib/cni, /var/lib, ...;
-# landing on /var/lib it hides the cells' homes, and with them their network configs.
-install -d -m 0755 /var/lib/cni
+# landing on /var/lib it hides the cells' homes, and with them their network configs. The marker
+# tells uninstall.sh it may remove the directory.
+if [ ! -e /var/lib/cni ]; then
+	install -d -m 0755 /var/lib/cni
+	touch /var/lib/beebot/made-var-lib-cni
+fi
 install -d -m 0700 /etc/beebot/creds
 install -m 0644 "$system/containers.conf" /etc/beebot/
 install -m 0644 "$system/beebotd@.service" "$system/beebotd@.socket" "$system/beebot-fence.service" \

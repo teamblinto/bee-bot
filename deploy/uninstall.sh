@@ -43,6 +43,8 @@ main() {
 	image=$(sed -n 's/^BEEBOT_BOX_IMAGE=//p' /etc/beebot/box-image.env 2>/dev/null || true)
 	[ -z "$image" ] || podman rmi -f "$image" >/dev/null 2>&1 || true
 
+	# Only when install.sh made it: an empty /var/lib/cni that was there before stays.
+	[ ! -e /var/lib/beebot/made-var-lib-cni ] || rmdir /var/lib/cni 2>/dev/null || true
 	rm -rf --one-file-system \
 		/etc/systemd/system/beebot-fence.service /etc/systemd/system/beebot-gateway.service \
 		/etc/systemd/system/beebotd@.service /etc/systemd/system/beebotd@.socket \
@@ -52,7 +54,6 @@ main() {
 		/usr/local/sbin/beebot /usr/local/sbin/beebot-provision /usr/local/sbin/beebot-backup \
 		/etc/beebot /var/lib/beebot /run/beebot /var/lib/beebot-backup /var/cache/beebot-backup \
 		/opt/beebot /var/lib/systemd/timers/stamp-beebot-backup.timer
-	rmdir /var/lib/cni 2>/dev/null || true
 	# The parent of every cell's slice, which systemd made for them.
 	systemctl stop beebot.slice 2>/dev/null || true
 	systemctl daemon-reload

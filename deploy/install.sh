@@ -20,8 +20,8 @@
 #   cell (uids 50000-50999), made later by beebot-provision. Caddy's user joins beebot-web.
 # - Files: /opt/beebot, /etc/beebot, /var/lib/beebot, /etc/beebot-backup, /var/backups/beebot,
 #   /usr/local/sbin/{beebot,beebot-provision,beebot-backup}, /etc/caddy/Caddyfile (refused when
-#   another Caddyfile is there), the box image in root's Podman store, an empty /var/lib/cni (see
-#   system.sh).
+#   another Caddyfile is there), the box image in root's Podman store, an empty /var/lib/cni if
+#   missing (see system.sh).
 # - Drop-ins: /etc/sudoers.d/beebot-provision, /etc/systemd/resolved.conf.d/beebot.conf (LLMNR and
 #   mDNS off), each cell's name in /etc/cron.deny (made if missing) and /etc/at.deny (if present).
 # - Units: beebot-fence.service, beebot-gateway.service, beebotd@.service, beebotd@.socket,
