@@ -33,7 +33,8 @@ export function slotOutcome(input: {
   botPaused: boolean;
 }): Pick<RoutineFiring, "status" | "reason"> {
   const now = Date.parse(input.now);
-  if (now - Date.parse(input.slot) > catchUpWindowMs) {
+  // The caller picks the slot on the cron's clock, which runs `staggerMs` behind the wall clock.
+  if (now - input.staggerMs - Date.parse(input.slot) > catchUpWindowMs) {
     return { status: "missed", reason: "asleep" };
   }
   if (now - Date.parse(input.lastOwnerActivity) > ownerAwayMs) {

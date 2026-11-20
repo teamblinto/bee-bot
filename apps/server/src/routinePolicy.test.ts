@@ -57,6 +57,15 @@ describe("slot outcome", () => {
     expect(slotOutcome(old)).toEqual({ status: "missed", reason: "asleep" });
     expect(slotOutcome({ ...base, botPaused: true }).reason).toBe("bot_paused");
   });
+
+  it("measures the catch-up window on the cron's staggered clock", () => {
+    const yesterday = { ...base, slot: "2026-03-09T09:00:00.000Z", staggerMs: 180_000 };
+    expect(slotOutcome({ ...yesterday, now: "2026-03-10T09:02:00.000Z" })).toEqual({
+      status: "ready",
+      reason: "catch_up",
+    });
+    expect(slotOutcome({ ...yesterday, now: "2026-03-10T09:03:01.000Z" }).status).toBe("missed");
+  });
 });
 
 describe("attempt outcome", () => {
