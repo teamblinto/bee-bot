@@ -44,6 +44,7 @@ extraResources:
       - tmux.conf
       - chromium-policy.json
       - chromium.flags
+      - claude-code.sha256
       - "xfce/**/*"
 win:
   target: nsis

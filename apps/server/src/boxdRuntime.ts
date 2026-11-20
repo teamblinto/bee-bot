@@ -123,6 +123,10 @@ export async function connectBoxd(
     } else if (kind === Kind.exit) {
       entry.exited = true;
       channels.delete(channel);
+      // boxd sends exit before eof when a descendant holds stdout; nothing more can arrive now.
+      if (!entry.stdoutEnded) {
+        entry.stream.push(null);
+      }
       entry.exit(JSON.parse(String(payload)) as number | null);
     }
   });

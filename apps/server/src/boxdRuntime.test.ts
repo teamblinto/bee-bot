@@ -1,3 +1,5 @@
+import { PassThrough } from "node:stream";
+
 import { maxTypedText } from "@beebot/boxd/protocol";
 import { createFakePodman, serveInProcess } from "@beebot/boxd/testing";
 import { describe, expect, it } from "vite-plus/test";
@@ -25,6 +27,13 @@ describe("boxd adapter", () => {
       ...fake.podman,
       spawn: (args, env) => {
         const at = args.indexOf("-c") + 3;
+        // A process that exits while a descendant still holds its stdout open.
+        if (args[at] === "held-stdout") {
+          const stdout = new PassThrough();
+          stdout.write("bye");
+          const exited = new Promise<number>((resolve) => setImmediate(() => resolve(0)));
+          return { stdin: new PassThrough(), stdout, kill: () => {}, exited };
+        }
         return fake.podman.spawn(
           args[at] === "xdotool"
             ? [...args.slice(0, at), process.execPath, "-e", "setInterval(() => {}, 1000)"]
@@ -63,6 +72,18 @@ describe("boxd adapter", () => {
     stream.end("hello");
     expect(await read(stream)).toBe("hello");
     expect(await exited).toBe(0);
+  });
+
+  it("ends stdout at exit even while a descendant holds it open", async () => {
+    const { runtime } = await connect();
+    await runtime.create("bot-1");
+    await runtime.start("bot-1");
+    const { stream, exited } = await runtime.execAttach("bot-1", {
+      argv: ["held-stdout"],
+      env: {},
+    });
+    expect(await exited).toBe(0);
+    expect(await read(stream)).toBe("bye");
   });
 
   it("kills the process when the stream drops", async () => {
