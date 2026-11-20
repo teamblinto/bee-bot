@@ -680,7 +680,7 @@ const errorSentences: Record<string, string> = {
   automated_access_unacknowledged:
     "Read the notice about bots that run on their own first. It's on the Usage page.",
   credential_conflict:
-    "Claude can use your subscription or a saved API key here, not both. Remove the key on the Usage page, or set every Claude bot to the API key, then try again.",
+    "Claude can use your subscription or a saved API key here, not both. To save a key, first set Login to API key in Edit bot. To use your subscription, first remove the saved Claude key on the Usage page.",
   digest_mismatch: "This request changed, so nothing was decided.",
   always_not_allowed: "Always allow isn't available for this request.",
   ambiguous_mention: "More than one bot here goes by that name. Pick one from the @ list.",

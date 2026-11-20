@@ -112,8 +112,8 @@ export function BoxesPanel() {
         <div className="flex items-start gap-2 rounded-card border border-edge-subtle bg-sidebar px-3 py-3 text-body-s">
           <Info {...iconProps} className="mt-0.5 shrink-0 text-ink-secondary" />
           <p>
-            <span className="font-medium">Boxed bots need an API key.</span> Add an Anthropic or
-            OpenAI key above.
+            <span className="font-medium">No API key is saved.</span> Boxed bots use your
+            subscription. To use a key instead, add an Anthropic or OpenAI key above.
           </p>
         </div>
       )}
