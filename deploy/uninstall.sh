@@ -36,7 +36,7 @@ main() {
 	fi
 	! id -nG caddy 2>/dev/null | grep -qw beebot-web || gpasswd -d caddy beebot-web >/dev/null
 	! getent passwd beebot-gw >/dev/null || userdel beebot-gw
-	for group in beebot-gw beebot-web; do
+	for group in beebot-gw beebot-web beebot-cells; do
 		! getent group "$group" >/dev/null || groupdel "$group"
 	done
 

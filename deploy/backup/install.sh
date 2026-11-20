@@ -25,7 +25,8 @@ EOF
 fi
 chmod 0600 "$conf/backup.env"
 
-install -m 0755 "$here/beebot-backup" /usr/local/sbin/beebot-backup
+# Through current, like beebot-provision (see system.sh).
+ln -sfn /opt/beebot/current/deploy/backup/beebot-backup /usr/local/sbin/beebot-backup
 install -m 0644 "$here/beebot-backup.service" "$here/beebot-backup.timer" /etc/systemd/system/
 
 (

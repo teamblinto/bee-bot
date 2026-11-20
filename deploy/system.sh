@@ -17,10 +17,16 @@ install -d -m 0755 /var/lib/beebot
 install -d -m 0700 /var/lib/beebot/cells
 # The beebot-cells group and the ACL that denied it on every home, from a release before that.
 if getent group beebot-cells >/dev/null; then
+	cleared=1
 	for home in /var/lib/beebot/cells/bb*; do
-		[ ! -d "$home" ] || setfacl -P -b "$home" 2>/dev/null || true
+		[ ! -d "$home" ] || setfacl -P -b "$home" || cleared=0
 	done
-	groupdel beebot-cells
+	# A deleted group's gid can be reused, and a leftover entry would then deny that new group.
+	if [ $cleared = 1 ]; then
+		groupdel beebot-cells
+	else
+		echo "system.sh: kept group beebot-cells: its ACL entries are still on cells' homes (is setfacl installed?)" >&2
+	fi
 fi
 # Podman 4's rootless netns mounts a tmpfs on the nearest existing of /var/lib/cni, /var/lib, ...;
 # landing on /var/lib it hides the cells' homes, and with them their network configs. The marker
@@ -48,9 +54,12 @@ install -m 0440 "$system/sudoers" /etc/sudoers.d/beebot-provision
 # Through current, so an update or rollback moves them along with the code.
 ln -sfn /opt/beebot/current/apps/provision/src/beebot-provision.ts /usr/local/sbin/beebot-provision
 ln -sfn /opt/beebot/current/deploy/beebot /usr/local/sbin/beebot
-# backup/install.sh's copy, kept in step: it has to reach the cells' homes the way this release does.
-[ ! -f /usr/local/sbin/beebot-backup ] ||
-	install -m 0755 "$release/deploy/backup/beebot-backup" /usr/local/sbin/beebot-backup
+# Only once backup/install.sh has installed it. A release's own restore has to run: it reaches the
+# cells' homes the way that release's units do.
+chmod 0755 "$release/deploy/backup/beebot-backup"
+if [ -e /usr/local/sbin/beebot-backup ] || [ -L /usr/local/sbin/beebot-backup ]; then
+	ln -sfn /opt/beebot/current/deploy/backup/beebot-backup /usr/local/sbin/beebot-backup
+fi
 
 systemctl daemon-reload
 systemctl enable --quiet beebot-fence.service beebot-gateway.service
