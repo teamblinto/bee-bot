@@ -1,12 +1,15 @@
 #!/bin/bash
 # Installs Bee Bot on an Ubuntu 24.04 host, as root, from an unpacked release:
 #   sudo ./deploy/install.sh --domain bee.example.com --admin-email you@example.com [--box-image box.tar]
-#     [--https-port <n>] [--http-port <n>]
+#     [--https-port <n>] [--http-port <n>] [--behind-proxy <ip:port> --trusted-proxies <cidr>]
 # --box-image takes a `podman save` of the image images/box/runSpec.json names; without it the
 # image is built here. An IP address or localhost as --domain gets Caddy's own CA, for testing.
 # Caddy serves HTTPS on --https-port (443) and redirects HTTP from --http-port, which is 80 when
 # HTTPS is on 443 and otherwise off unless given. Away from 443 a public certificate can't be
 # issued, so that suits an IP or localhost domain, or a proxy in front.
+# --behind-proxy is for a proxy in front that terminates TLS for --domain: Caddy then serves plain
+# HTTP on that private address alone (no certificates, nothing on 80 or 443) and trusts
+# X-Forwarded-For and -Proto only from --trusted-proxies.
 # Safe to run again with the same release. Later releases go in with `beebot update`;
 # deploy/uninstall.sh takes everything below away again.
 #
@@ -26,15 +29,17 @@
 #   mDNS off), each cell's name in /etc/cron.deny (made if missing) and /etc/at.deny (if present).
 # - Units: beebot-fence.service, beebot-gateway.service, beebotd@.service, beebotd@.socket,
 #   beebot-backup.service and .timer, cells' drop-ins beebot-<cell>.slice.d and
-#   beebotd@<cell>.service.d; caddy.service enabled.
+#   beebotd@<cell>.service.d; caddy.service enabled and, with --behind-proxy, its drop-in
+#   caddy.service.d/beebot.conf.
 # - Firewall: the nftables table inet beebot_fence alone, loaded by beebot-fence.service.
 set -euo pipefail
 usage() {
-	echo "usage: install.sh --domain <host> [--admin-email <email>] [--box-image <box.tar>] [--https-port <n>] [--http-port <n>]" >&2
+	echo "usage: install.sh --domain <host> [--admin-email <email>] [--box-image <box.tar>] [--https-port <n>] [--http-port <n>]" \
+		"[--behind-proxy <ip:port> --trusted-proxies <cidr>]" >&2
 	exit 2
 }
 here=$(cd "$(dirname "$0")/.." && pwd -P)
-domain="" email="" box="" https_port=443 http_port=""
+domain="" email="" box="" https_port=443 http_port="" behind="" trusted=""
 while [ $# -gt 0 ]; do
 	case $1 in
 	--domain) domain=${2:-} && shift 2 ;;
@@ -42,6 +47,8 @@ while [ $# -gt 0 ]; do
 	--box-image) box=$(readlink -f "${2:-}") && shift 2 ;;
 	--https-port) https_port=${2:-} && shift 2 ;;
 	--http-port) http_port=${2:-} && shift 2 ;;
+	--behind-proxy) behind=${2:-} && shift 2 ;;
+	--trusted-proxies) trusted=${2:-} && shift 2 ;;
 	*) usage ;;
 	esac
 done
@@ -51,6 +58,11 @@ done
 port() { [[ $1 =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]; }
 port "$https_port" || usage
 [ -z "$http_port" ] || port "$http_port" || usage
+ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
+if [ -n "$behind$trusted" ]; then
+	[[ $behind =~ ^$ipv4:([0-9]+)$ ]] && port "${BASH_REMATCH[2]}" && [[ $trusted =~ ^$ipv4/[0-9]{1,2}$ ]] || usage
+	[ -z "$http_port" ] && [ "$https_port" = 443 ] || usage
+fi
 [ -n "$http_port" ] || [ "$https_port" != 443 ] || http_port=80
 origin=https://$domain
 [ "$https_port" = 443 ] || origin=$origin:$https_port
@@ -112,6 +124,26 @@ fi
 # The caddy package starts Caddy as it installs, with a Caddyfile that takes :80. Ours goes there
 # first and dpkg keeps it, so Caddy only ever listens where Bee Bot says.
 caddyfile() {
+	if [ -n "$behind" ]; then
+		cat <<EOF
+$caddy_marker, which writes it again when it runs.
+# admin off: there is no admin API to reload through, so restart Caddy to apply a change.
+# Behind a proxy that terminates TLS: plain HTTP on $behind alone.
+{
+	admin off
+	auto_https off
+}
+
+http://:${behind##*:} {
+	bind ${behind%:*}
+	# Ubuntu 24.04's Caddy 2.6 takes this here, not as a server option.
+	reverse_proxy unix//run/beebot/gateway/gateway.sock {
+		trusted_proxies $trusted
+	}
+}
+EOF
+		return
+	fi
 	local tls="" redirect="http_port $http_port"
 	if [[ $domain =~ ^[0-9.]+$ || $domain == localhost || $domain == *.localhost ]]; then
 		tls="tls internal"
@@ -172,10 +204,18 @@ bash "$release/deploy/system.sh" "$release"
 usermod -aG beebot-web caddy
 caddyfile >/etc/caddy/Caddyfile
 checked=$(caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || { echo "$checked" >&2; exit 1; }
+# At boot the proxy's private address may not exist yet, and Caddy exits when it can't bind it.
+if [ -n "$behind" ]; then
+	install -d -m 0755 /etc/systemd/system/caddy.service.d
+	printf '[Service]\nRestart=on-failure\nRestartSec=5s\n' >/etc/systemd/system/caddy.service.d/beebot.conf
+else
+	rm -f /etc/systemd/system/caddy.service.d/beebot.conf
+fi
+systemctl daemon-reload
 systemctl enable --quiet caddy.service
 systemctl restart beebot-gateway.service
 systemctl restart caddy.service ||
-	{ echo "Caddy did not start; is port $https_port${http_port:+ or $http_port} taken? journalctl -u caddy" >&2; exit 1; }
+	{ echo "Caddy did not start; is ${behind:-port $https_port${http_port:+ or $http_port}} taken? journalctl -u caddy" >&2; exit 1; }
 
 health() {
 	runuser -u beebot-gw -- curl -sf --max-time 5 --unix-socket /run/beebot/gateway/gateway.sock \

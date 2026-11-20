@@ -1,0 +1,23 @@
+#!/bin/bash
+# Installs Bee Bot from CI's upload on a host that doesn't have it yet, as root, with the options
+# ci-deploy-setup.sh wrote to /etc/beebot-deploy/install.env. beebot-ci-deploy runs it through sudo.
+#   beebot-ci-install <release.tar.gz>
+set -euo pipefail
+say() { echo "beebot-ci-install: $*" >&2; }
+[ $# = 1 ] && [ -f "$1" ] || { say "usage: beebot-ci-install <release.tar.gz>"; exit 2; }
+[ ! -e /opt/beebot/current ] || { say "Bee Bot is installed already; beebot update takes releases"; exit 1; }
+# shellcheck source=/dev/null
+. /etc/beebot-deploy/install.env
+dir=$(mktemp -d /var/tmp/beebot-install.XXXXXX)
+trap 'rm -rf "$dir"' EXIT
+tar -xzf "$1" -C "$dir" --no-same-owner --no-same-permissions
+unpacked=("$dir"/*)
+if [ ${#unpacked[@]} != 1 ] || [ ! -f "${unpacked[0]}/deploy/install.sh" ]; then
+	say "$1 is not a Bee Bot release"
+	exit 1
+fi
+# No --admin-email: install.sh would print the admin's sign-up link into CI's log.
+args=(--domain "$BEEBOT_DOMAIN")
+[ -z "${BEEBOT_BEHIND_PROXY:-}" ] ||
+	args+=(--behind-proxy "$BEEBOT_BEHIND_PROXY" --trusted-proxies "$BEEBOT_TRUSTED_PROXIES")
+bash "${unpacked[0]}/deploy/install.sh" "${args[@]}"

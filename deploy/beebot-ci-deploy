@@ -1,0 +1,58 @@
+#!/bin/bash
+# The forced command of CI's deploy key, run as beebot-deploy (deploy/ci-deploy-setup.sh puts it in
+# place). It reads a release tarball on stdin, checks it is a gzip tar of a sane size and hands it to
+# `beebot update`, or to beebot-ci-install while Bee Bot isn't installed, through sudoers rules that
+# allow exactly those, exiting as they do. The client's command is refused unless it is empty, or
+# "force-fail", which sets BEEBOT_UPDATE_FORCE_FAIL=1 to try the rollback. It always ends by naming
+# the release that is live.
+set -euo pipefail
+max=$((1024 * 1024 * 1024))
+say() { echo "beebot-ci-deploy: $*" >&2; }
+
+case ${SSH_ORIGINAL_COMMAND:-} in
+"") force=() ;;
+force-fail) force=(/usr/bin/env BEEBOT_UPDATE_FORCE_FAIL=1) ;;
+*)
+	say "refused: send no command, or force-fail"
+	exit 2
+	;;
+esac
+
+# The sudoers rule names this path, so it is the only file the update can be given.
+cd "$HOME"
+exec 9>.lock
+flock -n 9 || { say "another deploy is running"; exit 1; }
+upload=$(mktemp upload.XXXXXX)
+trap 'rm -f "$HOME/$upload"; say "live release: $(basename "$(readlink -e /opt/beebot/current || echo none)")"' EXIT
+head -c $((max + 1)) >"$upload"
+size=$(stat -c %s "$upload")
+if [ "$size" = 0 ] || [ "$size" -gt $max ]; then
+	say "refused: $size bytes is not a release"
+	exit 1
+fi
+tar -tzf "$upload" >/dev/null 2>&1 || { say "refused: not a gzip tar"; exit 1; }
+# Overridden by the test. A client could only set what sshd's AcceptEnv lets through (LANG and LC_*
+# on Ubuntu), and either way sudoers allows nothing but these two commands.
+if [ -e "${BEEBOT_CURRENT:-/opt/beebot/current}" ]; then
+	command=("${force[@]}" /usr/local/sbin/beebot update "$HOME/release.tar.gz")
+else
+	[ ${#force[@]} = 0 ] || { say "refused: force-fail needs Bee Bot installed"; exit 2; }
+	command=(/usr/local/sbin/beebot-ci-install "$HOME/release.tar.gz")
+fi
+mv -f "$upload" release.tar.gz
+
+# A dropped connection must not stop an update halfway, so the root work runs in its own session,
+# ignoring SIGHUP and writing to a file rather than the channel, and still holds the lock on fd 9.
+# This side only streams its log back and passes on its exit code.
+rm -f .deploy.pid .deploy.rc
+: >.deploy.log
+setsid -f bash -c 'trap "" HUP PIPE
+	echo $$ >.deploy.pid
+	sudo -n "$@" </dev/null >>.deploy.log 2>&1
+	echo $? >.deploy.rc
+	rm -f release.tar.gz' - "${command[@]}"
+until [ -s .deploy.pid ]; do sleep 0.1; done
+tail --pid="$(cat .deploy.pid)" -n +1 -f .deploy.log >&2 || true
+rc=$(cat .deploy.rc 2>/dev/null || echo 1)
+rm -f .deploy.pid .deploy.rc
+exit "$rc"

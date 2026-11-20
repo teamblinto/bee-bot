@@ -1,6 +1,7 @@
 #!/bin/bash
 # Takes Bee Bot off this host, as root: every cell and its data, the gateway, the units, the fence
-# table, the users and groups, the files and drop-ins install.sh lists. It can't be undone.
+# table, the users and groups, the files and drop-ins install.sh lists, and CI's deploy access
+# (ci-deploy-setup.sh). It can't be undone.
 #   sudo bash /opt/beebot/current/deploy/uninstall.sh --yes
 # Kept: the packages (and NodeSource's apt source, which keeps nodejs updated), and the backups in
 # /etc/beebot-backup and /var/backups/beebot, which it names at the end for you to delete.
@@ -36,6 +37,9 @@ main() {
 	fi
 	! id -nG caddy 2>/dev/null | grep -qw beebot-web || gpasswd -d caddy beebot-web >/dev/null
 	! getent passwd beebot-gw >/dev/null || userdel beebot-gw
+	# userdel takes its group too. It refuses while a deploy runs, which shouldn't stop the rest.
+	! getent passwd beebot-deploy >/dev/null || userdel beebot-deploy ||
+		echo "could not delete the user beebot-deploy; once its deploy ends: sudo userdel beebot-deploy" >&2
 	for group in beebot-gw beebot-web beebot-cells; do
 		! getent group "$group" >/dev/null || groupdel "$group"
 	done
@@ -51,9 +55,12 @@ main() {
 		/etc/systemd/system/beebot-backup.service /etc/systemd/system/beebot-backup.timer \
 		/etc/systemd/system/beebot-*.slice.d /etc/systemd/system/beebotd@*.service.d \
 		/etc/systemd/resolved.conf.d/beebot.conf /etc/sudoers.d/beebot-provision \
+		/etc/sudoers.d/beebot-ci-deploy /usr/local/sbin/beebot-ci-deploy /usr/local/sbin/beebot-ci-install \
+		/etc/beebot-deploy /var/lib/beebot-deploy /etc/systemd/system/caddy.service.d/beebot.conf \
 		/usr/local/sbin/beebot /usr/local/sbin/beebot-provision /usr/local/sbin/beebot-backup \
 		/etc/beebot /var/lib/beebot /run/beebot /var/lib/beebot-backup /var/cache/beebot-backup \
 		/opt/beebot /var/lib/systemd/timers/stamp-beebot-backup.timer
+	rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
 	# The parent of every cell's slice, which systemd made for them.
 	systemctl stop beebot.slice 2>/dev/null || true
 	systemctl daemon-reload
