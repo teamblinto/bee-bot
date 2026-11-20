@@ -12,11 +12,11 @@
 #
 # What this changes on the host, and nothing else (it never touches other nftables tables, other
 # apps under /opt, or the nftables.service that would load /etc/nftables.conf):
-# - Packages: ca-certificates curl gnupg podman uidmap nftables passt caddy restic sqlite3 acl, and
+# - Packages: ca-certificates curl gnupg podman uidmap nftables passt caddy restic sqlite3, and
 #   nodejs 22 from NodeSource unless Node 22.18+ is already /usr/bin/node: then the apt source
 #   /etc/apt/sources.list.d/nodesource.sources, its key /usr/share/keyrings/nodesource.gpg
 #   (fingerprint checked) and the pin /etc/apt/preferences.d/nodejs.
-# - Users and groups: beebot-gw, beebot-web, beebot-cells; one system user, group and subuid/subgid range per
+# - Users and groups: beebot-gw, beebot-web; one system user, group and subuid/subgid range per
 #   cell (uids 50000-50999), made later by beebot-provision. Caddy's user joins beebot-web.
 # - Files: /opt/beebot, /etc/beebot, /var/lib/beebot, /etc/beebot-backup, /var/backups/beebot,
 #   /usr/local/sbin/{beebot,beebot-provision,beebot-backup}, /etc/caddy/Caddyfile (refused when
@@ -135,7 +135,7 @@ EOF
 install -d -m 0755 /etc/caddy
 caddyfile >/etc/caddy/Caddyfile
 apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-	podman uidmap nftables passt caddy acl
+	podman uidmap nftables passt caddy
 
 # The release, root-owned all the way: root runs beebot-provision from it.
 release=/opt/beebot/releases/$version

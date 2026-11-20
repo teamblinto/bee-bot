@@ -87,7 +87,7 @@ units=(beebot-gateway.service "${sockets[@]}" "${cells[@]}")
 
 # A database is copied by its owner, beside itself, so root never follows a path a cell controls.
 # VACUUM INTO makes a consistent copy even of a database in WAL mode.
-databases=(beebot-gw:/var/lib/beebot/gateway/gateway.db)
+databases=(beebot-gw:/var/lib/beebot/gateway:gateway.db)
 # Every cell's units are stopped, not just those that run: a listening socket starts its cell on
 # the gateway's next connect, which would run it while its database is copied or put back.
 stop_all() {
@@ -104,10 +104,19 @@ stop_all() {
 for home in /var/lib/beebot/cells/bb*; do
 	cell=${home##*/}
 	[[ $cell =~ ^bb[0-9a-f]{10}$ ]] && getent passwd "$cell" >/dev/null &&
-		databases+=("$cell:$home/data/beebot.db")
+		databases+=("$cell:$home:data/beebot.db")
 done
-sqlite_copy() { # backup|restore owner:path
-	(cd / && umask 077 && runuser -u "${2%%:*}" -- /usr/bin/node --disable-warning=ExperimentalWarning -e '
+# Runs a command in <folder>, in a mount namespace where the folder is the only entry in its parent,
+# as a cell's unit sees its home: on the host only root can pass through /var/lib/beebot/cells, and
+# SQLite opens even a relative path by its full one. The folder is bound from a handle opened
+# before the tmpfs hides its path, and mount must not resolve that handle to the path.
+in_own_folder() { # <folder> command...
+	unshare --mount bash -c 'exec 3<"$1" && mount -t tmpfs -o mode=0755 tmpfs "${1%/*}" &&
+		mkdir "$1" && mount --no-canonicalize --bind /proc/self/fd/3 "$1" && exec 3<&- && cd "$1" && shift && exec "$@"' - "$@"
+}
+sqlite_copy() { # backup|restore owner:folder:path in it
+	local owner=${2%%:*} rest=${2#*:}
+	(umask 077 && in_own_folder "${rest%%:*}" runuser -u "$owner" -- /usr/bin/node --disable-warning=ExperimentalWarning -e '
 		const fs = require("node:fs");
 		const [op, db] = process.argv.slice(1);
 		const copy = db + ".pre-update";
@@ -122,7 +131,7 @@ sqlite_copy() { # backup|restore owner:path
 			for (const suffix of ["-wal", "-shm", "-journal"]) fs.rmSync(db + suffix, { force: true });
 			fs.copyFileSync(copy, db);
 		}
-	' "$1" "${2#*:}")
+	' "$1" "${rest#*:}")
 }
 
 backup=/var/lib/beebot/update-backup
