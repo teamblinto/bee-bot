@@ -1657,7 +1657,7 @@ describe("in Box mode a tool call", () => {
     await send("click it");
     const card = await waiting();
     expect(card).toMatchObject({ tool: "browser_click", shown: 'browser_click: {"ref":"1:0"}' });
-    expect(replies).toEqual([waitingMessage(card.id)]);
+    await vi.waitFor(() => expect(replies).toEqual([waitingMessage(card.id)]));
     await answer(card, "approve");
     await vi.waitFor(() => expect(bodies().at(-1)).toBe("resumed"));
     expect(performed.map((payload) => JSON.parse(payload))).toEqual([
