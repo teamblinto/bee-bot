@@ -145,6 +145,19 @@ const credentialLines = {
   },
 };
 
+// A box keeps its own subscription login, which the Log in panel runs inside it. No terminal the
+// owner has can reach it, and on a server install there is none at all.
+export function boxLoginLine(
+  reason: NonNullable<Bot["pauseReason"]>,
+  accountId: string,
+  lane: EngineLane = "subscription",
+) {
+  if (reason !== "auth_failed" || lane !== "subscription") {
+    return undefined;
+  }
+  return `${accountId === "codex" ? "Codex" : "Claude"} isn't logged in for this bot. Log in, then Resume.`;
+}
+
 export function pauseLine(
   reason: NonNullable<Bot["pauseReason"]>,
   accountId: string,

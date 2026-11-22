@@ -2,6 +2,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import type { Bot } from "@beebot/contracts";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { CircleX, LoaderCircle, SquareTerminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -26,6 +27,9 @@ function LoginScreen({ botId, onStatus }: { botId: string; onStatus: (status: St
     const terminal = new Terminal({ cursorBlink: true, scrollback: 500, fontSize: 13 });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
+    // The login is a long URL wrapped over several rows: clicking beats selecting it by hand. The
+    // addon's default opens a blank window first, which the desktop app's window handler refuses.
+    terminal.loadAddon(new WebLinksAddon((_event, uri) => window.open(uri, "_blank", "noopener")));
     terminal.open(element);
     fit.fit();
     const socket = new WebSocket(terminalSocketUrl(botId, terminal.cols, terminal.rows));

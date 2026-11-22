@@ -2,6 +2,7 @@ import type { Connector, EngineStatus, MemoryItem, Run } from "@beebot/contracts
 import { expect, it } from "vite-plus/test";
 
 import {
+  boxLoginLine,
   changeLines,
   engineFix,
   folderName,
@@ -188,4 +189,13 @@ it("lets onboarding through on any version or an unknown login, but not a real p
   expect(fixFor({ auth: "unauthenticated", pauseReason: "auth_failed" })).toBe(
     "Claude isn't logged in",
   );
+});
+
+it("sends a boxed bot's lost login to its Log in panel, never to a terminal", () => {
+  expect(boxLoginLine("auth_failed", "claude")).toBe(
+    "Claude isn't logged in for this bot. Log in, then Resume.",
+  );
+  expect(boxLoginLine("auth_failed", "codex")).toMatch(/^Codex /);
+  expect(boxLoginLine("auth_failed", "claude", "api_key")).toBeUndefined();
+  expect(boxLoginLine("cli_failed", "claude")).toBeUndefined();
 });

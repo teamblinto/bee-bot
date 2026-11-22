@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 
-import { connectionLines, folderName, pauseLine, runLine } from "../labels";
+import { boxLoginLine, connectionLines, folderName, pauseLine, runLine } from "../labels";
 import {
   type ConnectionState,
   isActive,
@@ -235,8 +235,12 @@ export function ChatView({
   }, [bot.id, lastBotMessageId, seenId]);
 
   const empty = items.length === 0 && !active && !systemLine;
+  const boxLogin =
+    bot.boundary === "box" && bot.engineAccountId !== "fake" && bot.pauseReason
+      ? boxLoginLine(bot.pauseReason, bot.engineAccountId, account?.lane)
+      : undefined;
   const pauseNotice =
-    bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane);
+    boxLogin ?? (bot.pauseReason && pauseLine(bot.pauseReason, bot.engineAccountId, account?.lane));
   const notices = [
     status !== "connected" && connectionLines[status],
     pauseNotice,
@@ -360,6 +364,16 @@ export function ChatView({
               >
                 <Info {...iconProps} className="shrink-0 text-ink-secondary" />
                 <p className="flex-1 py-1">{notice}</p>
+                {notice === boxLogin && (
+                  <button
+                    type="button"
+                    className="button button-sm button-primary shrink-0"
+                    disabled={!connected}
+                    onClick={() => setLoginOpen(true)}
+                  >
+                    Log in
+                  </button>
+                )}
                 {notice === pauseNotice && (
                   <button
                     type="button"
