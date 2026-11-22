@@ -760,13 +760,15 @@ describe("a held call", () => {
   });
 
   it("spends none of its timeout asleep", async () => {
-    const { startTurn, nextCard, store, power } = await boot({ approvalTimeoutMs: 300 });
+    const { startTurn, nextCard, store, power, client } = await boot({ approvalTimeoutMs: 300 });
     const { permissions } = (await startTurn()).turn;
     const call = mcp(permissions, toolCall("Bash", { command }));
-    await nextCard();
+    const card = await nextCard();
     power("suspend");
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(store.state().approvals[0]).toMatchObject({ status: "pending" });
+    const later = Date.parse(client.cards()?.[0]?.expiresAt ?? "");
+    expect(later - Date.parse(card.expiresAt)).toBeGreaterThanOrEqual(300);
 
     power("resume");
     expect(await decisionOf(await call)).toMatchObject({ behavior: "deny" });

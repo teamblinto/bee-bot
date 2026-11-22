@@ -277,7 +277,7 @@ function accessAllows(access: BotAccess, tool: ApprovalTool, inside: boolean, ru
   );
 }
 
-type HeldCall = Omit<PendingApproval, "expiresAt"> & {
+type HeldCall = PendingApproval & {
   runId: string;
   botId: string;
   tool: ApprovalTool;
@@ -502,14 +502,26 @@ export function createApprovals({
     const digest = inputDigest(tool, input);
     const { id } = store.openApproval({ runId: run.id, botId: run.botId, tool, digest });
     return new Promise<Decision>((resolve) => {
+      // Stored, not derived per read: Date.now() and the awake clock are sampled apart, so a
+      // fresh reading drifts by a millisecond. It moves only when a sleep re-arms the timer.
+      const deadline = (leftMs: number) => new Date(Date.now() + leftMs).toISOString();
       const call: HeldCall = {
         ...fields,
         id,
+        expiresAt: deadline(timeoutMs),
         runId: run.id,
         botId: run.botId,
         tool,
         digest,
-        timer: awakeTimeout(clock, timeoutMs, () => settle(call, "denied", "timeout"), onChange),
+        timer: awakeTimeout(
+          clock,
+          timeoutMs,
+          () => settle(call, "denied", "timeout"),
+          () => {
+            call.expiresAt = deadline(call.timer.leftMs());
+            onChange();
+          },
+        ),
         resolve,
         updatedInput: input,
       };
@@ -692,12 +704,12 @@ export function createApprovals({
     },
 
     pending: (): PendingApproval[] =>
-      [...held.values()].map(({ id, detail, change, canAlwaysAllow, timer }) => ({
+      [...held.values()].map(({ id, detail, change, canAlwaysAllow, expiresAt }) => ({
         id,
         detail,
         change,
         canAlwaysAllow,
-        expiresAt: new Date(Date.now() + timer.leftMs()).toISOString(),
+        expiresAt,
       })),
 
     isHolding: (runId: string) => [...held.values()].some((call) => call.runId === runId),
