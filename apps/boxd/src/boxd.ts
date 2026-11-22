@@ -451,10 +451,28 @@ export function createBoxd(options: BoxdOptions) {
   // Outside the bound directory, so the bot never sees them: the hash each skill was written from.
   const sumsDir = (botId: string) => NodePath.join(stateDir, "bots", botId, "skill-sums");
 
+  // On a native host the box's user is not boxd's, so it reads what is bound in read-only through
+  // the other bits. They are set outright: the cell's UMask=0077 strips them from mkdir and writes.
+  async function shareDir(path: string) {
+    await NodeFs.mkdir(path, { recursive: true });
+    await NodeFs.chmod(path, 0o755);
+  }
+  async function shareTree(root: string) {
+    await NodeFs.chmod(root, 0o755);
+    for (const entry of await NodeFs.readdir(root, { recursive: true, withFileTypes: true })) {
+      if (entry.isDirectory() || entry.isFile()) {
+        await NodeFs.chmod(
+          NodePath.join(entry.parentPath, entry.name),
+          entry.isDirectory() ? 0o755 : 0o644,
+        );
+      }
+    }
+  }
+
   // The engine user must own its credential directory; boxd's own user is root in the box.
   async function engineBinds(botId: string, account: string | undefined): Promise<Bind[]> {
-    await NodeFs.mkdir(botDir(botId), { recursive: true, mode: 0o755 });
-    await NodeFs.mkdir(skillsDir(botId), { recursive: true, mode: 0o755 });
+    await shareDir(botDir(botId));
+    await shareDir(skillsDir(botId));
     const binds: Bind[] = [
       { source: botDir(botId), target: botDirTarget, readOnly: true },
       { source: skillsDir(botId), target: skillsTarget, readOnly: true },
@@ -659,9 +677,10 @@ export function createBoxd(options: BoxdOptions) {
 
   async function put(box: Box, name: string, content: string) {
     const dir = botDir(box.botId);
-    await NodeFs.mkdir(dir, { recursive: true, mode: 0o755 });
+    await shareDir(dir);
     const temp = NodePath.join(dir, `.${name}.${NodeCrypto.randomUUID()}`);
-    await NodeFs.writeFile(temp, content, { mode: 0o644 });
+    await NodeFs.writeFile(temp, content);
+    await NodeFs.chmod(temp, 0o644);
     await NodeFs.rename(temp, NodePath.join(dir, name));
   }
 
@@ -669,7 +688,7 @@ export function createBoxd(options: BoxdOptions) {
   async function keepSkills(box: Box, keep: { name: string; sha256: string }[]) {
     const dir = skillsDir(box.botId);
     const sums = sumsDir(box.botId);
-    await NodeFs.mkdir(dir, { recursive: true, mode: 0o755 });
+    await shareDir(dir);
     await NodeFs.mkdir(sums, { recursive: true, mode: 0o700 });
     const wanted = new Map(keep.map(({ name, sha256 }) => [name, sha256]));
     for (const name of await NodeFs.readdir(dir)) {
@@ -679,6 +698,8 @@ export function createBoxd(options: BoxdOptions) {
         await NodeFs.rm(NodePath.join(sums, name), { force: true });
       }
     }
+    // Skills kept from before this fix were written unreadable to the box.
+    await shareTree(dir);
     const present = new Set(await NodeFs.readdir(dir));
     return keep.filter(({ name }) => !present.has(name)).map(({ name }) => name);
   }
@@ -687,18 +708,19 @@ export function createBoxd(options: BoxdOptions) {
   async function writeSkill(box: Box, { name, sha256, files }: SkillCopy) {
     const dir = skillsDir(box.botId);
     const temp = NodePath.join(stateDir, "bots", box.botId, `skill-${NodeCrypto.randomUUID()}`);
-    await NodeFs.mkdir(dir, { recursive: true, mode: 0o755 });
+    await shareDir(dir);
     await NodeFs.mkdir(sumsDir(box.botId), { recursive: true, mode: 0o700 });
-    await NodeFs.mkdir(temp, { mode: 0o755 });
+    await NodeFs.mkdir(temp);
     try {
       for (const { path, data } of files) {
         const target = NodePath.resolve(temp, path);
         if (!skillPathSafe(path) || NodePath.relative(temp, target).startsWith("..")) {
           throw new Error("bad skill path");
         }
-        await NodeFs.mkdir(NodePath.dirname(target), { recursive: true, mode: 0o755 });
-        await NodeFs.writeFile(target, Buffer.from(data, "base64"), { mode: 0o644, flag: "wx" });
+        await NodeFs.mkdir(NodePath.dirname(target), { recursive: true });
+        await NodeFs.writeFile(target, Buffer.from(data, "base64"), { flag: "wx" });
       }
+      await shareTree(temp);
       await NodeFs.rm(NodePath.join(dir, name), { recursive: true, force: true });
       await NodeFs.rename(temp, NodePath.join(dir, name));
       await NodeFs.writeFile(NodePath.join(sumsDir(box.botId), name), sha256, { mode: 0o600 });

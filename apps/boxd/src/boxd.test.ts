@@ -125,6 +125,30 @@ describe("boxd", () => {
     });
   });
 
+  // A server cell runs boxd under UMask=0077, and a native box's user reads binds as "other".
+  it.skipIf(process.platform === "win32")(
+    "leaves what it binds into a box readable by the box's user under a strict umask",
+    async () => {
+      const umask = process.umask(0o077);
+      try {
+        const { call, stateDir } = harness();
+        await call("create");
+        await call("put", { put: { name: "persona.md", content: "You are Bee." } });
+        const sha256 = "a".repeat(64);
+        const files = [{ path: "ref/a.md", data: Buffer.from("x").toString("base64") }];
+        await call("skill", { skill: { name: "pdf", sha256, files } });
+        const bot = NodePath.join(stateDir, "bots", box.botId);
+        const mode = (path: string) => NodeFs.statSync(NodePath.join(bot, path)).mode & 0o777;
+        expect(mode("box")).toBe(0o755);
+        expect(mode("box/persona.md")).toBe(0o644);
+        expect(mode("skills/pdf/ref")).toBe(0o755);
+        expect(mode("skills/pdf/ref/a.md")).toBe(0o644);
+      } finally {
+        process.umask(umask);
+      }
+    },
+  );
+
   it("says whether an account's login exists, through podman's user namespace and with no box", async () => {
     const { call, fake, stateDir } = harness();
     expect(await call("login", { account: "../x" })).toMatchObject({ error: "bad account" });
