@@ -170,7 +170,8 @@ it("fences every process a cell can start, whatever its uid", () => {
   expect(fence).toContain(`meta skuid ${subids} jump cell`);
 });
 
-describe.skipIf(process.platform === "win32")("root never follows a cell's links", () => {
+// The helper runs only on a Linux host, and removeTree's guarantee is GNU rm's.
+describe.runIf(process.platform === "linux")("root never follows a cell's links", () => {
   const made: string[] = [];
   const scratch = () => {
     const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "provision-"));
