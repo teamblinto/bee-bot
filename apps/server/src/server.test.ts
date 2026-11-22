@@ -976,6 +976,8 @@ describe("restart", () => {
     expect(store.eventsAfter(0)).toEqual([]);
   });
 
+  // Every migration since v4, the search index backfill and a server start. On a loaded Windows
+  // runner the same work has taken from 1 to over 5 seconds, past the default timeout.
   it("migrates a v4 database and backfills its messages without losing any", async () => {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"), {
@@ -1046,7 +1048,7 @@ describe("restart", () => {
       { id: "s-new", tainted: 0 },
       { id: "s-old", tainted: 1 },
     ]);
-  });
+  }, 30_000);
 
   it("keeps events and does not reapply migrations", async () => {
     const before = await start();
