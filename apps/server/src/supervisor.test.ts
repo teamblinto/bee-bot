@@ -1210,6 +1210,7 @@ describe("fake engine", () => {
         skills: [],
         skillsDir: "/skills",
         connectors: [],
+        team: { self: "Ada", roster: [], rooms: [] },
       },
       onDelta: () => {},
       onToolStart: () => {},

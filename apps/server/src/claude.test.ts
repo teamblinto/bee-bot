@@ -48,6 +48,7 @@ const launch: BotLaunch = {
   skills: [],
   skillsDir: "/skills",
   connectors: [],
+  team: { self: "Ada", roster: [], rooms: [] },
 };
 const prompt = "the owner's private question";
 const permissions = { url: "http://127.0.0.1:9/mcp", token: "run-token-that-must-stay-secret" };

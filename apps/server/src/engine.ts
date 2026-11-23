@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { Decision } from "./approvals.ts";
 import { isWaitingMessage } from "./continuations.ts";
+import { oneLine } from "./memory.ts";
 import { type LaunchSkill, skillsText } from "./skills.ts";
 import type { WindowUpdate } from "./usage.ts";
 
@@ -40,7 +41,47 @@ export type BotLaunch = EngineChoice & {
   skillsDir: string;
   // Names of the outside apps granted to the bot. Any at all mounts the `connectors` MCP server.
   connectors: string[];
+  team: TeamInput;
 };
+
+export type TeamInput = {
+  self: string;
+  roster: Array<{
+    name: string;
+    summary: string | null;
+    status: "idle" | "working" | "paused";
+    tasks: number;
+  }>;
+  rooms: Array<{ id: string; name: string }>;
+};
+
+const maxRosterLines = 40;
+
+// Names, summaries and room names are owner or bot text: one line each, so none can add a line.
+export function teamBlock({ roster, rooms }: TeamInput) {
+  if (roster.length === 0 && rooms.length === 0) {
+    return "";
+  }
+  const members = roster
+    .slice(0, maxRosterLines)
+    .map(
+      ({ name, summary, status, tasks }) =>
+        `- @${name.replace(/\s+/g, "")} (${status}, ${tasks} tasks): ${oneLine(summary ?? "").trim() || "No summary yet."}`,
+    );
+  const more = roster.length - maxRosterLines;
+  return [
+    "Your team. Name a teammate with @ in a group room to wake them; in a DM it wakes no one.",
+    ...members,
+    ...(more > 0 ? [`- …and ${more} more.`] : []),
+    ...(rooms.length > 0
+      ? [
+          "Rooms you are in:",
+          ...rooms.map(({ id, name }) => `- ${oneLine(name).trim()} (room_id ${id})`),
+        ]
+      : []),
+    "To give a teammate work, call delegate and end your turn: the result comes back as a new message. If they are busy, the task waits in their queue. Use follow_up to ask about, answer, rework or cancel a task, and task_status to see where your tasks stand.",
+  ].join("\n");
+}
 
 // Beside Bee's own `/mcp`, with the same run token.
 export const connectorsUrl = (beeUrl: string) => new URL("/mcp/connectors", beeUrl).href;
@@ -90,6 +131,7 @@ export function personaText(launch: BotLaunch) {
     memory,
     skillsText(skills, skillsDir),
     connectorsNote(connectors),
+    teamBlock(launch.team),
     controlNotes[control],
 
     mode === "plan" ? planNote : "",

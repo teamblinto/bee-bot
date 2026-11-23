@@ -641,6 +641,7 @@ describe.skipIf(!available || !keyFile)(
           skills: [],
           skillsDir: "/skills",
           connectors: [],
+          team: { self: "Bee", roster: [], rooms: [] },
           projectPath: null,
           engineAccountId: "claude",
           lane: "api_key",

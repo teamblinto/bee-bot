@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   Approval,
   AttachmentRef,
+  activeTaskStatuses,
   type ApprovalTool,
   Bot,
   type BotAccess,
@@ -1179,6 +1180,25 @@ export function openEventStore(dataDir: string) {
     `SELECT ${botColumns} FROM bots b JOIN rooms r ON r.default_bot_id = b.id AND r.kind = 'dm'
      WHERE b.id = ?`,
   );
+  const selectRoster = db.prepare(
+    `SELECT DISTINCT b.name, b.summary,
+       CASE WHEN b.status = 'paused' THEN 'paused'
+         WHEN EXISTS (SELECT 1 FROM runs WHERE bot_id = b.id AND status = 'Running') THEN 'working'
+         ELSE 'idle' END AS status,
+       (SELECT COUNT(*) FROM tasks WHERE owner_bot_id = b.id
+         AND status IN (${activeTaskStatuses.map((status) => `'${status}'`).join(", ")})) AS tasks
+     FROM scopes mine
+       JOIN scopes other ON other.room_id = mine.room_id AND other.bot_id <> mine.bot_id
+         AND other.left_at IS NULL
+       JOIN bots b ON b.id = other.bot_id AND b.archived_at IS NULL
+     WHERE mine.bot_id = ? AND mine.left_at IS NULL ORDER BY b.rowid`,
+  );
+  const RosterRow = z.object({
+    name: z.string(),
+    summary: z.string().nullable(),
+    status: z.enum(["idle", "working", "paused"]),
+    tasks: z.number(),
+  });
   const insertBot = db.prepare(
     `INSERT INTO bots
      (id, name, personality, status, engine_account_id, model, access, avatar_seed, project_path,
@@ -3090,6 +3110,17 @@ export function openEventStore(dataDir: string) {
             connectors: connectors
               .connectorGrants(run.botId)
               .map(({ connector }) => connector.name),
+            team: {
+              self: name,
+              roster: z.array(RosterRow).parse(selectRoster.all(run.botId)),
+              rooms: rooms
+                .listRooms()
+                .flatMap(({ id: roomId, name: roomName, kind, members }) =>
+                  kind === "group" && members.includes(run.botId)
+                    ? [{ id: roomId, name: roomName ?? "Untitled room" }]
+                    : [],
+                ),
+            },
           },
         };
       }),

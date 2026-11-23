@@ -712,6 +712,47 @@ describe("group rooms", () => {
     expect(store.rooms.addMember(bot.roomId, ben.id)).toBeUndefined();
     expect(store.state().bots.map(({ id }) => id)).toEqual([bot.id, ben.id]);
   });
+
+  it("gives a run its roster and rooms", () => {
+    store = openEventStore(dataDir);
+    const { bot: ada, run } = parentRun(store);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const room = store.rooms.createGroupRoom({
+      name: "Team",
+      memberIds: [ada.id, ben.id],
+      defaultBotId: ada.id,
+    });
+    const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+    store.sendMessage({ id: crypto.randomUUID(), roomId: cy.roomId, body: "go", attended: true });
+    const wake = store.dueWakes(new Date().toISOString()).find((w) => w.botId === cy.id);
+    if (!wake) {
+      throw new Error("no wake");
+    }
+    store.queueRun(wake);
+    const cyRun = store.state().runs.find((r) => r.botId === cy.id);
+    store.tasks.createTask(
+      {
+        kind: "delegate",
+        chainId: "chain",
+        hop: 1,
+        depth: 1,
+        parentRunId: cyRun?.id ?? "",
+        requesterBotId: cy.id,
+        ownerBotId: ben.id,
+        roomId: cy.roomId,
+        goal: "Look it up",
+        deliveryKey: "k",
+        attended: true,
+      },
+      3,
+    );
+    const claimed = store.claimRun(run.id, "boot", new Date().toISOString());
+    expect(claimed?.launch.team).toEqual({
+      self: "Ada",
+      roster: [{ name: "Ben", summary: null, status: "idle", tasks: 1 }],
+      rooms: [{ id: room?.id, name: "Team" }],
+    });
+  });
 });
 
 describe("outbox", () => {

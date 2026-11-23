@@ -288,6 +288,7 @@ describe.skipIf(!haveCodex || !shell)("Codex in a box, in a hostile repo", () =>
         skills: [],
         skillsDir: "/skills",
         connectors: [],
+        team: { self: "Ada", roster: [], rooms: [] },
       },
       signal: AbortSignal.timeout(90_000),
       onDelta: () => {},
