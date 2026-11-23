@@ -156,8 +156,8 @@ describe("tasks", () => {
     const input = { ...taskInput(store, "k0"), ownerBotId: owner(store, "Ben") };
     const first = store.tasks.createTask(input, 3);
     expect(store.tasks.createTask(input, 3)).toEqual(first);
-    expect(store.tasks.createTask({ ...input, deliveryKey: "k1" }, 3)).toEqual({
-      refused: "target_busy",
+    expect(store.tasks.createTask({ ...input, deliveryKey: "k1" }, 3)).toMatchObject({
+      status: "queued",
     });
     const next = (key: string, name: string) =>
       open().tasks.createTask({ ...input, deliveryKey: key, ownerBotId: owner(open(), name) }, 3);
@@ -224,10 +224,221 @@ describe("tasks", () => {
       });
     expect(move(input.ownerBotId, ben)).toMatchObject({ ownerBotId: ben });
     expect(move(input.ownerBotId, cy)).toBeUndefined();
-    expect(move(ben, ben)).toEqual({ refused: "target_busy" });
+    expect(move(ben, ben)).toBeUndefined();
     expect(store.tasks.finishTask(task.id, "done")).toMatchObject({ status: "done" });
     expect(move(ben, cy)).toBeUndefined();
     expect(store.state().tasks).toEqual([]);
+  });
+});
+
+describe("the tasks_v2 migration", () => {
+  it("keeps tasks and the runs that point at them", () => {
+    const db = new DatabaseSync(dbPath());
+    migrate(
+      db,
+      migrations.findIndex(({ name }) => name === "tasks_v2"),
+    );
+    db.exec(`INSERT INTO bots (id, name, personality, status, created_at)
+        VALUES ('ada', 'Ada', '', 'ready', 'then'), ('ben', 'Ben', '', 'ready', 'then');
+      INSERT INTO rooms (id, default_bot_id, created_at) VALUES ('room', 'ada', 'then');
+      INSERT INTO scopes (id, room_id, bot_id) VALUES ('scope', 'room', 'ada');
+      INSERT INTO wakes (id, bot_id, scope_id, idempotency_key, attended, status, created_at)
+        VALUES ('w1', 'ada', 'scope', 'message:m1', 1, 'done', 'then');
+      INSERT INTO runs (id, bot_id, scope_id, wake_id, engine_account_id, status, created_at)
+        VALUES ('r1', 'ada', 'scope', 'w1', 'fake', 'Completed', 'then');
+      INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
+          owner_bot_id, room_id, goal, status, delivery_key, created_at, updated_at)
+        VALUES ('t1', 'delegate', 'chain', 1, 1, 'r1', 'ada', 'ben', 'room', 'Look', 'open', 'k1',
+          'then', 'then');
+      UPDATE runs SET task_id = 't1' WHERE id = 'r1';`);
+    db.close();
+
+    store = openEventStore(dataDir);
+    expect(store.state().tasks).toMatchObject([{ id: "t1", status: "open" }]);
+    const check = new DatabaseSync(dbPath());
+    expect(rows(check, "PRAGMA foreign_key_list(runs)")).toContainEqual(
+      expect.objectContaining({ table: "tasks", from: "task_id" }),
+    );
+    expect(rows(check, "PRAGMA foreign_key_check")).toEqual([]);
+    const insert = (id: string, status: string) =>
+      check.exec(`INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id,
+          requester_bot_id, owner_bot_id, room_id, goal, status, delivery_key, created_at,
+          updated_at)
+        VALUES ('${id}', 'delegate', 'chain', 1, 1, 'r1', 'ada', 'ben', 'room', 'Look',
+          '${status}', '${id}', 'then', 'then')`);
+    insert("t2", "queued");
+    expect(() => insert("t3", "bogus")).toThrow(/CHECK/);
+    check.close();
+  });
+});
+
+describe("task queue", () => {
+  const dueWake = (botId: string) => {
+    const wake = open()
+      .dueWakes(new Date().toISOString())
+      .find((w) => w.botId === botId);
+    if (!wake) {
+      throw new Error("no wake");
+    }
+    return wake;
+  };
+  const maybeRun = (botId: string) =>
+    open()
+      .state()
+      .runs.find((r) => r.botId === botId);
+  const latestRun = (botId: string) => {
+    const run = maybeRun(botId);
+    if (!run) {
+      throw new Error("no run");
+    }
+    return run;
+  };
+  const requester = (name: string) => {
+    const bot = open().createBot({ name, personality: "", engineAccountId: "fake" });
+    open().sendMessage({ id: crypto.randomUUID(), roomId: bot.roomId, body: "go", attended: true });
+    const wake = dueWake(bot.id);
+    open().queueRun(wake);
+    const check = new DatabaseSync(dbPath());
+    const [chain] = rows(check, `SELECT chain_id AS chainId FROM wakes WHERE id = '${wake.id}'`);
+    check.close();
+    return { bot, run: latestRun(bot.id), chainId: String(chain?.chainId) };
+  };
+  const delegate = (from: ReturnType<typeof requester>, to: string, chainId = "chain") => {
+    const task = open().tasks.createTask(
+      {
+        kind: "delegate",
+        chainId,
+        hop: 1,
+        depth: 1,
+        parentRunId: from.run.id,
+        requesterBotId: from.bot.id,
+        ownerBotId: to,
+        roomId: from.bot.roomId,
+        goal: `Goal from ${from.bot.name}`,
+        deliveryKey: crypto.randomUUID(),
+        attended: true,
+      },
+      3,
+    );
+    if ("refused" in task) {
+      throw new Error("refused");
+    }
+    return task;
+  };
+  const queueOwnerRun = (bot: { id: string; roomId: string }) => {
+    open().sendMessage({ id: crypto.randomUUID(), roomId: bot.roomId, body: "hi", attended: true });
+    open().queueRun(dueWake(bot.id));
+  };
+  const startRun = (botId: string) => {
+    if (maybeRun(botId)?.status !== "Queued") {
+      open().queueRun(dueWake(botId));
+    }
+    const id = latestRun(botId).id;
+    open().claimRun(id, "boot", new Date().toISOString());
+    return id;
+  };
+  const finish = (botId: string, status: "Completed" | "WaitingUser" = "Completed") => {
+    const running = maybeRun(botId);
+    const id = running?.status === "Running" ? running.id : startRun(botId);
+    open().finishRun(id, "boot", { status, reason: null, reply: "done" });
+  };
+  const statuses = () =>
+    open()
+      .state()
+      .tasks.map(({ id, status }) => ({ id, status }));
+  const dmBodies = (roomId: string) =>
+    open()
+      .state()
+      .messages.filter((m) => m.roomId === roomId && m.body.startsWith("Goal"))
+      .map(({ body }) => body);
+
+  it("queues a task for a busy bot and opens it when the bot's run ends", () => {
+    store = openEventStore(dataDir);
+    const ada = requester("Ada");
+    const cy = requester("Cy");
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const first = delegate(ada, ben.id);
+    const second = delegate(cy, ben.id);
+    expect([first.status, second.status]).toEqual(["open", "queued"]);
+    expect(dmBodies(ben.roomId)).toEqual(["Goal from Ada"]);
+
+    startRun(ben.id);
+    finish(ben.id);
+    expect(store.tasks.getTask(first.id)?.status).toBe("done");
+    expect(store.tasks.getTask(second.id)?.status).toBe("open");
+    expect(dmBodies(ben.roomId)).toEqual(["Goal from Ada", "Goal from Cy"]);
+    expect(store.dueWakes(new Date().toISOString()).map((w) => w.botId)).toContain(ben.id);
+  });
+
+  it("opens human-origin chains first, then oldest first", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    queueOwnerRun(ben);
+    const ada = requester("Ada");
+    const cy = requester("Cy");
+    const di = requester("Di");
+    const t1 = delegate(ada, ben.id, "no-human");
+    const t2 = delegate(cy, ben.id, cy.chainId);
+    const t3 = delegate(di, ben.id, di.chainId);
+    const opened: string[] = [];
+    for (let turn = 0; turn < 3; turn++) {
+      finish(ben.id);
+      const open = statuses().find(({ status }) => status === "open");
+      opened.push(open?.id ?? "none");
+    }
+    expect(opened).toEqual([t2.id, t3.id, t1.id]);
+  });
+
+  it("never opens a task on a bot with a Queued or Running run", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    queueOwnerRun(ben);
+    const task = delegate(requester("Ada"), ben.id);
+    expect(task.status).toBe("queued");
+    startRun(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("queued");
+    finish(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+  });
+
+  it("opens a queued task when the bot's run parks, if the bot owns no open task", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    queueOwnerRun(ben);
+    startRun(ben.id);
+    const task = delegate(requester("Ada"), ben.id);
+    expect(task.status).toBe("queued");
+    finish(ben.id, "WaitingUser");
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+  });
+
+  it("a refused run ends its task and opens the next", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const t1 = delegate(ada, ben.id);
+    const t2 = delegate(requester("Cy"), ben.id);
+    store.refuseWake(dueWake(ben.id), "bot_paused");
+    expect(store.tasks.getTask(t1.id)?.status).toBe("refused");
+    expect(store.tasks.getTask(t2.id)?.status).toBe("open");
+    const check = new DatabaseSync(dbPath());
+    expect(
+      rows(
+        check,
+        `SELECT idempotency_key AS key FROM wakes WHERE bot_id = '${ada.bot.id}' AND status = 'pending'`,
+      ),
+    ).toContainEqual({ key: `result:${t1.id}` });
+    check.close();
+  });
+
+  it("keeps queued tasks across a restart", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    delegate(requester("Ada"), ben.id);
+    delegate(requester("Cy"), ben.id);
+    store.close();
+    store = openEventStore(dataDir);
+    expect(store.state().tasks.map((t) => t.status)).toEqual(["open", "queued"]);
   });
 });
 

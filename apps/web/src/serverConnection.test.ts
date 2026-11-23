@@ -10,6 +10,7 @@ import type {
   Run,
   ServerEvent,
   ServerMessage,
+  Task,
 } from "@beebot/contracts";
 import { beforeAll, expect, it, vi } from "vite-plus/test";
 
@@ -220,6 +221,37 @@ it("reaches the same state by replay as by snapshot", () => {
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });
   expect(replayed).toEqual(snapshotted);
+});
+
+it("keeps queued and waiting tasks, and drops finished ones", () => {
+  const task = (status: Task["status"]): ServerEvent => ({
+    seq: 1,
+    createdAt: "now",
+    type: "task.changed",
+    task: {
+      id: "task",
+      kind: "delegate",
+      chainId: "chain",
+      hop: 1,
+      depth: 1,
+      parentRunId: "run",
+      requesterBotId: "bot",
+      ownerBotId: "ben",
+      roomId: "room",
+      goal: "Look it up",
+      status,
+      resultMessageId: null,
+      createdAt: "now",
+      updatedAt: "now",
+    },
+  });
+  const apply = (from: ConnectionState, status: Task["status"]) =>
+    applyServerMessage(from, { type: "event", event: { ...task(status), seq: from.seq + 1 } });
+  const queued = apply(state(0), "queued");
+  expect(queued.chat.tasks.map(({ status }) => status)).toEqual(["queued"]);
+  const waiting = apply(queued, "needs_input");
+  expect(waiting.chat.tasks.map(({ status }) => status)).toEqual(["needs_input"]);
+  expect(apply(waiting, "done").chat.tasks).toEqual([]);
 });
 
 it("reaches the same memories by replay as by snapshot, without superseded or forgotten items", () => {

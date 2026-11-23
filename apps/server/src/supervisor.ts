@@ -566,13 +566,14 @@ export function createSupervisor({
     pump,
     stopBot,
     syncClocks,
-    // Every chain ends here: parked runs and open tasks too, so nothing wakes back up after.
+    // Every chain ends here: parked runs and active tasks too, so nothing wakes back up after. Tasks
+    // go first, or a run's end would open the next queued one.
     stopAll: () => {
+      for (const task of store.tasks.activeTasks()) {
+        store.tasks.finishTask(task.id, "cancelled");
+      }
       for (const botId of store.botIds()) {
         stopBot(botId);
-      }
-      for (const task of store.tasks.openTasks()) {
-        store.tasks.finishTask(task.id, "cancelled");
       }
     },
     suspend: () => clock.suspend(),

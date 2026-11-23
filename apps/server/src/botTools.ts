@@ -319,7 +319,11 @@ export function callBotTool(
       if ("refused" in task) {
         return refused(task.refused);
       }
-      return answer({ status: "delegated", task_id: task.id, to: target.name, note: endTurn });
+      const queued = task.status === "queued";
+      const note = queued
+        ? `${target.name} is busy; the task starts when they are free. ${endTurn}`
+        : endTurn;
+      return answer({ status: "delegated", task_id: task.id, to: target.name, queued, note });
     }
     case "handoff": {
       const { data } = Handoff.safeParse(args);
@@ -369,7 +373,13 @@ export function callBotTool(
         return refused(task.refused);
       }
       const note = "You no longer own this work. End your turn now.";
-      return answer({ status: "handed_off", task_id: task.id, to: target.name, note });
+      return answer({
+        status: "handed_off",
+        task_id: task.id,
+        to: target.name,
+        queued: task.status === "queued",
+        note,
+      });
     }
     case "create_routine": {
       const { data } = CreateRoutine.safeParse(args);

@@ -848,6 +848,39 @@ export const migrations: Array<{
     UPDATE events SET payload = json_set(payload, '$.account.maxConcurrentRuns', 1)
       WHERE type = 'account.changed';`,
   },
+  {
+    name: "tasks_v2",
+    // The final status and kind sets: later phases only add columns. `runs.task_id` keeps pointing
+    // at `tasks` by name across the rebuild.
+    sql: `CREATE TABLE tasks_new (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('delegate', 'handoff', 'consult', 'meeting_action', 'board')),
+      chain_id TEXT NOT NULL,
+      hop INTEGER NOT NULL,
+      depth INTEGER NOT NULL,
+      parent_run_id TEXT REFERENCES runs (id),
+      requester_bot_id TEXT REFERENCES bots (id),
+      owner_bot_id TEXT NOT NULL REFERENCES bots (id),
+      room_id TEXT NOT NULL REFERENCES rooms (id),
+      goal TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'open', 'waiting', 'needs_input', 'done',
+        'refused', 'failed', 'cancelled')),
+      result_message_id TEXT REFERENCES messages (id),
+      delivery_key TEXT NOT NULL UNIQUE,
+      pending_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO tasks_new (rowid, id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
+        owner_bot_id, room_id, goal, status, result_message_id, delivery_key, created_at, updated_at)
+      SELECT rowid, id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id, owner_bot_id,
+        room_id, goal, status, result_message_id, delivery_key, created_at, updated_at FROM tasks;
+    DROP TABLE tasks;
+    ALTER TABLE tasks_new RENAME TO tasks;
+    CREATE INDEX tasks_by_parent_run ON tasks (parent_run_id);
+    CREATE INDEX tasks_active ON tasks (owner_bot_id)
+      WHERE status IN ('queued', 'open', 'waiting', 'needs_input');`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -2533,7 +2566,7 @@ export function openEventStore(dataDir: string) {
       connectors: connectors.listConnectors(),
       firings: z.array(RoutineFiring).parse(selectLatestFirings.all()),
       rooms: rooms.listRooms(),
-      tasks: tasks.openTasks(),
+      tasks: tasks.activeTasks(),
       noticeAcknowledgedAt: Settings.parse(selectSettings.get()).noticeAcknowledgedAt,
       boxes: boxes.listBoxes(),
       continuations: continuations.waitingContinuations(),
@@ -3135,6 +3168,8 @@ export function openEventStore(dataDir: string) {
         // A parked run resumes later, so its task is still being worked on.
         if (finished.status !== "WaitingUser" && finished.status !== "WaitingQuota") {
           tasks.settleRun(run, settledAs[finished.status], finished.reply ?? "");
+        } else {
+          tasks.promoteNextTask(run.botId);
         }
         if (finished.blockedUntil) {
           blockAccount.run(finished.blockedUntil, run.engineAccountId);
@@ -3384,6 +3419,7 @@ export function openEventStore(dataDir: string) {
             addWake(getScope(run.scopeId), `recover:${run.id}`, attended, "continue");
           } else {
             cancelPendingWakes.run(run.botId);
+            tasks.promoteNextTask(run.botId);
           }
         }
         // Their tool calls died with the old process, so no decision can reach them.

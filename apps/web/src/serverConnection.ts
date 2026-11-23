@@ -1,4 +1,5 @@
 import {
+  activeTaskStatuses,
   AttachmentRef,
   AuditPage,
   type Bot,
@@ -217,12 +218,11 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     case "room.changed":
       return { ...state, chat: { ...chat, rooms: upsert(chat.rooms, event.room) } };
     case "task.changed": {
-      // Snapshots hold open tasks only, and replay must land on the same state.
+      // Snapshots hold active tasks only, and replay must land on the same state.
       const { task } = event;
-      const tasks =
-        task.status === "open"
-          ? upsert(chat.tasks, task)
-          : chat.tasks.filter(({ id }) => id !== task.id);
+      const tasks = activeTaskStatuses.some((status) => status === task.status)
+        ? upsert(chat.tasks, task)
+        : chat.tasks.filter(({ id }) => id !== task.id);
       return { ...state, chat: { ...chat, tasks } };
     }
     case "box.changed": {

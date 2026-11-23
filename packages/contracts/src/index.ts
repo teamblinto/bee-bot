@@ -877,7 +877,7 @@ export const mentionKey = (name: string) => name.toLowerCase().replace(/\s+/g, "
 
 export const Task = z.object({
   id: z.string(),
-  kind: z.enum(["delegate", "handoff"]),
+  kind: z.enum(["delegate", "handoff", "consult", "meeting_action", "board"]),
   chainId: z.string(),
   hop: z.number(),
   depth: z.number(),
@@ -886,12 +886,22 @@ export const Task = z.object({
   ownerBotId: z.string(),
   roomId: z.string(),
   goal: z.string(),
-  status: z.enum(["open", "done", "refused", "failed", "cancelled"]),
+  status: z.enum([
+    "queued",
+    "open",
+    "waiting",
+    "needs_input",
+    "done",
+    "refused",
+    "failed",
+    "cancelled",
+  ]),
   resultMessageId: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Task = z.infer<typeof Task>;
+export const activeTaskStatuses = ["queued", "open", "waiting", "needs_input"] as const;
 
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
@@ -909,7 +919,7 @@ export const ChatState = z.object({
   // Only the latest of each routine. An open card always is its routine's latest.
   firings: z.array(RoutineFiring),
   rooms: z.array(Room),
-  // Open tasks only.
+  // Active tasks only.
   tasks: z.array(Task),
   noticeAcknowledgedAt: z.string().nullable(),
   boxes: z.array(BoxStatus),
