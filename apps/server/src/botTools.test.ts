@@ -525,6 +525,60 @@ describe("reaching a bot the owner mentioned", () => {
   });
 });
 
+describe("send_message routing", () => {
+  const groupId = () => store.state().rooms.find(({ kind }) => kind === "group")?.id ?? "";
+
+  it("wakes a roommate it names in a group room, and no one from a DM", () => {
+    openStore();
+    const [ada, ben] = team("Ada", "Ben");
+    if (!ada || !ben) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    const run = start(ada.id);
+
+    expect(
+      call(run, "send_message", { room_id: groupId(), text: "@Ben please check" }),
+    ).toMatchObject({ status: "sent" });
+    const benWakes = () =>
+      store.dueWakes(new Date().toISOString()).filter(({ botId }) => botId === ben.id);
+    const [wake] = benWakes();
+    expect(benWakes()).toHaveLength(1);
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    expect(db.prepare("SELECT source FROM wakes WHERE id = ?").get(wake?.id ?? "")).toEqual({
+      source: "mention",
+    });
+    db.close();
+
+    expect(call(run, "send_message", { text: "@Ben hi" })).toMatchObject({ status: "sent" });
+    expect(benWakes()).toHaveLength(1);
+  });
+
+  it("spends the room's post budget like a final reply", () => {
+    openStore();
+    const [ada, ben] = team("Ada", "Ben");
+    if (!ada || !ben) {
+      throw new Error("no team");
+    }
+    const group = groupId();
+    say(group, "@Ada start");
+    const adaRun = start(ada.id);
+    expect(call(adaRun, "send_message", { text: "@Ben go" })).toMatchObject({ status: "sent" });
+    finish(adaRun.id, "Done.");
+
+    const benRun = start(ben.id);
+    for (const text of ["One.", "Two."]) {
+      expect(call(benRun, "send_message", { room_id: group, text })).toMatchObject({
+        status: "sent",
+      });
+    }
+    expect(call(benRun, "send_message", { room_id: group, text: "Three." })).toMatchObject({
+      status: "refused",
+      reason: "post_budget",
+    });
+  });
+});
+
 describe("share_file", () => {
   const box = (chunks: Iterable<Buffer>, code = 0) =>
     vi.fn(async () => ({

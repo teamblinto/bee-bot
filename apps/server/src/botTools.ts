@@ -221,8 +221,10 @@ export function callBotTool(
       if (!data) {
         return malformed(name);
       }
-      const id = store.tasks.postFrom(from, data.room_id ?? grant.roomId, "message", data.text);
-      return id ? answer({ status: "sent", message_id: id }) : refused("not_in_room");
+      const sent = store.sendBotMessage(run.id, data.room_id ?? grant.roomId, data.text);
+      return "refused" in sent
+        ? refused(sent.refused)
+        : answer({ status: "sent", message_id: sent.messageId });
     }
     case "notify": {
       const { data } = Notify.safeParse(args);

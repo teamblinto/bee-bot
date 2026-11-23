@@ -374,7 +374,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     postFrom: (
       from: { botId: string } & ChainPoint,
       roomId: string,
-      via: Exclude<Via, "delegate" | "handoff" | "result">,
+      via: Exclude<Via, "delegate" | "handoff" | "result" | "message">,
       body: string,
     ) =>
       transaction(() => {

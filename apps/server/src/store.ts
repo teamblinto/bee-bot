@@ -3248,6 +3248,52 @@ export function openEventStore(dataDir: string) {
         }
       }),
 
+    // Mid-turn, a group post routes and spends the round as a final reply does. A DM never routes.
+    sendBotMessage: (runId: string, roomId: string, body: string) =>
+      transaction(
+        (): { messageId: string } | { refused: "run_ended" | "not_in_room" | "post_budget" } => {
+          const row = selectRun.get(runId);
+          const run = row && RunRow.parse(row);
+          if (!run || run.status !== "Running") {
+            return { refused: "run_ended" };
+          }
+          if (!selectScopeForBot.get(roomId, run.botId)) {
+            return { refused: "not_in_room" };
+          }
+          const now = new Date().toISOString();
+          const group = isGroup(roomId);
+          if (
+            group &&
+            run.hop > 0 &&
+            checkBotPost(limits(), { ...rooms.round(roomId), now }).verdict === "refuse"
+          ) {
+            return { refused: "post_budget" };
+          }
+          const message: ChatMessage = {
+            id: `message:${NodeCrypto.randomUUID()}`,
+            roomId,
+            author: "bot",
+            body,
+            tools: [],
+            workedMs: null,
+            botId: run.botId,
+            replyToId: null,
+            chainId: run.chainId ?? run.id,
+            hop: run.hop,
+            attachments: [],
+            createdAt: now,
+          };
+          addMessage(message);
+          if (group) {
+            if (run.hop > 0) {
+              rooms.countBotPost(roomId, now);
+            }
+            routeBotReply(message, run);
+          }
+          return { messageId: message.id };
+        },
+      ),
+
     clearExpiredBlocks: (now: string) =>
       transaction(() => {
         for (const row of unblockExpired.all(now)) {
