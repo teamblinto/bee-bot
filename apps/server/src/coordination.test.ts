@@ -648,6 +648,50 @@ describe("limits", () => {
   });
 });
 
+describe("no-progress runs", () => {
+  it("counts turns that neither post nor use a tool, and resets on progress", () => {
+    store = openEventStore(dataDir);
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const roomId = store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.id, ben.id] })?.id;
+    const turn = (tools: { name: string; detail: null; failed: boolean }[]) => {
+      open().sendMessage({
+        id: crypto.randomUUID(),
+        roomId: roomId ?? "",
+        body: "@Ada hi",
+        attended: true,
+      });
+      const wake = open()
+        .dueWakes(new Date().toISOString())
+        .find((w) => w.botId === ada.id);
+      if (!wake) {
+        throw new Error("no wake");
+      }
+      open().queueRun(wake);
+      const run = open()
+        .state()
+        .runs.find((r) => r.botId === ada.id && r.status === "Queued");
+      open().claimRun(run?.id ?? "", "boot", new Date().toISOString());
+      open().finishRun(run?.id ?? "", "boot", {
+        status: "Completed",
+        reason: null,
+        reply: "NO_RESPONSE",
+        tools,
+      });
+      const check = new DatabaseSync(dbPath());
+      const [scope] = rows(
+        check,
+        `SELECT no_progress_runs AS n FROM scopes WHERE room_id = '${roomId}' AND bot_id = '${ada.id}'`,
+      );
+      check.close();
+      return scope?.n;
+    };
+    expect(turn([])).toBe(1);
+    expect(turn([])).toBe(2);
+    expect(turn([{ name: "Read", detail: null, failed: false }])).toBe(0);
+  });
+});
+
 describe("group rooms", () => {
   it("keeps a member's history when they leave, and lets them back", () => {
     store = openEventStore(dataDir);

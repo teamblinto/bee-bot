@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  backoffUntil,
   checkBotPost,
   checkDelegation,
   checkMentionWake,
@@ -112,6 +113,22 @@ describe("noProgressDelay", () => {
 
   it("never holds a human's input", () => {
     expect(noProgressDelay({ noProgressRuns: 5, source: "human" })).toBe(0);
+  });
+});
+
+describe("backoffUntil", () => {
+  it("holds a wake after repeated no-progress turns, never a human's", () => {
+    const input = {
+      noProgressRuns: 2,
+      source: "task" as const,
+      lastEndedAt: startedAt,
+      now: at(minute),
+    };
+    expect(backoffUntil(input)).toBe(at(2 * minute));
+    expect(backoffUntil({ ...input, now: at(3 * minute) })).toBeNull();
+    expect(backoffUntil({ ...input, source: "human" })).toBeNull();
+    expect(backoffUntil({ ...input, lastEndedAt: null })).toBeNull();
+    expect(backoffUntil({ ...input, noProgressRuns: 3 })).toBe(at(4 * minute));
   });
 });
 

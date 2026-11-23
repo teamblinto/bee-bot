@@ -8,6 +8,7 @@ import { BoxLimitReached } from "./boxRuntime.ts";
 import { recoverTakeovers } from "./browser.ts";
 import { outcomeText } from "./continuations.ts";
 import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
+import { backoffUntil } from "./limits.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
@@ -203,14 +204,27 @@ export function createSupervisor({
   }
 
   function settleWake(wake: Wake, now: string) {
-    const { hasActiveRun, hasInput, boundary, bothClaudeCredentials, ...admission } =
-      store.wakeContext(wake, now);
+    const {
+      hasActiveRun,
+      hasInput,
+      boundary,
+      bothClaudeCredentials,
+      source,
+      noProgressRuns,
+      lastEndedAt,
+      ...admission
+    } = store.wakeContext(wake, now);
     if (hasActiveRun) {
       return;
     }
     // Everything this wake was for was already answered by a run that started after it.
     if (!hasInput) {
       store.closeWake(wake.id);
+      return;
+    }
+    const until = backoffUntil({ noProgressRuns, source, lastEndedAt, now });
+    if (until) {
+      store.deferWake(wake.id, until);
       return;
     }
     if (boxOnly && boundary !== "box") {

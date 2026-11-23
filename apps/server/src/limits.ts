@@ -82,6 +82,17 @@ export function noProgressDelay(input: { noProgressRuns: number; source: WakeSou
   return Math.min(2 * minute * 2 ** (input.noProgressRuns - 2), 30 * minute);
 }
 
+export function backoffUntil(input: {
+  noProgressRuns: number;
+  source: WakeSource;
+  lastEndedAt: string | null;
+  now: string;
+}): string | null {
+  if (input.lastEndedAt === null) return null;
+  const until = Date.parse(input.lastEndedAt) + noProgressDelay(input);
+  return until > Date.parse(input.now) ? new Date(until).toISOString() : null;
+}
+
 // One tracker per run. Refuses with `repeated_failure` on the 6th identical failing call.
 export function trackFailures(): (call: ToolCall) => Verdict {
   let last: string | null = null;

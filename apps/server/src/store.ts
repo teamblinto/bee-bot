@@ -934,6 +934,11 @@ const RowId = z.object({ rowid: z.number() });
 const Tainted = z.object({ tainted: z.number().transform(Boolean) });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
 const Count = z.object({ count: z.number() });
+const Progress = z.object({
+  noProgressRuns: z.number(),
+  lastEndedAt: z.string().nullable(),
+  source: WakeSource,
+});
 const QueuedRun = z.object({ id: z.string(), botId: z.string(), engineAccountId: z.string() });
 const UsageCheck = z.object({
   accountId: z.string(),
@@ -1462,6 +1467,15 @@ export function openEventStore(dataDir: string) {
   );
   const selectActiveRun = db.prepare(
     `SELECT ${runColumns} FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
+  );
+  const selectProgress = db.prepare(
+    `SELECT s.no_progress_runs AS noProgressRuns,
+       (SELECT MAX(ended_at) FROM runs WHERE scope_id = s.id) AS lastEndedAt,
+       (SELECT source FROM wakes WHERE id = ?) AS source
+     FROM scopes s WHERE s.id = ?`,
+  );
+  const countProgress = db.prepare(
+    "UPDATE scopes SET no_progress_runs = CASE WHEN ? THEN 0 ELSE no_progress_runs + 1 END WHERE id = ?",
   );
   const countRecentRuns = db.prepare(
     `SELECT COUNT(*) AS count FROM runs
@@ -2975,6 +2989,7 @@ export function openEventStore(dataDir: string) {
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
         spentThisMonthUsd: spentSince(monthStart(now)),
+        ...Progress.parse(selectProgress.get(wake.id, wake.scopeId)),
       };
     },
     recordSpend: (runId: string, costUsd: number) => {
@@ -3140,8 +3155,9 @@ export function openEventStore(dataDir: string) {
           return;
         }
         const run = RunRow.parse(row);
+        const { roomId } = getScope(run.scopeId);
+        let posted = false;
         if (finished.status === "Completed" || finished.status === "WaitingUser") {
-          const { roomId } = getScope(run.scopeId);
           const body = finished.reply ?? "";
           const group = isGroup(roomId);
           const replied = finished.status === "Completed";
@@ -3157,6 +3173,7 @@ export function openEventStore(dataDir: string) {
             run.hop > 0 &&
             checkBotPost(limits(), { ...rooms.round(roomId), now }).verdict === "refuse";
           if (!silent && !gated) {
+            posted = true;
             const attachments = (finished.attachmentIds ?? []).flatMap(
               (id) => attachmentStore.claimable(roomId, [id]) ?? [],
             );
@@ -3194,6 +3211,12 @@ export function openEventStore(dataDir: string) {
         endAttempt(run, finished, now);
         // A parked run resumes later, so its task is still being worked on.
         if (finished.status !== "WaitingUser" && finished.status !== "WaitingQuota") {
+          const progressed =
+            (finished.tools ?? []).some((t) => !t.failed) ||
+            posted ||
+            (run.startedAt !== null &&
+              selectPostedSince.get(roomId, run.botId, run.startedAt) !== undefined);
+          countProgress.run(progressed ? 1 : 0, run.scopeId);
           tasks.settleRun(run, settledAs[finished.status], finished.reply ?? "");
         } else {
           tasks.promoteNextTask(run.botId);
