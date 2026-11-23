@@ -90,6 +90,9 @@ function BotRow({
   const lastBotMessage = messages.findLast(({ author }) => author === "bot");
   const unread = !selected && lastBotMessage && lastBotMessage.id !== lastSeen[bot.id];
   const state = botState(bot, waiting, connection);
+  const queued = chat.tasks.filter(
+    ({ ownerBotId, status }) => ownerBotId === bot.id && status === "queued",
+  ).length;
 
   return (
     <button
@@ -102,6 +105,9 @@ function BotRow({
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex items-center gap-1">
           <span className="flex-1 truncate text-body-s font-medium">{bot.name}</span>
+          {queued > 0 && (
+            <span className="shrink-0 text-caption text-ink-secondary">{queued} queued</span>
+          )}
           {last && (
             <span className="shrink-0 text-caption text-ink-secondary tabular-nums">
               {shortTime(last.createdAt)}

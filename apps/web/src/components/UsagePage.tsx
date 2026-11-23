@@ -31,11 +31,12 @@ import { iconProps } from "./ui";
 import { Avatar } from "./Avatar";
 import { BoxesPanel } from "./BoxesPanel";
 import { ConnectorsPanel } from "./ConnectorsPanel";
+import { TeamPanel } from "./TeamPanel";
 import { Tooltip } from "./Tooltip";
 import { VaultPanel } from "./VaultPanel";
 
 type Metric = "tokens" | "cost";
-type View = "limits" | "usage" | "keys";
+type View = "limits" | "usage" | "keys" | "team";
 
 const periods = [
   { days: 1, label: "Past 24h" },
@@ -48,6 +49,7 @@ const views: ReadonlyArray<{ value: View; label: string }> = [
   { value: "limits", label: "Limits" },
   { value: "usage", label: "Usage" },
   { value: "keys", label: "Keys and boxes" },
+  { value: "team", label: "Team" },
 ];
 
 const paceLabels: Record<LimitPace, string> = {
@@ -693,6 +695,7 @@ export function UsagePage({
               <ConnectorsPanel chat={chat} />
             </div>
           )}
+          {view === "team" && <TeamPanel chat={chat} />}
           {view === "usage" && loading && !summary && <UsageSkeleton />}
           {view === "usage" && summary?.status === "unavailable" && (
             <p className="py-10 text-center text-body-s text-ink-secondary">
