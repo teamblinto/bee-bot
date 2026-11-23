@@ -1487,3 +1487,67 @@ describe("routines", () => {
     expect(count("routines")).toBe(0);
   });
 });
+
+describe("no-progress backoff", () => {
+  // Ada has made no progress twice, and Ben's reply names her: a mention wake she must sit out.
+  function heldMention() {
+    const store = openEventStore(dataDir);
+    const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const roomId = store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.id, ben.id] })?.id;
+    const ask = (body: string) =>
+      store.sendMessage({
+        id: NodeCrypto.randomUUID(),
+        roomId: roomId ?? "",
+        body,
+        attended: true,
+      });
+    const turn = (bot: Bot, replyText: string) => {
+      const wake = store.dueWakes(new Date().toISOString()).find((w) => w.botId === bot.id);
+      if (wake) {
+        store.queueRun(wake);
+      }
+      const runId = store.queuedRuns().find((r) => r.botId === bot.id)?.id ?? "";
+      store.claimRun(runId, "boot", new Date().toISOString());
+      store.finishRun(runId, "boot", {
+        status: "Completed",
+        reason: null,
+        reply: replyText,
+        tools: [],
+      });
+    };
+    ask("@Ben go");
+    ask("@Ada hi");
+    turn(ada, "NO_RESPONSE");
+    ask("@Ada hi");
+    turn(ada, "NO_RESPONSE");
+    turn(ben, "@Ada look");
+    store.close();
+    return { ada, roomId: roomId ?? "" };
+  }
+  const heldUntil = () =>
+    query("SELECT not_before AS until FROM wakes WHERE status = 'pending'")[0]?.until;
+
+  it("holds a bot's wake that no human asked for", async () => {
+    heldMention();
+    const engine = scriptedEngine();
+    await boot(engine.runTurn);
+    await vi.waitFor(() => expect(heldUntil()).toBeTypeOf("string"));
+    expect(engine.turns).toHaveLength(0);
+  });
+
+  it("lets a human's message through a held wake it joins", async () => {
+    const { roomId } = heldMention();
+    const engine = scriptedEngine();
+    const booted = await boot(engine.runTurn);
+    await vi.waitFor(() => expect(heldUntil()).toBeTypeOf("string"));
+    await booted.command({
+      type: "send-message",
+      messageId: NodeCrypto.randomUUID(),
+      roomId,
+      body: "@Ada now",
+    });
+    await expectTurns(engine, 1);
+    expect(pendingWakes()).toBe(0);
+  });
+});

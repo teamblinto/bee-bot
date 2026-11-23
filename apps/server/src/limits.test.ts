@@ -127,6 +127,7 @@ describe("backoffUntil", () => {
     expect(backoffUntil(input)).toBe(at(2 * minute));
     expect(backoffUntil({ ...input, now: at(3 * minute) })).toBeNull();
     expect(backoffUntil({ ...input, source: "human" })).toBeNull();
+    expect(backoffUntil({ ...input, source: "approval" })).toBeNull();
     expect(backoffUntil({ ...input, lastEndedAt: null })).toBeNull();
     expect(backoffUntil({ ...input, noProgressRuns: 3 })).toBe(at(4 * minute));
   });

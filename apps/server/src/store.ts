@@ -1404,6 +1404,7 @@ export function openEventStore(dataDir: string) {
   );
   const markWakeDone = db.prepare("UPDATE wakes SET status = 'done' WHERE id = ?");
   const setWakeNotBefore = db.prepare("UPDATE wakes SET not_before = ? WHERE id = ?");
+  const releaseWake = db.prepare("UPDATE wakes SET not_before = NULL WHERE id = ?");
   const cancelPendingWakes = db.prepare(
     "UPDATE wakes SET status = 'done' WHERE bot_id = ? AND status = 'pending'",
   );
@@ -1468,11 +1469,15 @@ export function openEventStore(dataDir: string) {
   const selectActiveRun = db.prepare(
     `SELECT ${runColumns} FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
   );
+  // A wake a human's message joined after the last run counts as theirs, so it is never held.
   const selectProgress = db.prepare(
-    `SELECT s.no_progress_runs AS noProgressRuns,
-       (SELECT MAX(ended_at) FROM runs WHERE scope_id = s.id) AS lastEndedAt,
-       (SELECT source FROM wakes WHERE id = ?) AS source
-     FROM scopes s WHERE s.id = ?`,
+    `SELECT s.no_progress_runs AS noProgressRuns, r.lastEndedAt,
+       CASE WHEN r.lastEndedAt IS NULL OR EXISTS (
+         SELECT 1 FROM messages m
+         WHERE m.room_id = s.room_id AND m.author = 'human' AND m.created_at > r.lastEndedAt
+       ) THEN 'human' ELSE (SELECT source FROM wakes WHERE id = ?) END AS source
+     FROM scopes s, (SELECT MAX(ended_at) AS lastEndedAt FROM runs WHERE scope_id = ?) r
+     WHERE s.id = ?`,
   );
   const countProgress = db.prepare(
     "UPDATE scopes SET no_progress_runs = CASE WHEN ? THEN 0 ELSE no_progress_runs + 1 END WHERE id = ?",
@@ -2061,8 +2066,12 @@ export function openEventStore(dataDir: string) {
       }
       const row = selectScopeForBot.get(roomId, botId);
       const scope = row ? Scope.parse(row) : undefined;
-      if (scope && !selectPendingWake.get(scope.id, attended ? 1 : 0)) {
+      const pending = scope && selectPendingWake.get(scope.id, attended ? 1 : 0);
+      if (scope && !pending) {
         addWake(scope, `${key}:${botId}`, attended, source, chain);
+      } else if (pending && source !== "mention") {
+        // A human's message joins the held wake, and their input never waits.
+        releaseWake.run(IdRow.parse(pending).id);
       }
     }
   }
@@ -2130,8 +2139,11 @@ export function openEventStore(dataDir: string) {
       addMessage(message, mentions);
       attachmentStore.claim(message.id, room.id, attachmentIds);
       resumeRoutines();
-      if (!selectPendingWake.get(scope.id, input.attended ? 1 : 0)) {
+      const pending = selectPendingWake.get(scope.id, input.attended ? 1 : 0);
+      if (!pending) {
         addWake(scope, `message:${input.id}`, input.attended, source, chain);
+      } else {
+        releaseWake.run(IdRow.parse(pending).id);
       }
       return "sent";
     }
@@ -2989,7 +3001,7 @@ export function openEventStore(dataDir: string) {
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
         spentThisMonthUsd: spentSince(monthStart(now)),
-        ...Progress.parse(selectProgress.get(wake.id, wake.scopeId)),
+        ...Progress.parse(selectProgress.get(wake.id, wake.scopeId, wake.scopeId)),
       };
     },
     recordSpend: (runId: string, costUsd: number) => {

@@ -76,9 +76,9 @@ export function checkBotPost(
   return input.botPosts >= limits.posts ? refuse("post_budget") : allow;
 }
 
-// Milliseconds to hold the wake, 0 for none. A human's input never waits.
+// Milliseconds to hold the wake, 0 for none. A human's input, an approval among it, never waits.
 export function noProgressDelay(input: { noProgressRuns: number; source: WakeSource }): number {
-  if (input.source === "human" || input.noProgressRuns < 2) return 0;
+  if (input.source === "human" || input.source === "approval" || input.noProgressRuns < 2) return 0;
   return Math.min(2 * minute * 2 ** (input.noProgressRuns - 2), 30 * minute);
 }
 
