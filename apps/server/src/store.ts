@@ -2460,6 +2460,8 @@ export function openEventStore(dataDir: string) {
       }),
     wake: (scopeId, key, attended, chain) =>
       addWake(getScope(scopeId), key, attended, "task", chain),
+    unanswered: (scopeId) =>
+      unackedInput(getScope(scopeId)).some(({ author }) => author === "human"),
   });
   const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
   const boxes = openBoxes(db, tx);

@@ -340,7 +340,7 @@ describe("task queue", () => {
   };
   const finish = (
     botId: string,
-    status: "Completed" | "WaitingUser" | "WaitingQuota" = "Completed",
+    status: "Completed" | "WaitingUser" | "WaitingQuota" | "Failed" = "Completed",
     extra: { reply?: string; blockedUntil?: string } = {},
   ) => {
     const running = maybeRun(botId);
@@ -599,6 +599,48 @@ describe("task queue", () => {
     finish(ben.id, "Completed", { reply: `About ${secret}` });
     expect(store.tasks.getTask(task.id)?.status).toBe("open");
     finish(ben.id);
+    expect(leaked(ada.bot.roomId)).toBe(false);
+  });
+
+  it("keeps a task queued while a failed run left the owner's DM unanswered", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    ownerAsks(ben);
+    finish(ben.id, "Failed");
+    const ada = requester("Ada");
+    const task = delegate(ada, ben.id);
+    expect(task.status).toBe("queued");
+
+    open().sendMessage({
+      id: crypto.randomUUID(),
+      roomId: ben.roomId,
+      body: "retry",
+      attended: true,
+    });
+    finish(ben.id, "Completed", { reply: `About ${secret}` });
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    finish(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("done");
+    expect(leaked(ada.bot.roomId)).toBe(false);
+  });
+
+  it("keeps a task queued while the owner's DM waits for its first run", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    open().sendMessage({
+      id: crypto.randomUUID(),
+      roomId: ben.roomId,
+      body: secret,
+      attended: true,
+    });
+    const ada = requester("Ada");
+    const task = delegate(ada, ben.id);
+    expect(task.status).toBe("queued");
+
+    finish(ben.id, "Completed", { reply: `About ${secret}` });
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    finish(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("done");
     expect(leaked(ada.bot.roomId)).toBe(false);
   });
 
