@@ -90,12 +90,11 @@ export function TeamPanel({ chat }: { chat: ChatState }) {
                   className={numberClass}
                   defaultValue={account.maxConcurrentRuns}
                   onChange={(event) => {
-                    const value = event.target.valueAsNumber;
-                    if (Number.isInteger(value)) {
+                    if (event.target.value !== "" && event.target.validity.valid) {
                       void sendCommand({
                         type: "set-account-concurrency",
                         accountId: EngineAccountId.parse(account.id),
-                        maxConcurrentRuns: value,
+                        maxConcurrentRuns: event.target.valueAsNumber,
                       });
                     }
                   }}
