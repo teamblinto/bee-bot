@@ -104,6 +104,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectUnstarted = db.prepare(
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'open'
        AND id NOT IN (SELECT task_id FROM runs WHERE task_id IS NOT NULL
+         AND bot_id = tasks.owner_bot_id
          AND status IN ('Queued', 'Running', 'WaitingUser', 'WaitingQuota'))
      ORDER BY rowid`,
   );

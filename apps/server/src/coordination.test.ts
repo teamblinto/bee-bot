@@ -513,6 +513,35 @@ describe("task queue", () => {
     expect(delegate(requester("Cy"), ben.id).status).toBe("open");
   });
 
+  it("stopping a bot ends a task handed to it while the handing run is still live", () => {
+    store = openEventStore(dataDir);
+    const ann = store.createBot({ name: "Ann", personality: "", engineAccountId: "fake" });
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const task = delegate(ada, ann.id);
+    startRun(ann.id);
+    const moved = store.tasks.handoff(task.id, {
+      fromBotId: ann.id,
+      toBotId: ben.id,
+      hop: 2,
+      note: "yours",
+    });
+    expect(moved?.status).toBe("open");
+    const results = () =>
+      open()
+        .state()
+        .messages.filter((m) => m.roomId === ada.bot.roomId && m.id.startsWith("result:")).length;
+
+    store.stopBot(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(results()).toBe(1);
+
+    finish(ann.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(results()).toBe(1);
+    expect(delegate(requester("Cy"), ben.id).status).toBe("open");
+  });
+
   it("opens a queued task when a run interrupted at boot is held", () => {
     store = openEventStore(dataDir);
     const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
