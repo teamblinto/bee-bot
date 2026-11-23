@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 41;
+export const protocolVersion = 42;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -266,6 +266,7 @@ export const EngineAccount = z.object({
   label: z.string(),
   lane: EngineLane,
   blockedUntil: z.string().nullable(),
+  maxConcurrentRuns: z.number().int(),
 });
 export type EngineAccount = z.infer<typeof EngineAccount>;
 
@@ -1318,6 +1319,11 @@ export const Command = z.discriminatedUnion("type", [
     type: z.literal("set-account-lane"),
     engineAccountId: EngineAccountId,
     lane: EngineLane,
+  }),
+  z.object({
+    type: z.literal("set-account-concurrency"),
+    accountId: EngineAccountId,
+    maxConcurrentRuns: z.number().int(),
   }),
   z.object({ type: z.literal("continue-run"), runId: z.uuid() }),
   z.object({

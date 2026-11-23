@@ -43,7 +43,7 @@ const overBudget = ({ engine, lane, monthlyBudgetUsd, spentThisMonthUsd }: Admis
   monthlyBudgetUsd !== null &&
   (engine === "codex" || spentThisMonthUsd >= monthlyBudgetUsd);
 
-// Concurrency 1 per account is not decided here: a Queued run simply isn't claimable yet.
+// Account concurrency is not decided here: a Queued run simply isn't claimable yet.
 export function admit(admission: Admission) {
   const { attended, botStatus, runsInLastDay, blockedUntil, now } = admission;
   const refusal = attended ? null : unattendedRefusal(admission);

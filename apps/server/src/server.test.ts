@@ -592,6 +592,20 @@ describe("engine status", () => {
   });
 });
 
+describe("account concurrency", () => {
+  it("clamps the owner's value to 1..8", async () => {
+    const { base, store } = await start();
+    const setMax = (maxConcurrentRuns: number) =>
+      command(base, { type: "set-account-concurrency", accountId: "claude", maxConcurrentRuns });
+    const max = () => store.state().accounts.find(({ id }) => id === "claude")?.maxConcurrentRuns;
+    expect((await setMax(99)).status).toBe(200);
+    expect(max()).toBe(8);
+    expect((await setMax(0)).status).toBe(200);
+    expect(max()).toBe(1);
+    expect((await setMax(1.5)).status).toBe(400);
+  });
+});
+
 describe("the notice", () => {
   it("stores the first acknowledgement only, with one event", async () => {
     const { base, store } = await start();

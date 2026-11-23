@@ -1235,6 +1235,10 @@ export async function startServer({
         store.setAccountLane(command.engineAccountId, command.lane);
         supervisor.pump();
         return ok;
+      case "set-account-concurrency":
+        store.setAccountConcurrency(command.accountId, command.maxConcurrentRuns);
+        supervisor.pump();
+        return ok;
       case "continue-run": {
         const result = store.continueRun(command.runId, attended);
         if (result === "not_found") {

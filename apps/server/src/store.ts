@@ -841,6 +841,13 @@ export const migrations: Array<{
     sql: `ALTER TABLE runs ADD COLUMN lane TEXT;
     CREATE INDEX runs_account_ended ON runs (engine_account_id, ended_at);`,
   },
+  {
+    name: "account_concurrency",
+    sql: `DROP INDEX runs_one_running_per_account;
+    ALTER TABLE engine_accounts ADD COLUMN max_concurrent_runs INTEGER NOT NULL DEFAULT 1;
+    UPDATE events SET payload = json_set(payload, '$.account.maxConcurrentRuns', 1)
+      WHERE type = 'account.changed';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1224,12 +1231,17 @@ export function openEventStore(dataDir: string) {
   });
   const selectArchived = db.prepare("SELECT 1 FROM bots WHERE id = ? AND archived_at IS NOT NULL");
 
-  const accountColumns = "id, label, lane, blocked_until AS blockedUntil";
+  const accountColumns =
+    "id, label, lane, blocked_until AS blockedUntil, max_concurrent_runs AS maxConcurrentRuns";
   const selectAccounts = db.prepare(`SELECT ${accountColumns} FROM engine_accounts ORDER BY id`);
   const selectAccount = db.prepare(`SELECT ${accountColumns} FROM engine_accounts WHERE id = ?`);
   const blockAccount = db.prepare("UPDATE engine_accounts SET blocked_until = ? WHERE id = ?");
   const updateLane = db.prepare(
     `UPDATE engine_accounts SET lane = ? WHERE id = ? AND lane <> ? RETURNING ${accountColumns}`,
+  );
+  const updateConcurrency = db.prepare(
+    `UPDATE engine_accounts SET max_concurrent_runs = ? WHERE id = ? AND max_concurrent_runs <> ?
+     RETURNING ${accountColumns}`,
   );
   const unblockExpired = db.prepare(
     `UPDATE engine_accounts SET blocked_until = NULL WHERE blocked_until <= ?
@@ -1429,8 +1441,9 @@ export function openEventStore(dataDir: string) {
   const claim = db.prepare(
     `UPDATE runs SET status = 'Running', boot_id = ?, started_at = ?
      WHERE id = ? AND status = 'Queued'
-       AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.status = 'Running'
-         AND other.engine_account_id = runs.engine_account_id)
+       AND (SELECT COUNT(*) FROM runs other WHERE other.status = 'Running'
+              AND other.engine_account_id = runs.engine_account_id)
+           < (SELECT max_concurrent_runs FROM engine_accounts a WHERE a.id = runs.engine_account_id)
        AND NOT EXISTS (SELECT 1 FROM engine_accounts a WHERE a.id = runs.engine_account_id
          AND a.blocked_until > ?)
      RETURNING ${runColumns}`,
@@ -2693,6 +2706,14 @@ export function openEventStore(dataDir: string) {
         if (changed) {
           emit({ type: "account.changed", account: EngineAccount.parse(changed) });
           clearEnginePauses(id, credentialPauses);
+        }
+      }),
+    setAccountConcurrency: (id: string, max: number) =>
+      transaction(() => {
+        const value = Math.min(Math.max(Math.floor(max), 1), 8);
+        const changed = updateConcurrency.get(value, id, value);
+        if (changed) {
+          emit({ type: "account.changed", account: EngineAccount.parse(changed) });
         }
       }),
 

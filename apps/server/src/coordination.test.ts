@@ -231,6 +231,67 @@ describe("tasks", () => {
   });
 });
 
+describe("account concurrency", () => {
+  it("claims up to the account's cap, and no more", () => {
+    store = openEventStore(dataDir);
+    const queued = (name: string) => {
+      const bot = open().createBot({ name, personality: "", engineAccountId: "fake" });
+      open().sendMessage({
+        id: crypto.randomUUID(),
+        roomId: bot.roomId,
+        body: "go",
+        attended: true,
+      });
+      const wake = open()
+        .dueWakes(new Date().toISOString())
+        .find(({ botId }) => botId === bot.id);
+      if (!wake) {
+        throw new Error("no wake");
+      }
+      open().queueRun(wake);
+      return open()
+        .state()
+        .runs.find(({ botId }) => botId === bot.id);
+    };
+    const claim = (run: ReturnType<typeof queued>) =>
+      open().claimRun(run?.id ?? "", "boot", new Date().toISOString());
+    const ada = queued("Ada");
+    const ben = queued("Ben");
+    const cy = queued("Cy");
+    expect(claim(ada)).toBeDefined();
+    expect(claim(ben)).toBeUndefined();
+    store.setAccountConcurrency("fake", 2);
+    expect(claim(ben)).toBeDefined();
+    expect(claim(cy)).toBeUndefined();
+    expect(store.state().accounts.find((a) => a.id === "fake")?.maxConcurrentRuns).toBe(2);
+  });
+
+  it("keeps account events from before the migration readable", () => {
+    const db = new DatabaseSync(dbPath());
+    migrate(
+      db,
+      migrations.findIndex(({ name }) => name === "account_concurrency"),
+    );
+    const account = { id: "fake", label: "Fake", lane: "subscription", blockedUntil: null };
+    db.prepare("INSERT INTO events (type, payload, created_at) VALUES (?, ?, ?)").run(
+      "account.changed",
+      JSON.stringify({ type: "account.changed", account }),
+      "then",
+    );
+    db.close();
+
+    store = openEventStore(dataDir);
+    expect(store.eventsAfter(0)).toMatchObject([
+      { type: "account.changed", account: { ...account, maxConcurrentRuns: 1 } },
+    ]);
+    const check = new DatabaseSync(dbPath());
+    expect(rows(check, "PRAGMA index_list(runs)").map(({ name }) => name)).not.toContain(
+      "runs_one_running_per_account",
+    );
+    check.close();
+  });
+});
+
 describe("group rooms", () => {
   it("keeps a member's history when they leave, and lets them back", () => {
     store = openEventStore(dataDir);
