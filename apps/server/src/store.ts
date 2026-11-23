@@ -6,7 +6,6 @@ import { DatabaseSync } from "node:sqlite";
 import {
   Approval,
   AttachmentRef,
-  activeTaskStatuses,
   type ApprovalTool,
   Bot,
   type BotAccess,
@@ -1181,12 +1180,7 @@ export function openEventStore(dataDir: string) {
      WHERE b.id = ?`,
   );
   const selectRoster = db.prepare(
-    `SELECT DISTINCT b.name, b.summary,
-       CASE WHEN b.status = 'paused' THEN 'paused'
-         WHEN EXISTS (SELECT 1 FROM runs WHERE bot_id = b.id AND status = 'Running') THEN 'working'
-         ELSE 'idle' END AS status,
-       (SELECT COUNT(*) FROM tasks WHERE owner_bot_id = b.id
-         AND status IN (${activeTaskStatuses.map((status) => `'${status}'`).join(", ")})) AS tasks
+    `SELECT DISTINCT b.name, b.summary
      FROM scopes mine
        JOIN scopes other ON other.room_id = mine.room_id AND other.bot_id <> mine.bot_id
          AND other.left_at IS NULL
@@ -1196,8 +1190,6 @@ export function openEventStore(dataDir: string) {
   const RosterRow = z.object({
     name: z.string(),
     summary: z.string().nullable(),
-    status: z.enum(["idle", "working", "paused"]),
-    tasks: z.number(),
   });
   const insertBot = db.prepare(
     `INSERT INTO bots

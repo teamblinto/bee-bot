@@ -46,12 +46,7 @@ export type BotLaunch = EngineChoice & {
 
 export type TeamInput = {
   self: string;
-  roster: Array<{
-    name: string;
-    summary: string | null;
-    status: "idle" | "working" | "paused";
-    tasks: number;
-  }>;
+  roster: Array<{ name: string; summary: string | null }>;
   rooms: Array<{ id: string; name: string }>;
 };
 
@@ -65,8 +60,8 @@ export function teamBlock({ roster, rooms }: TeamInput) {
   const members = roster
     .slice(0, maxRosterLines)
     .map(
-      ({ name, summary, status, tasks }) =>
-        `- @${name.replace(/\s+/g, "")} (${status}, ${tasks} tasks): ${oneLine(summary ?? "").trim() || "No summary yet."}`,
+      ({ name, summary }) =>
+        `- @${name.replace(/\s+/g, "")}: ${oneLine(summary ?? "").trim() || "No summary yet."}`,
     );
   const more = roster.length - maxRosterLines;
   return [

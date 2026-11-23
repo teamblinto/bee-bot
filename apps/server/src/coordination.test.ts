@@ -7,6 +7,7 @@ import { Worker } from "node:worker_threads";
 import { limitDefaults } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
+import { teamBlock } from "./engine.ts";
 import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
 import type { TaskInput } from "./tasks.ts";
 
@@ -722,36 +723,51 @@ describe("group rooms", () => {
       memberIds: [ada.id, ben.id],
       defaultBotId: ada.id,
     });
-    const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
-    store.sendMessage({ id: crypto.randomUUID(), roomId: cy.roomId, body: "go", attended: true });
-    const wake = store.dueWakes(new Date().toISOString()).find((w) => w.botId === cy.id);
-    if (!wake) {
-      throw new Error("no wake");
-    }
-    store.queueRun(wake);
-    const cyRun = store.state().runs.find((r) => r.botId === cy.id);
+    store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+    const claimed = store.claimRun(run.id, "boot", new Date().toISOString());
+    expect(claimed?.launch.team).toEqual({
+      self: "Ada",
+      roster: [{ name: "Ben", summary: null }],
+      rooms: [{ id: room?.id, name: "Team" }],
+    });
+    const before = claimed && teamBlock(claimed.launch.team);
+    store.finishRun(run.id, "boot", { status: "Completed", reason: null, reply: "ok" });
+
     store.tasks.createTask(
       {
         kind: "delegate",
         chainId: "chain",
         hop: 1,
         depth: 1,
-        parentRunId: cyRun?.id ?? "",
-        requesterBotId: cy.id,
+        parentRunId: run.id,
+        requesterBotId: ada.id,
         ownerBotId: ben.id,
-        roomId: cy.roomId,
+        roomId: ada.roomId,
         goal: "Look it up",
         deliveryKey: "k",
         attended: true,
       },
       3,
     );
-    const claimed = store.claimRun(run.id, "boot", new Date().toISOString());
-    expect(claimed?.launch.team).toEqual({
-      self: "Ada",
-      roster: [{ name: "Ben", summary: null, status: "idle", tasks: 1 }],
-      rooms: [{ id: room?.id, name: "Team" }],
+    const runFor = (botId: string) => {
+      const wake = store?.dueWakes(new Date().toISOString()).find((w) => w.botId === botId);
+      if (!wake) {
+        throw new Error("no wake");
+      }
+      store?.queueRun(wake);
+      const queued = store?.queuedRuns().find((r) => r.botId === botId);
+      return store?.claimRun(queued?.id ?? "", "boot", new Date().toISOString());
+    };
+    store.setAccountConcurrency("fake", 2);
+    expect(runFor(ben.id)).toBeTruthy();
+    store.sendMessage({
+      id: crypto.randomUUID(),
+      roomId: ada.roomId,
+      body: "again",
+      attended: true,
     });
+    const again = runFor(ada.id);
+    expect(again && teamBlock(again.launch.team)).toBe(before);
   });
 });
 
