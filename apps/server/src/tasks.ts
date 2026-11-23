@@ -136,7 +136,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   );
   const endTask = db.prepare(
     `UPDATE tasks SET status = ?, result_message_id = ?, updated_at = ?
-     WHERE id = ? AND status IN ('queued', 'open') RETURNING ${taskColumns}`,
+     WHERE id = ? AND status IN ${active} RETURNING ${taskColumns}`,
   );
   const moveOwner = db.prepare(
     `UPDATE tasks SET owner_bot_id = ?, hop = ?, status = 'queued', pending_json = ?,

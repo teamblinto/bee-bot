@@ -489,6 +489,41 @@ describe("stop-all", () => {
     await ticks(1);
     expect(engine.turns).toHaveLength(turns);
   });
+
+  it("cancels a task waiting on an answer, so it can't be answered after", async () => {
+    const engine = scriptedEngine();
+    const { store, supervisor, send } = boot(engine.runTurn);
+    const asker = createBot(store, "Asker");
+    const helper = createBot(store, "Helper");
+    send(asker, "go");
+    await expectTurns(engine, 1);
+    const task = store.tasks.createTask(
+      {
+        kind: "delegate",
+        chainId: "chain",
+        hop: 1,
+        depth: 1,
+        parentRunId: latestRun(store, asker)?.id ?? "",
+        requesterBotId: asker.id,
+        ownerBotId: helper.id,
+        roomId: asker.roomId,
+        goal: "help",
+        deliveryKey: "k",
+        attended: true,
+      },
+      3,
+    );
+    if ("refused" in task) {
+      throw new Error("refused");
+    }
+    const follow = (botId: string, kind: "ask" | "answer") =>
+      store.tasks.followUp({ taskId: task.id, botId, kind, message: "?", attended: true });
+    expect(follow(helper.id, "ask")).toMatchObject({ status: "needs_input" });
+
+    supervisor.stopAll();
+    expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(follow(asker.id, "answer")).toEqual({ refused: "wrong_state" });
+  });
 });
 
 describe("server mode limits", () => {
