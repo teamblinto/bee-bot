@@ -12,6 +12,7 @@ import type {
   ServerMessage,
   Task,
 } from "@beebot/contracts";
+import { limitDefaults } from "@beebot/contracts";
 import { beforeAll, expect, it, vi } from "vite-plus/test";
 
 import type { ConnectionState, LiveTool } from "./serverConnection";
@@ -129,6 +130,7 @@ const emptyChat: ChatState = {
   tasks: [],
   noticeAcknowledgedAt: null,
   usageData: null,
+  limits: limitDefaults,
   boxes: [],
   continuations: [],
   vault: { apiKeys: [] },
@@ -213,6 +215,7 @@ it("reaches the same state by replay as by snapshot", () => {
     tasks: [],
     noticeAcknowledgedAt: null,
     usageData: null,
+    limits: limitDefaults,
     boxes: [],
     continuations: [],
     vault: { apiKeys: [] },
@@ -221,6 +224,15 @@ it("reaches the same state by replay as by snapshot", () => {
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });
   expect(replayed).toEqual(snapshotted);
+});
+
+it("replaces limits on limits.changed", () => {
+  const limits = { ...limitDefaults, depth: 4 };
+  const next = applyServerMessage(state(0), {
+    type: "event",
+    event: { seq: 1, createdAt: "now", type: "limits.changed", limits },
+  });
+  expect(next.chat.limits).toEqual(limits);
 });
 
 it("keeps queued and waiting tasks, and drops finished ones", () => {

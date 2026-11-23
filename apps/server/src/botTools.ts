@@ -213,7 +213,7 @@ export function callBotTool(
     turns: grant.turns,
     startedAt: grant.startedAt,
   };
-  const limits = clampLimits({});
+  const limits = clampLimits(store.readLimits());
 
   switch (name) {
     case "send_message": {

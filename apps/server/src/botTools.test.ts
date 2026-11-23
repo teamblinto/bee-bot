@@ -14,7 +14,7 @@ import type { Limits } from "./limits.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
-// Owners can raise hop and depth up to their ceilings; the server has no setting for it yet.
+// Overrides whatever limits the owner stored.
 const raised = vi.hoisted((): Partial<Limits> => ({}));
 vi.mock("./limits.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof LimitsModule>();
@@ -150,7 +150,7 @@ describe("async delegation", () => {
 });
 
 describe("delegation limits", () => {
-  it("refuses past the depth cap, and past the fan-out cap", () => {
+  it("refuses past the hop cap, and past the fan-out cap", () => {
     openStore();
     const [ada, ben, cy, di, ed] = team("Ada", "Ben", "Cy", "Di", "Ed");
     if (!ada || !ben || !cy || !di || !ed) {
@@ -172,33 +172,66 @@ describe("delegation limits", () => {
     const child = start(ben.id);
     expect(child.prompt).toContain("[from @Ada via delegate");
     expect(call(child, "delegate", { to: "Ed", goal: "Deeper" })).toMatchObject({
-      status: "refused",
-      reason: "depth",
+      status: "delegated",
     });
-    expect(store.state().tasks).toHaveLength(3);
+    finish(child.id, "Asked Ed.");
+    // Ed sits at hop 2 and depth 2; the hop check runs first.
+    const grandchild = start(ed.id);
+    expect(call(grandchild, "delegate", { to: "Cy", goal: "Deeper still" })).toMatchObject({
+      status: "refused",
+      reason: "hop",
+    });
+    expect(store.state().tasks).toHaveLength(4);
   });
 
-  it("never goes deeper than 2, however high the owner raises it", () => {
+  it("settles a depth-2 chain bottom-up at the default limits", () => {
     openStore();
-    raised.depth = 10;
-    raised.hop = 10;
-    const [ada, ben, cy, di] = team("Ada", "Ben", "Cy", "Di");
-    if (!ada || !ben || !cy || !di) {
+    const [ada, ben, cy] = team("Ada", "Ben", "Cy");
+    if (!ada || !ben || !cy) {
       throw new Error("no team");
     }
     say(ada.roomId, "go");
     const parent = start(ada.id);
-    call(parent, "delegate", { to: "Ben", goal: "Look" });
+    call(parent, "delegate", { to: "Ben", goal: "Find B" });
     finish(parent.id, "Asked Ben.");
     const child = start(ben.id);
-    expect(call(child, "delegate", { to: "Cy", goal: "Deeper" })).toMatchObject({
+    expect(call(child, "delegate", { to: "Cy", goal: "Find C" })).toMatchObject({
       status: "delegated",
     });
     finish(child.id, "Asked Cy.");
-    const grandchild = start(cy.id);
-    expect(call(grandchild, "delegate", { to: "Di", goal: "Deeper still" })).toMatchObject({
+    finish(start(cy.id).id, "C is 3");
+    const benAgain = start(ben.id);
+    expect(benAgain.prompt).toContain("[from @Cy via result");
+    expect(benAgain.prompt).toContain("C is 3");
+    finish(benAgain.id, "B: 3");
+    const adaAgain = start(ada.id);
+    expect(adaAgain.prompt).toContain("[from @Ben via result");
+    expect(adaAgain.prompt).toContain("B: 3");
+    expect(store.state().tasks).toEqual([]);
+  });
+
+  it("never goes deeper than 4, however high the owner raises it", () => {
+    openStore();
+    raised.depth = 10;
+    raised.hop = 10;
+    const bots = team("Ada", "Ben", "Cy", "Di", "Ed", "Fi");
+    const [ada] = bots;
+    if (!ada) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    for (const [index, bot] of bots.slice(0, 4).entries()) {
+      const run = start(bot.id);
+      expect(call(run, "delegate", { to: bots[index + 1]?.name, goal: "Deeper" })).toMatchObject({
+        status: "delegated",
+      });
+      finish(run.id, "Asked.");
+    }
+    // Hop and depth rise together, and hop is checked first.
+    const deepest = start(bots[4]?.id ?? "");
+    expect(call(deepest, "delegate", { to: "Fi", goal: "Deeper still" })).toMatchObject({
       status: "refused",
-      reason: "depth",
+      reason: "hop",
     });
   });
 
@@ -278,6 +311,7 @@ describe("delegation limits", () => {
 
   it("takes sender, chain and depth from the run, not from the model", () => {
     openStore();
+    raised.depth = 1;
     const [ada, ben, cy] = team("Ada", "Ben", "Cy");
     if (!ada || !ben || !cy) {
       throw new Error("no team");

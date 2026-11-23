@@ -15,6 +15,7 @@ import {
   EngineAccount,
   type EngineLane,
   type EventBody,
+  LimitOverrides,
   maxAvatarSeed,
   mentionKey,
   MemoryItem,
@@ -881,6 +882,10 @@ export const migrations: Array<{
     CREATE INDEX tasks_active ON tasks (owner_bot_id)
       WHERE status IN ('queued', 'open', 'waiting', 'needs_input');`,
   },
+  {
+    name: "limits_settings",
+    sql: "ALTER TABLE settings ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';",
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1539,6 +1544,8 @@ export function openEventStore(dataDir: string) {
   );
   const selectUsageData = db.prepare("SELECT usage_data AS value FROM settings");
   const updateUsageData = db.prepare("UPDATE settings SET usage_data = ?");
+  const selectLimits = db.prepare("SELECT limits_json AS json FROM settings");
+  const updateLimits = db.prepare("UPDATE settings SET limits_json = ?");
   const selectBoxMachine = db.prepare("SELECT box_machine AS machine FROM settings");
   const updateBoxMachine = db.prepare("UPDATE settings SET box_machine = ?");
   const selectBoxMachineSetUp = db.prepare("SELECT box_machine_set_up AS machine FROM settings");
@@ -1748,6 +1755,15 @@ export function openEventStore(dataDir: string) {
     const row = selectBot.get(id);
     return row ? BotRow.parse(row) : undefined;
   };
+  // A hand-edited or newer value falls back to the defaults rather than refusing to boot.
+  const readLimits = (): LimitOverrides => {
+    const { json } = z.object({ json: z.string() }).parse(selectLimits.get());
+    try {
+      return LimitOverrides.safeParse(JSON.parse(json)).data ?? {};
+    } catch {
+      return {};
+    }
+  };
   const getRun = (id: string) => {
     const row = selectRun.get(id);
     return row ? RunRow.parse(row) : undefined;
@@ -1758,7 +1774,7 @@ export function openEventStore(dataDir: string) {
   const unackedInput = (scope: Scope) =>
     z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq, scope.botId));
   // Read only when a room needs them, so a DM never depends on them.
-  const limits = () => clampLimits({});
+  const limits = () => clampLimits(readLimits());
 
   // Where the bot's engine finds a file: its box's inbox, or the inbox in its working folder.
   const inboxPath = (botId: string, file: AttachmentRef) => {
@@ -2573,6 +2589,7 @@ export function openEventStore(dataDir: string) {
       vault: vaultStatus(),
       automatedAccessAcknowledgedAt: automatedAccessAt(),
       usageData: usageData(),
+      limits: limits(),
     }),
 
     usageData,
@@ -2580,6 +2597,16 @@ export function openEventStore(dataDir: string) {
       transaction(() => {
         updateUsageData.run(on ? 1 : 0);
         emit({ type: "usage-data.changed", on });
+      }),
+
+    readLimits,
+    // Replaces the stored overrides.
+    setLimits: (raw: LimitOverrides) =>
+      transaction(() => {
+        updateLimits.run(JSON.stringify(raw));
+        const clamped = limits();
+        emit({ type: "limits.changed", limits: clamped });
+        return clamped;
       }),
 
     automatedAccessAt,

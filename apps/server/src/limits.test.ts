@@ -23,7 +23,7 @@ describe("clampLimits", () => {
   it("never exceeds a ceiling", () => {
     expect(clampLimits({ hop: 10, depth: 10, fanOut: 10, mentions: 10, posts: 10 })).toMatchObject({
       hop: 4,
-      depth: 2,
+      depth: 4,
       fanOut: 3,
       mentions: 4,
       posts: 2,
@@ -47,11 +47,10 @@ describe("checkDelegation", () => {
 
   it("refuses a child past the spawn depth", () => {
     expect(checkDelegation(limits, { chain: { ...chain, depth: 1 }, tasksInRun: 0, now })).toEqual(
-      refuse("depth"),
-    );
-    const deeper = clampLimits({ depth: 2 });
-    expect(checkDelegation(deeper, { chain: { ...chain, depth: 1 }, tasksInRun: 0, now })).toEqual(
       allow,
+    );
+    expect(checkDelegation(limits, { chain: { ...chain, depth: 2 }, tasksInRun: 0, now })).toEqual(
+      refuse("depth"),
     );
   });
 

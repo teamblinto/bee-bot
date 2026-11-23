@@ -606,6 +606,16 @@ describe("account concurrency", () => {
   });
 });
 
+describe("limits", () => {
+  it("stores limits and broadcasts the clamped ones", async () => {
+    const { base, store } = await start();
+    const before = store.bounds().latest;
+    expect((await command(base, { type: "set-limits", limits: { hop: 3 } })).status).toBe(200);
+    expect(store.eventsAfter(before).map(({ type }) => type)).toEqual(["limits.changed"]);
+    expect((await command(base, { type: "set-limits", limits: { hop: -1 } })).status).toBe(400);
+  });
+});
+
 describe("the notice", () => {
   it("stores the first acknowledgement only, with one event", async () => {
     const { base, store } = await start();

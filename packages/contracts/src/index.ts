@@ -859,6 +859,35 @@ export const LimitRefusal = z.enum([
 ]);
 export type LimitRefusal = z.infer<typeof LimitRefusal>;
 
+const limit = z.number().int().nonnegative();
+export const Limits = z.object({
+  hop: limit,
+  depth: limit,
+  fanOut: limit,
+  mentions: limit,
+  posts: limit,
+  postWindowMs: limit,
+  chainTurns: limit,
+  chainWallMs: limit,
+});
+export type Limits = z.infer<typeof Limits>;
+export const LimitOverrides = Limits.partial();
+export type LimitOverrides = z.infer<typeof LimitOverrides>;
+
+const minute = 60_000;
+export const limitDefaults: Limits = {
+  hop: 2,
+  depth: 2,
+  fanOut: 3,
+  mentions: 4,
+  posts: 2,
+  postWindowMs: 5 * minute,
+  chainTurns: 20,
+  chainWallMs: 60 * minute,
+};
+
+export const limitCeilings: Limits = { ...limitDefaults, hop: 4, depth: 4 };
+
 export const Room = z.object({
   id: z.string(),
   kind: z.enum(["dm", "group"]),
@@ -930,6 +959,7 @@ export const ChatState = z.object({
   automatedAccessAcknowledgedAt: z.string().nullable(),
   // Null until the owner answers the usage-data question. Off unless they turned it on.
   usageData: z.boolean().nullable(),
+  limits: Limits,
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -960,6 +990,7 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("vault.changed"), vault: VaultStatus }),
   z.object({ type: z.literal("automated-access.acknowledged"), acknowledgedAt: z.string() }),
   z.object({ type: z.literal("usage-data.changed"), on: z.boolean() }),
+  z.object({ type: z.literal("limits.changed"), limits: Limits }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -1478,6 +1509,7 @@ export const Command = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
   z.object({ type: z.literal("set-usage-data"), on: z.boolean() }),
+  z.object({ type: z.literal("set-limits"), limits: LimitOverrides }),
   // From the web app, which never talks to PostHog itself. Dropped unless usage data is on.
   z.object({ type: z.literal("track"), event: WebUsageEvent }),
   z.object({ type: z.literal("report-error"), error: ErrorReport }),

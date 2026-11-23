@@ -1,15 +1,13 @@
-import type { LimitRefusal, WakeSource } from "@beebot/contracts";
+import {
+  type LimitOverrides,
+  type LimitRefusal,
+  type Limits,
+  type WakeSource,
+  limitCeilings,
+  limitDefaults,
+} from "@beebot/contracts";
 
-export type Limits = {
-  hop: number;
-  depth: number;
-  fanOut: number;
-  mentions: number;
-  posts: number;
-  postWindowMs: number;
-  chainTurns: number;
-  chainWallMs: number;
-};
+export type { Limits };
 
 export type Verdict = { verdict: "allow" } | { verdict: "refuse"; reason: LimitRefusal };
 
@@ -20,30 +18,17 @@ export type ToolCall = { tool: string; input: string; failed: boolean };
 
 const minute = 60_000;
 
-const defaults: Limits = {
-  hop: 2,
-  depth: 1,
-  fanOut: 3,
-  mentions: 4,
-  posts: 2,
-  postWindowMs: 5 * minute,
-  chainTurns: 20,
-  chainWallMs: 60 * minute,
-};
-
-const ceilings: Limits = { ...defaults, hop: 4, depth: 2 };
-
 const allow: Verdict = { verdict: "allow" };
 const refuse = (reason: LimitRefusal): Verdict => ({ verdict: "refuse", reason });
 
-// Defaults: hop 2 (ceiling 4), depth 1 (ceiling 2), fanOut 3, mentions 4, posts 2 per 300000 ms.
+// Defaults: hop 2 (ceiling 4), depth 2 (ceiling 4), fanOut 3, mentions 4, posts 2 per 300000 ms.
 // Owners may lower any limit; none rises above its default except hop and depth, up to their ceilings.
-export function clampLimits(raw: Partial<Limits>): Limits {
-  const limits = { ...defaults };
-  for (const key of Object.keys(defaults) as (keyof Limits)[]) {
+export function clampLimits(raw: LimitOverrides): Limits {
+  const limits = { ...limitDefaults };
+  for (const key of Object.keys(limitDefaults) as (keyof Limits)[]) {
     const value = raw[key];
     if (value === undefined || !Number.isFinite(value)) continue;
-    limits[key] = Math.min(Math.max(Math.floor(value), 0), ceilings[key]);
+    limits[key] = Math.min(Math.max(Math.floor(value), 0), limitCeilings[key]);
   }
   return limits;
 }

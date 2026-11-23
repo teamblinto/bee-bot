@@ -10,6 +10,7 @@ import {
   EngineStatus,
   type HostControlAvailability,
   HostPlatform,
+  limitDefaults,
   type ModelCatalog,
   type PendingApproval,
   protocolVersion,
@@ -180,6 +181,8 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
       return { ...state, chat: { ...chat, noticeAcknowledgedAt: event.acknowledgedAt } };
     case "usage-data.changed":
       return { ...state, chat: { ...chat, usageData: event.on } };
+    case "limits.changed":
+      return { ...state, chat: { ...chat, limits: event.limits } };
     case "routine.changed":
       return { ...state, chat: { ...chat, routines: upsert(chat.routines, event.routine) } };
     case "routine.deleted": {
@@ -389,6 +392,7 @@ let state: ConnectionState = {
     tasks: [],
     noticeAcknowledgedAt: null,
     usageData: null,
+    limits: limitDefaults,
     boxes: [],
     continuations: [],
     vault: { apiKeys: [] },

@@ -1450,6 +1450,9 @@ export async function startServer({
       case "set-usage-data":
         store.setUsageData(command.on);
         return ok;
+      case "set-limits":
+        store.setLimits(command.limits);
+        return ok;
       case "track":
         track(command.event, {});
         return ok;

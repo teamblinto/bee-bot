@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 
+import { limitDefaults } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
@@ -622,6 +623,28 @@ describe("account concurrency", () => {
       "runs_one_running_per_account",
     );
     check.close();
+  });
+});
+
+describe("limits", () => {
+  it("keeps the owner's limits across a restart, clamped on read", () => {
+    store = openEventStore(dataDir);
+    expect(store.setLimits({ depth: 10, posts: 1 })).toMatchObject({ depth: 4, posts: 1, hop: 2 });
+    store.close();
+    store = openEventStore(dataDir);
+    expect(store.state().limits).toMatchObject({ depth: 4, posts: 1 });
+    expect(store.readLimits()).toEqual({ depth: 10, posts: 1 });
+  });
+
+  it("falls back to defaults on malformed limits", () => {
+    store = openEventStore(dataDir);
+    store.close();
+    const db = new DatabaseSync(dbPath());
+    db.exec("UPDATE settings SET limits_json = 'not json'");
+    db.close();
+    store = openEventStore(dataDir);
+    expect(store.readLimits()).toEqual({});
+    expect(store.state().limits).toEqual(limitDefaults);
   });
 });
 
