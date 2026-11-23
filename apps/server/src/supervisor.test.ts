@@ -1489,8 +1489,8 @@ describe("routines", () => {
 });
 
 describe("no-progress backoff", () => {
-  // Ada has made no progress twice, and Ben's reply names her: a mention wake she must sit out.
-  function heldMention() {
+  // Ada has made no progress twice.
+  function team() {
     const store = openEventStore(dataDir);
     const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
     const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
@@ -1502,28 +1502,36 @@ describe("no-progress backoff", () => {
         body,
         attended: true,
       });
-    const turn = (bot: Bot, replyText: string) => {
+    const start = (bot: Bot) => {
       const wake = store.dueWakes(new Date().toISOString()).find((w) => w.botId === bot.id);
       if (wake) {
         store.queueRun(wake);
       }
       const runId = store.queuedRuns().find((r) => r.botId === bot.id)?.id ?? "";
       store.claimRun(runId, "boot", new Date().toISOString());
+      return runId;
+    };
+    const finish = (runId: string, replyText: string) =>
       store.finishRun(runId, "boot", {
         status: "Completed",
         reason: null,
         reply: replyText,
         tools: [],
       });
-    };
+    const turn = (bot: Bot, replyText: string) => finish(start(bot), replyText);
     ask("@Ben go");
     ask("@Ada hi");
     turn(ada, "NO_RESPONSE");
     ask("@Ada hi");
     turn(ada, "NO_RESPONSE");
+    return { store, ada, ben, roomId: roomId ?? "", ask, start, finish, turn };
+  }
+  // Ben's reply names Ada: a mention wake she must sit out.
+  function heldMention() {
+    const { store, ada, ben, roomId, turn } = team();
     turn(ben, "@Ada look");
     store.close();
-    return { ada, roomId: roomId ?? "" };
+    return { ada, roomId };
   }
   const heldUntil = () =>
     query("SELECT not_before AS until FROM wakes WHERE status = 'pending'")[0]?.until;
@@ -1549,5 +1557,19 @@ describe("no-progress backoff", () => {
     });
     await expectTurns(engine, 1);
     expect(pendingWakes()).toBe(0);
+  });
+
+  it("lets through a human's message a run ended after without taking it", async () => {
+    const { store, ada, ben, ask, start, finish, turn } = team();
+    store.setAccountConcurrency("fake", 2);
+    ask("@Ada again");
+    const runId = start(ada);
+    turn(ben, "@Ada look");
+    ask("@Ada now");
+    finish(runId, "NO_RESPONSE");
+    store.close();
+    const engine = scriptedEngine();
+    await boot(engine.runTurn);
+    await expectTurns(engine, 1);
   });
 });

@@ -1469,15 +1469,11 @@ export function openEventStore(dataDir: string) {
   const selectActiveRun = db.prepare(
     `SELECT ${runColumns} FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
   );
-  // A wake a human's message joined after the last run counts as theirs, so it is never held.
   const selectProgress = db.prepare(
-    `SELECT s.no_progress_runs AS noProgressRuns, r.lastEndedAt,
-       CASE WHEN r.lastEndedAt IS NULL OR EXISTS (
-         SELECT 1 FROM messages m
-         WHERE m.room_id = s.room_id AND m.author = 'human' AND m.created_at > r.lastEndedAt
-       ) THEN 'human' ELSE (SELECT source FROM wakes WHERE id = ?) END AS source
-     FROM scopes s, (SELECT MAX(ended_at) AS lastEndedAt FROM runs WHERE scope_id = ?) r
-     WHERE s.id = ?`,
+    `SELECT s.no_progress_runs AS noProgressRuns,
+       (SELECT MAX(ended_at) FROM runs WHERE scope_id = s.id) AS lastEndedAt,
+       (SELECT source FROM wakes WHERE id = ?) AS source
+     FROM scopes s WHERE s.id = ?`,
   );
   const countProgress = db.prepare(
     "UPDATE scopes SET no_progress_runs = CASE WHEN ? THEN 0 ELSE no_progress_runs + 1 END WHERE id = ?",
@@ -2985,11 +2981,13 @@ export function openEventStore(dataDir: string) {
       const bot = BotRow.parse(selectBot.get(wake.botId));
       const account = EngineAccount.parse(selectAccount.get(bot.engineAccountId));
       const dayAgo = new Date(Date.parse(now) - 86_400_000).toISOString();
+      const input = unackedInput(getScope(wake.scopeId));
+      const progress = Progress.parse(selectProgress.get(wake.id, wake.scopeId));
       return {
         hasActiveRun:
           selectActiveRun.get(wake.botId) !== undefined ||
           selectEarlierInChain.get(wake.id) !== undefined,
-        hasInput: unackedInput(getScope(wake.scopeId)).length > 0,
+        hasInput: input.length > 0,
         boundary: bot.boundary,
         unattendedLane: laneOfBox(bot),
         bothClaudeCredentials:
@@ -3001,7 +2999,9 @@ export function openEventStore(dataDir: string) {
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
         spentThisMonthUsd: spentSince(monthStart(now)),
-        ...Progress.parse(selectProgress.get(wake.id, wake.scopeId, wake.scopeId)),
+        ...progress,
+        // A wake an unanswered human message joined counts as theirs, so it is never held.
+        source: input.some((m) => m.author === "human") ? "human" : progress.source,
       };
     },
     recordSpend: (runId: string, costUsd: number) => {
