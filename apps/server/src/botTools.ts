@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { attachmentName, attachmentPath, receiveAttachment, refusedName } from "./attachments.ts";
 import type { BoxAttach } from "./boxRuntime.ts";
-import { checkDelegation, checkRoutineCreate, clampLimits } from "./limits.ts";
+import { checkDelegation, checkFollowUp, checkRoutineCreate, clampLimits } from "./limits.ts";
 import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
@@ -16,6 +16,7 @@ import { routineCreated, trackUsage } from "./usageEvents.ts";
 
 const text = { type: "string" };
 const activityRows = 10;
+const followUpKinds = ["ask", "answer", "rework", "cancel"] as const;
 const activityChars = 8000;
 const activityLineChars = 500;
 const schema = (properties: Record<string, object>, required = Object.keys(properties)) => ({
@@ -46,6 +47,25 @@ export const botTools = [
     name: "handoff",
     description: "Passes your current work to another bot, who answers from here. You stop.",
     inputSchema: schema({ to: { type: "string", description: "Bot name or id" }, note: text }),
+  },
+  {
+    name: "follow_up",
+    description:
+      "Follows up on a task you gave or were given. ask: a question to the other side. answer: " +
+      "reply to a question asked of you as the requester. rework: send finished work back. " +
+      "cancel: drop it. End your turn after.",
+    inputSchema: schema({
+      task_id: text,
+      message: text,
+      kind: { type: "string", enum: followUpKinds },
+    }),
+  },
+  {
+    name: "task_status",
+    description:
+      "Shows where your tasks stand: the ones you gave and the ones you were given. Leave " +
+      "task_id out for all of them.",
+    inputSchema: schema({ task_id: text }, []),
   },
   {
     name: "read_bot_activity",
@@ -91,6 +111,12 @@ const Notify = z.object({ text: Body });
 const Delegate = z.object({ to: z.string().trim().min(1), goal: Body });
 const Handoff = z.object({ to: z.string().trim().min(1), note: Body });
 const Ask = z.object({ question: Body });
+const FollowUp = z.object({
+  task_id: z.string().trim().min(1),
+  message: Body,
+  kind: z.enum(followUpKinds),
+});
+const TaskStatus = z.object({ task_id: z.string().trim().min(1).optional() });
 const ReadActivity = z.object({
   bot: z.string().trim().min(1),
   limit: z.number().int().min(1).max(activityRows).default(5),
@@ -381,6 +407,49 @@ export function callBotTool(
         to: target.name,
         queued: task.status === "queued",
         note,
+      });
+    }
+    case "follow_up": {
+      const { data } = FollowUp.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      const verdict = checkFollowUp(limits, { chain, now });
+      if (verdict.verdict === "refuse") {
+        return refused(verdict.reason);
+      }
+      const task = store.tasks.followUp({
+        taskId: data.task_id,
+        botId: grant.botId,
+        kind: data.kind,
+        message: data.message,
+        attended: grant.attended,
+      });
+      if ("refused" in task) {
+        return refused(task.refused);
+      }
+      const note = data.kind === "cancel" ? undefined : endTurn;
+      return answer({ status: "sent", task_id: task.id, task_status: task.status, note });
+    }
+    case "task_status": {
+      const { data } = TaskStatus.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      const botName = (id: string) => store.getBot(id)?.name ?? null;
+      const tasks = store.tasks.tasksOf(grant.botId, data.task_id).map((task) => ({
+        task_id: task.id,
+        kind: task.kind,
+        status: task.status,
+        goal: task.goal.slice(0, 300),
+        from: botName(task.requesterBotId),
+        to: botName(task.ownerBotId),
+        updated_at: task.updatedAt,
+      }));
+      return answer({
+        status: "ok",
+        tasks,
+        note: "Don't poll: results and questions arrive as new messages.",
       });
     }
     case "create_routine": {

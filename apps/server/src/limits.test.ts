@@ -4,6 +4,7 @@ import {
   backoffUntil,
   checkBotPost,
   checkDelegation,
+  checkFollowUp,
   checkMentionWake,
   checkRoutineCreate,
   clampLimits,
@@ -33,6 +34,18 @@ describe("clampLimits", () => {
 
   it("lets an owner lower a limit", () => {
     expect(clampLimits({ hop: 1, chainTurns: 5 })).toMatchObject({ hop: 1, chainTurns: 5 });
+  });
+});
+
+describe("checkFollowUp", () => {
+  it("lets a follow-up through at any hop, but not past the chain's turns or time", () => {
+    expect(checkFollowUp(limits, { chain: { ...chain, hop: 9 }, now })).toEqual(allow);
+    expect(checkFollowUp(limits, { chain: { ...chain, turns: 20 }, now })).toEqual(
+      refuse("chain_turns"),
+    );
+    expect(
+      checkFollowUp(limits, { chain: { ...chain, startedAt: at(-50 * minute) }, now }),
+    ).toEqual(refuse("chain_time"));
   });
 });
 

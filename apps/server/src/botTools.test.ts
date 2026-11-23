@@ -579,6 +579,103 @@ describe("send_message routing", () => {
   });
 });
 
+// Ada delegates to Ben, and Ben is free, so the task opens at once.
+function delegated() {
+  const [ada, ben, cy] = team("Ada", "Ben", "Cy");
+  if (!ada || !ben || !cy) {
+    throw new Error("no team");
+  }
+  store.setAccountConcurrency("fake", 2);
+  say(ada.roomId, "go");
+  const parent = start(ada.id);
+  const { task_id } = call(parent, "delegate", { to: "Ben", goal: "Find the year." });
+  finish(parent.id, "Asked Ben.");
+  const status = () => store.tasks.getTask(String(task_id))?.status;
+  return { ada, ben, cy, task_id, status };
+}
+
+describe("follow_up", () => {
+  it("an owner's question waits on the requester, and the answer reopens the task", () => {
+    openStore();
+    const { ada, ben, task_id, status } = delegated();
+    const child = start(ben.id);
+    expect(
+      call(child, "follow_up", { task_id, kind: "ask", message: "Which year?" }),
+    ).toMatchObject({ status: "sent" });
+    expect(status()).toBe("needs_input");
+    finish(child.id, "Asked.");
+    expect(status()).toBe("needs_input");
+
+    const parent = start(ada.id);
+    expect(parent.prompt).toContain("[from @Ben via follow_up");
+    expect(parent.prompt).toContain("Which year?");
+    expect(call(parent, "follow_up", { task_id, kind: "answer", message: "2024" })).toMatchObject({
+      status: "sent",
+    });
+    expect(status()).toBe("open");
+    finish(parent.id, "Answered.");
+    expect(status()).toBe("open");
+    expect(start(ben.id).prompt).toContain("2024");
+  });
+
+  it("rework reopens a done task, and cancel drops a queued one", () => {
+    openStore();
+    const { ada, ben, cy, task_id, status } = delegated();
+    finish(start(ben.id).id, "v1");
+    expect(status()).toBe("done");
+
+    const parent = start(ada.id);
+    expect(
+      call(parent, "follow_up", { task_id, kind: "rework", message: "Shorter" }),
+    ).toMatchObject({ status: "sent", task_status: "open" });
+    expect(status()).toBe("open");
+    finish(parent.id, "Sent back.");
+    const child = start(ben.id);
+    expect(child.prompt).toContain("Shorter");
+
+    say(cy.roomId, "go");
+    const other = start(cy.id);
+    const second = call(other, "delegate", { to: "Ben", goal: "Another thing." });
+    expect(second).toMatchObject({ status: "delegated", queued: true });
+    expect(
+      call(other, "follow_up", { task_id: second.task_id, kind: "cancel", message: "Never mind." }),
+    ).toEqual({ status: "sent", task_id: second.task_id, task_status: "cancelled" });
+    finish(other.id, "Dropped it.");
+
+    finish(child.id, "v2");
+    expect(store.tasks.activeTasks().filter((task) => task.ownerBotId === ben.id)).toEqual([]);
+  });
+
+  it("refuses a bot that is neither side, and a kind that doesn't fit the status", () => {
+    openStore();
+    const { ada, cy, task_id } = delegated();
+    say(cy.roomId, "go");
+    const other = start(cy.id);
+    expect(call(other, "follow_up", { task_id, kind: "ask", message: "Hi?" })).toMatchObject({
+      status: "refused",
+      reason: "not_party",
+    });
+    say(ada.roomId, "and?");
+    const parent = start(ada.id);
+    expect(call(parent, "follow_up", { task_id, kind: "answer", message: "2024" })).toMatchObject({
+      status: "refused",
+      reason: "wrong_state",
+    });
+  });
+});
+
+describe("task_status", () => {
+  it("shows the caller's tasks only", () => {
+    openStore();
+    const { ben, cy } = delegated();
+    const { tasks } = call(start(ben.id), "task_status", {});
+    expect(tasks).toHaveLength(1);
+    expect(tasks).toMatchObject([{ status: "open", from: "Ada", to: "Ben" }]);
+    say(cy.roomId, "go");
+    expect(call(start(cy.id), "task_status", {})).toMatchObject({ status: "ok", tasks: [] });
+  });
+});
+
 describe("share_file", () => {
   const box = (chunks: Iterable<Buffer>, code = 0) =>
     vi.fn(async () => ({

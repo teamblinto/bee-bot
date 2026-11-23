@@ -70,6 +70,8 @@ const beeTools = [
   "ask_user",
   "create_routine",
   "share_file",
+  "follow_up",
+  "task_status",
   "browser_navigate",
   "browser_snapshot",
   "browser_click",

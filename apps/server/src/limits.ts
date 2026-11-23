@@ -33,13 +33,21 @@ export function clampLimits(raw: LimitOverrides): Limits {
   return limits;
 }
 
-function checkChain(limits: Limits, chain: Chain, now: string): Verdict {
-  if (chain.hop + 1 > limits.hop) return refuse("hop");
+// A follow-up stays on its task, so it adds no hop.
+export function checkFollowUp(
+  limits: Limits,
+  { chain, now }: { chain: Chain; now: string },
+): Verdict {
   if (chain.turns >= limits.chainTurns) return refuse("chain_turns");
   if (Date.parse(now) - Date.parse(chain.startedAt) >= limits.chainWallMs) {
     return refuse("chain_time");
   }
   return allow;
+}
+
+function checkChain(limits: Limits, chain: Chain, now: string): Verdict {
+  if (chain.hop + 1 > limits.hop) return refuse("hop");
+  return checkFollowUp(limits, { chain, now });
 }
 
 // The child would sit at hop + 1 and depth + 1. `tasksInRun` is a pre-check: the cap that holds is

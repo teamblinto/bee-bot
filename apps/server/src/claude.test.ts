@@ -407,6 +407,8 @@ describe("a turn", () => {
           "mcp__bee__ask_user",
           "mcp__bee__create_routine",
           "mcp__bee__share_file",
+          "mcp__bee__follow_up",
+          "mcp__bee__task_status",
           "mcp__bee__browser_navigate",
           "mcp__bee__browser_snapshot",
           "mcp__bee__browser_click",

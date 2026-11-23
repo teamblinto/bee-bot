@@ -37,7 +37,15 @@ export type TaskInput = Pick<
 > & { deliveryKey: string; attended: boolean };
 
 // How a bot-written message was sent. Its id starts with this, and the provenance label reads it back.
-const viaNames = ["delegate", "handoff", "result", "message", "notify", "question"] as const;
+const viaNames = [
+  "delegate",
+  "handoff",
+  "result",
+  "message",
+  "notify",
+  "question",
+  "follow_up",
+] as const;
 export type Via = (typeof viaNames)[number];
 const vias = new Set<string>(viaNames);
 // What a queued task posts when it opens.
@@ -52,6 +60,8 @@ export type TaskDelivery = {
 };
 
 export type Refused = { refused: "fan_out" };
+export type FollowUpKind = "ask" | "answer" | "rework" | "cancel";
+type FollowUpRefused = { refused: "not_found" | "not_party" | "wrong_state" | "not_reachable" };
 type EndStatus = "done" | "failed" | "cancelled" | "refused";
 
 export function provenanceLabel(message: {
@@ -125,6 +135,14 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `UPDATE tasks SET owner_bot_id = ?, hop = ?, status = 'queued', pending_json = ?,
        updated_at = ?
      WHERE id = ? AND status IN ('queued', 'open') AND owner_bot_id = ? AND owner_bot_id <> ?
+     RETURNING ${taskColumns}`,
+  );
+  const selectMine = db.prepare(
+    `SELECT ${taskColumns} FROM tasks
+     WHERE (requester_bot_id = ? OR owner_bot_id = ?) AND status IN ${active} ORDER BY rowid`,
+  );
+  const setStatus = db.prepare(
+    `UPDATE tasks SET status = ?, pending_json = ?, updated_at = ? WHERE id = ?
      RETURNING ${taskColumns}`,
   );
   const selectDmScope = db.prepare(
@@ -345,6 +363,75 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         return getTask(task.id) ?? task;
       }),
 
+    // Who may follow up, and when: the owner asks while the task is open; the requester asks,
+    // answers a question, sends finished work back, or cancels.
+    followUp: (input: {
+      taskId: string;
+      botId: string;
+      kind: FollowUpKind;
+      message: string;
+      attended: boolean;
+    }) =>
+      transaction((): Task | FollowUpRefused => {
+        const task = getTask(input.taskId);
+        if (!task) {
+          return { refused: "not_found" };
+        }
+        const { kind, botId, message, attended } = input;
+        const asOwner = kind === "ask" && botId === task.ownerBotId;
+        if (!asOwner && botId !== task.requesterBotId) {
+          return { refused: "not_party" };
+        }
+        const allowed = {
+          ask: ["open"],
+          answer: ["needs_input"],
+          rework: ["done"],
+          cancel: ["queued", "open", "needs_input"],
+        }[kind];
+        if (!allowed.includes(task.status)) {
+          return { refused: "wrong_state" };
+        }
+        const { chainId, hop, depth } = task;
+        const now = new Date().toISOString();
+        if (kind === "ask") {
+          const id = messageId("follow_up");
+          if (asOwner) {
+            const scope = ScopeRow.safeParse(
+              selectRoomScope.get(task.roomId, task.requesterBotId),
+            ).data;
+            if (!scope) {
+              return { refused: "not_reachable" };
+            }
+            const back = { chainId, hop, depth: Math.max(depth - 1, 0) };
+            deliver.post({ id, roomId: task.roomId, botId, body: message, ...back });
+            deliver.wake(scope.scopeId, `follow_up:${id}`, attended, back);
+            return changed(setStatus.get("needs_input", null, now, task.id));
+          }
+          const scope = ownerScope(task);
+          if (!scope) {
+            return { refused: "not_reachable" };
+          }
+          deliver.post({ id, roomId: scope.roomId, botId, body: message, chainId, hop, depth });
+          deliver.wake(scope.scopeId, `task:${id}`, attended, { chainId, hop, depth });
+          return task;
+        }
+        const pending =
+          kind === "cancel"
+            ? null
+            : JSON.stringify({ from: botId, via: "follow_up", body: message });
+        changed(setStatus.get(kind === "cancel" ? "cancelled" : "queued", pending, now, task.id));
+        promoteNextTask(task.ownerBotId);
+        return getTask(task.id) ?? task;
+      }),
+
+    tasksOf: (botId: string, taskId?: string) =>
+      taskId === undefined
+        ? z.array(Task).parse(selectMine.all(botId, botId))
+        : [getTask(taskId)].filter(
+            (task): task is Task =>
+              task !== undefined && (task.requesterBotId === botId || task.ownerBotId === botId),
+          ),
+
     // The run's own facts, never the model's: who is asking, from where, and how deep in the chain.
     runGrant: (runId: string) => {
       const row = selectGrant.get(runId);
@@ -374,7 +461,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     postFrom: (
       from: { botId: string } & ChainPoint,
       roomId: string,
-      via: Exclude<Via, "delegate" | "handoff" | "result" | "message">,
+      via: Exclude<Via, "delegate" | "handoff" | "result" | "message" | "follow_up">,
       body: string,
     ) =>
       transaction(() => {
