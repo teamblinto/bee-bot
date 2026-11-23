@@ -92,9 +92,16 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `SELECT ${taskColumns} FROM tasks WHERE status IN ${active} ORDER BY rowid`,
   );
   const countForRun = db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE parent_run_id = ?");
+  // A parked or boot-held run answers its scope's unacked input when it resumes. A task opened
+  // into that scope would ride the same turn and carry the owner's input out as its result.
   const selectBusy = db.prepare(
     `SELECT 1 FROM tasks WHERE owner_bot_id = ? AND status = 'open'
-     UNION ALL SELECT 1 FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
+     UNION ALL SELECT 1 FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')
+     UNION ALL SELECT 1 FROM runs r JOIN scopes s ON s.id = r.scope_id
+       WHERE r.bot_id = ? AND r.status IN ('WaitingUser', 'WaitingQuota', 'Interrupted')
+         AND r.rowid = (SELECT MAX(rowid) FROM runs WHERE scope_id = r.scope_id)
+         AND EXISTS (SELECT 1 FROM messages m WHERE m.room_id = s.room_id
+           AND m.event_seq > s.acked_event_seq AND (m.author = 'human' OR m.bot_id <> s.bot_id))`,
   );
   const selectWaiting = db.prepare(
     `SELECT 1 FROM tasks WHERE requester_bot_id = ? AND status IN ${active}`,
@@ -237,7 +244,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   // steered into an unrelated live run, and an owner keeps at most one open task. One whose owner
   // has no scope to receive it any more fails, and the next is tried.
   function promoteNextTask(botId: string): Task | undefined {
-    if (selectBusy.get(botId, botId)) {
+    if (selectBusy.get(botId, botId, botId)) {
       return undefined;
     }
     const row = selectNext.get(botId);

@@ -338,10 +338,14 @@ describe("task queue", () => {
     open().claimRun(id, "boot", new Date().toISOString());
     return id;
   };
-  const finish = (botId: string, status: "Completed" | "WaitingUser" = "Completed") => {
+  const finish = (
+    botId: string,
+    status: "Completed" | "WaitingUser" | "WaitingQuota" = "Completed",
+    extra: { reply?: string; blockedUntil?: string } = {},
+  ) => {
     const running = maybeRun(botId);
     const id = running?.status === "Running" ? running.id : startRun(botId);
-    open().finishRun(id, "boot", { status, reason: null, reply: "done" });
+    open().finishRun(id, "boot", { status, reason: null, reply: "done", ...extra });
   };
   const statuses = () =>
     open()
@@ -544,13 +548,69 @@ describe("task queue", () => {
     expect(delegate(requester("Cy"), ben.id).status).toBe("open");
   });
 
-  it("opens a queued task when a run interrupted at boot is held", () => {
+  const secret = "my bank PIN is 4321";
+  const ownerAsks = (bot: { id: string; roomId: string }) => {
+    open().sendMessage({
+      id: crypto.randomUUID(),
+      roomId: bot.roomId,
+      body: secret,
+      attended: true,
+    });
+    open().queueRun(dueWake(bot.id));
+    return startRun(bot.id);
+  };
+  const leaked = (roomId: string) =>
+    open()
+      .state()
+      .messages.some((m) => m.roomId === roomId && m.body.includes(secret));
+
+  it("keeps a task queued while the bot's quota-parked run has the owner's DM unanswered", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    ownerAsks(ben);
+    const ada = requester("Ada");
+    const task = delegate(ada, ben.id);
+    expect(task.status).toBe("queued");
+    finish(ben.id, "WaitingQuota", { blockedUntil: new Date(Date.now() - 1000).toISOString() });
+    expect(store.tasks.getTask(task.id)?.status).toBe("queued");
+
+    finish(ben.id, "Completed", { reply: `About ${secret}` });
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    finish(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("done");
+    expect(leaked(ada.bot.roomId)).toBe(false);
+  });
+
+  it("keeps a task queued while a run held at boot has the owner's DM unanswered", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    ownerAsks(ben);
+    const ada = requester("Ada");
+    const task = delegate(ada, ben.id);
+    store.recover("next-boot", () => "hold");
+    expect(store.tasks.getTask(task.id)?.status).toBe("queued");
+
+    open().sendMessage({
+      id: crypto.randomUUID(),
+      roomId: ben.roomId,
+      body: "go on",
+      attended: true,
+    });
+    finish(ben.id, "Completed", { reply: `About ${secret}` });
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    finish(ben.id);
+    expect(leaked(ada.bot.roomId)).toBe(false);
+  });
+
+  it("opens a queued task when a run held at boot left nothing unanswered", () => {
     store = openEventStore(dataDir);
     const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
     queueOwnerRun(ben);
     startRun(ben.id);
+    const db = new DatabaseSync(dbPath());
+    db.exec(`UPDATE scopes SET acked_event_seq = 1000000 WHERE bot_id = '${ben.id}'`);
+    db.close();
     const task = delegate(requester("Ada"), ben.id);
-    expect(task.status).toBe("queued");
     store.recover("next-boot", () => "hold");
     expect(store.tasks.getTask(task.id)?.status).toBe("open");
   });
