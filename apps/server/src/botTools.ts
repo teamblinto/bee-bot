@@ -340,7 +340,7 @@ export function callBotTool(
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
       }
-      const move = { fromBotId: grant.botId, toBotId: target.id, attended: grant.attended };
+      const move = { fromBotId: grant.botId, toBotId: target.id };
       const owned = grant.taskId ?? undefined;
       if (owned && !grant.owns(owned)) {
         return refused("not_owner");

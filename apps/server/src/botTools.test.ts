@@ -360,7 +360,7 @@ describe("handoff", () => {
     }
     const second = openEventStore(dataDir);
     cleanups.push(() => second.close());
-    const move = { fromBotId: ben.id, hop: 2, note: "Over to you", attended: true };
+    const move = { fromBotId: ben.id, hop: 2, note: "Over to you" };
     expect(second.tasks.handoff(task.id, { ...move, toBotId: di.id })).toMatchObject({
       ownerBotId: di.id,
     });

@@ -21,7 +21,7 @@ const GrantRow = z.object({
 });
 const ChainRow = z.object({ turns: z.number(), startedAt: z.string() });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
-const NextRow = z.object({ id: z.string(), pendingJson: z.string() });
+const NextRow = Task.extend({ pendingJson: z.string() });
 
 export type TaskInput = Pick<
   Task,
@@ -52,6 +52,7 @@ export type TaskDelivery = {
 };
 
 export type Refused = { refused: "fan_out" };
+type EndStatus = "done" | "failed" | "cancelled" | "refused";
 
 export function provenanceLabel(message: {
   id: string;
@@ -90,12 +91,15 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   );
   // A chain is human-origin when its first wake came from the owner.
   const selectNext = db.prepare(
-    `SELECT id, pending_json AS pendingJson FROM tasks t
+    `SELECT ${taskColumns}, pending_json AS pendingJson FROM tasks t
      WHERE owner_bot_id = ? AND status = 'queued'
      ORDER BY (SELECT w.source FROM wakes w WHERE w.chain_id = t.chain_id
          ORDER BY w.rowid LIMIT 1) = 'human' DESC,
        created_at, rowid
      LIMIT 1`,
+  );
+  const selectQueued = db.prepare(
+    `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'queued' ORDER BY rowid`,
   );
   const openQueued = db.prepare(
     `UPDATE tasks SET status = 'open', pending_json = NULL, updated_at = ?
@@ -178,22 +182,36 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const messageId = (via: Via) => `${via}:${NodeCrypto.randomUUID()}`;
 
   // A delegate goes to the owner's DM, so the child starts from the task alone. A handoff stays in
-  // its room, where the new owner answers. Throws if the owner has no such scope.
-  function deliverTask(task: Task, via: Via, from: string, body: string, attended: boolean) {
-    const row =
+  // its room, where the new owner answers.
+  const ownerScope = (task: Pick<Task, "kind" | "ownerBotId" | "roomId">) =>
+    ScopeRow.safeParse(
       task.kind === "delegate"
         ? selectDmScope.get(task.ownerBotId)
-        : selectRoomScope.get(task.roomId, task.ownerBotId);
-    const { scopeId, roomId } = ScopeRow.parse(row);
-    const id = messageId(via);
-    const { chainId, hop, depth } = task;
-    deliver.post({ id, roomId, botId: from, body, chainId, hop, depth });
-    deliver.wake(scopeId, `task:${id}`, attended, { chainId, hop, depth });
+        : selectRoomScope.get(task.roomId, task.ownerBotId),
+    ).data;
+
+  const parentAttended = (task: Task) =>
+    Attended.parse(selectRunAttended.get(task.parentRunId)).attended;
+
+  const noResult = (status: EndStatus) => `The task ended without a result (${status}).`;
+
+  // The owner posts the outcome where the task was asked, and the requester wakes to read it.
+  function endWithResult(task: Task, status: EndStatus, body: string, attended: boolean) {
+    const resultId = messageId("result");
+    const { chainId, hop, roomId } = task;
+    deliver.post({ id: resultId, roomId, botId: task.ownerBotId, body, chainId, hop, depth: 0 });
+    const scope = ScopeRow.safeParse(selectRoomScope.get(roomId, task.requesterBotId)).data;
+    if (scope) {
+      const back = { chainId, hop, depth: Math.max(task.depth - 1, 0) };
+      deliver.wake(scope.scopeId, `result:${task.id}`, attended, back);
+    }
+    changed(endTask.get(status, resultId, new Date().toISOString(), task.id));
   }
 
   // Inside the caller's transaction. A task never opens on a busy bot, so its message is never
-  // steered into an unrelated live run, and an owner keeps at most one open task.
-  function promoteNextTask(botId: string) {
+  // steered into an unrelated live run, and an owner keeps at most one open task. One whose owner
+  // has no scope to receive it any more fails, and the next is tried.
+  function promoteNextTask(botId: string): Task | undefined {
     if (selectBusy.get(botId, botId)) {
       return undefined;
     }
@@ -201,21 +219,25 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     if (!row) {
       return undefined;
     }
-    const next = NextRow.parse(row);
-    const pending = Pending.parse(JSON.parse(next.pendingJson));
-    const task = changed(openQueued.get(new Date().toISOString(), next.id));
-    const { attended } = Attended.parse(selectRunAttended.get(task.parentRunId));
-    deliverTask(task, pending.via, pending.from, pending.body, attended);
+    const { pendingJson, ...queued } = NextRow.parse(row);
+    const attended = parentAttended(queued);
+    const scope = ownerScope(queued);
+    if (!scope) {
+      endWithResult(queued, "failed", noResult("failed"), attended);
+      return promoteNextTask(botId);
+    }
+    const { from, via, body } = Pending.parse(JSON.parse(pendingJson));
+    const task = changed(openQueued.get(new Date().toISOString(), queued.id));
+    const id = messageId(via);
+    const { chainId, hop, depth } = task;
+    deliver.post({ id, roomId: scope.roomId, botId: from, body, chainId, hop, depth });
+    deliver.wake(scope.scopeId, `task:${id}`, attended, { chainId, hop, depth });
     return task;
   }
 
   // A delegate's outcome goes back once, with no acknowledgment turn. A run with its own
   // delegations still active leaves its task to the run their results wake.
-  function endRunTask(
-    run: Pick<Run, "id" | "botId" | "taskId">,
-    status: "done" | "failed" | "cancelled" | "refused",
-    text: string,
-  ) {
+  function endRunTask(run: Pick<Run, "id" | "botId" | "taskId">, status: EndStatus, text: string) {
     const task = run.taskId ? getTask(run.taskId) : undefined;
     if (task?.status !== "open" || task.ownerBotId !== run.botId) {
       return;
@@ -223,20 +245,12 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     if (status === "done" && selectWaiting.get(run.botId)) {
       return;
     }
-    let resultId: string | null = null;
-    if (task.kind === "delegate") {
-      resultId = messageId("result");
-      const { chainId, hop, roomId } = task;
-      const body = status === "done" ? text : `The task ended without a result (${status}).`;
-      deliver.post({ id: resultId, roomId, botId: run.botId, body, chainId, hop, depth: 0 });
-      const scope = ScopeRow.safeParse(selectRoomScope.get(roomId, task.requesterBotId)).data;
-      if (scope) {
-        const { attended } = Attended.parse(selectRunAttended.get(run.id));
-        const back = { chainId, hop, depth: Math.max(task.depth - 1, 0) };
-        deliver.wake(scope.scopeId, `result:${task.id}`, attended, back);
-      }
+    if (task.kind !== "delegate") {
+      changed(endTask.get(status, null, new Date().toISOString(), task.id));
+      return;
     }
-    changed(endTask.get(status, resultId, new Date().toISOString(), task.id));
+    const { attended } = Attended.parse(selectRunAttended.get(run.id));
+    endWithResult(task, status, status === "done" ? text : noResult(status), attended);
   }
 
   return {
@@ -258,6 +272,9 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         }
         const now = new Date().toISOString();
         const { kind, chainId, hop, depth, parentRunId, requesterBotId, ownerBotId } = input;
+        if (!ownerScope(input)) {
+          throw new Error(`${ownerBotId} has nowhere to receive the task`);
+        }
         const pending = { from: requesterBotId, via: kind, body: input.goal };
         const task = changed(
           insertTask.get(
@@ -295,7 +312,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     // in the new owner's queue like any other.
     handoff: (
       id: string,
-      move: { fromBotId: string; toBotId: string; hop: number; note: string; attended: boolean },
+      move: { fromBotId: string; toBotId: string; hop: number; note: string },
     ) =>
       transaction((): Task | undefined => {
         const { fromBotId, toBotId } = move;
@@ -312,6 +329,9 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         );
         if (!row) {
           return undefined;
+        }
+        if (!ownerScope(Task.parse(row))) {
+          throw new Error(`${toBotId} has nowhere to receive the task`);
         }
         const task = changed(row);
         promoteNextTask(toBotId);
@@ -361,12 +381,15 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
     dmRoom: (botId: string) => ScopeRow.safeParse(selectDmScope.get(botId)).data?.roomId,
 
+    // Inside the store's transaction that stops the bot, before its runs settle, so none opens.
+    refuseQueued: (botId: string) => {
+      for (const task of z.array(Task).parse(selectQueued.all(botId))) {
+        endWithResult(task, "refused", noResult("refused"), parentAttended(task));
+      }
+    },
+
     // Inside the store's transaction that ends the run. Every end frees the bot for its next task.
-    settleRun: (
-      run: Pick<Run, "id" | "botId" | "taskId">,
-      status: "done" | "failed" | "cancelled" | "refused",
-      text: string,
-    ) => {
+    settleRun: (run: Pick<Run, "id" | "botId" | "taskId">, status: EndStatus, text: string) => {
       endRunTask(run, status, text);
       promoteNextTask(run.botId);
     },

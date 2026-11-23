@@ -220,7 +220,6 @@ describe("tasks", () => {
         toBotId,
         hop: 2,
         note: "Over to you",
-        attended: true,
       });
     expect(move(input.ownerBotId, ben)).toMatchObject({ ownerBotId: ben });
     expect(move(input.ownerBotId, cy)).toBeUndefined();
@@ -429,6 +428,88 @@ describe("task queue", () => {
       ),
     ).toContainEqual({ key: `result:${t1.id}` });
     check.close();
+  });
+
+  const pendingKeys = (botId: string) => {
+    const check = new DatabaseSync(dbPath());
+    const keys = rows(
+      check,
+      `SELECT idempotency_key AS key FROM wakes WHERE bot_id = '${botId}' AND status = 'pending'`,
+    ).map(({ key }) => key);
+    check.close();
+    return keys;
+  };
+
+  it("fails a queued handoff whose owner left the room, and still ends the owner's run", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    queueOwnerRun(ben);
+    const ada = requester("Ada");
+    const roomId =
+      store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.bot.id, ben.id] })?.id ?? "";
+    const task = store.tasks.createTask(
+      {
+        kind: "handoff",
+        chainId: "chain",
+        hop: 1,
+        depth: 0,
+        parentRunId: ada.run.id,
+        requesterBotId: ada.bot.id,
+        ownerBotId: ben.id,
+        roomId,
+        goal: "Take it",
+        deliveryKey: "handoff",
+        attended: true,
+      },
+      3,
+    );
+    expect(task).toMatchObject({ status: "queued" });
+    store.rooms.removeMember(roomId, ben.id);
+    const id = "id" in task ? task.id : "";
+    finish(ben.id);
+    expect(latestRun(ben.id).status).toBe("Completed");
+    expect(store.tasks.getTask(id)?.status).toBe("failed");
+    expect(pendingKeys(ada.bot.id)).toContain(`result:${id}`);
+  });
+
+  it("stopping a bot refuses its queued tasks instead of starting the next", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const cy = requester("Cy");
+    const t1 = delegate(ada, ben.id);
+    const t2 = delegate(cy, ben.id);
+    open().queueRun(dueWake(ben.id));
+    store.stopBot(ben.id);
+    expect(statuses().filter(({ id }) => id === t1.id || id === t2.id)).toEqual([]);
+    expect(store.tasks.getTask(t2.id)?.status).toBe("refused");
+    expect(pendingKeys(ben.id)).toEqual([]);
+    expect(pendingKeys(ada.bot.id)).toContain(`result:${t1.id}`);
+    expect(pendingKeys(cy.bot.id)).toContain(`result:${t2.id}`);
+  });
+
+  it("stopping a bot ends the task of its parked run, so its queue moves", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const t1 = delegate(ada, ben.id);
+    startRun(ben.id);
+    finish(ben.id, "WaitingUser");
+    store.stopBot(ben.id);
+    expect(store.tasks.getTask(t1.id)?.status).toBe("cancelled");
+    expect(pendingKeys(ada.bot.id)).toContain(`result:${t1.id}`);
+    expect(delegate(requester("Cy"), ben.id).status).toBe("open");
+  });
+
+  it("opens a queued task when a run interrupted at boot is held", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    queueOwnerRun(ben);
+    startRun(ben.id);
+    const task = delegate(requester("Ada"), ben.id);
+    expect(task.status).toBe("queued");
+    store.recover("next-boot", () => "hold");
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
   });
 
   it("keeps queued tasks across a restart", () => {

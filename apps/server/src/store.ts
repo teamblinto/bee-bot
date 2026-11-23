@@ -3198,8 +3198,11 @@ export function openEventStore(dataDir: string) {
     stopBot: (botId: string) =>
       transaction(() => {
         cancelPendingWakes.run(botId);
-        for (const parked of cancelParked.all(new Date().toISOString(), botId)) {
-          recordRun(RunRow.parse(parked));
+        tasks.refuseQueued(botId);
+        for (const row of cancelParked.all(new Date().toISOString(), botId)) {
+          const parked = RunRow.parse(row);
+          recordRun(parked);
+          tasks.settleRun(parked, "cancelled", "");
         }
         const row = selectActiveRun.get(botId);
         if (!row) {
