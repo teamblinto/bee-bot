@@ -501,6 +501,18 @@ describe("task queue", () => {
     expect(delegate(requester("Cy"), ben.id).status).toBe("open");
   });
 
+  it("stopping a bot ends the open task it had not started yet", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const t1 = delegate(ada, ben.id);
+    expect(t1.status).toBe("open");
+    store.stopBot(ben.id);
+    expect(store.tasks.getTask(t1.id)?.status).toBe("cancelled");
+    expect(pendingKeys(ada.bot.id)).toContain(`result:${t1.id}`);
+    expect(delegate(requester("Cy"), ben.id).status).toBe("open");
+  });
+
   it("opens a queued task when a run interrupted at boot is held", () => {
     store = openEventStore(dataDir);
     const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });

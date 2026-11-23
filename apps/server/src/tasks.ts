@@ -101,6 +101,12 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectQueued = db.prepare(
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'queued' ORDER BY rowid`,
   );
+  const selectUnstarted = db.prepare(
+    `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'open'
+       AND id NOT IN (SELECT task_id FROM runs WHERE task_id IS NOT NULL
+         AND status IN ('Queued', 'Running', 'WaitingUser', 'WaitingQuota'))
+     ORDER BY rowid`,
+  );
   const openQueued = db.prepare(
     `UPDATE tasks SET status = 'open', pending_json = NULL, updated_at = ?
      WHERE id = ? RETURNING ${taskColumns}`,
@@ -385,6 +391,13 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     refuseQueued: (botId: string) => {
       for (const task of z.array(Task).parse(selectQueued.all(botId))) {
         endWithResult(task, "refused", noResult("refused"), parentAttended(task));
+      }
+    },
+
+    // A task opened by a wake the stop cancelled has no run to settle it.
+    cancelUnstarted: (botId: string) => {
+      for (const task of z.array(Task).parse(selectUnstarted.all(botId))) {
+        endWithResult(task, "cancelled", noResult("cancelled"), parentAttended(task));
       }
     },
 

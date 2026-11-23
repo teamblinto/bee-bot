@@ -3204,6 +3204,7 @@ export function openEventStore(dataDir: string) {
           recordRun(parked);
           tasks.settleRun(parked, "cancelled", "");
         }
+        tasks.cancelUnstarted(botId);
         const row = selectActiveRun.get(botId);
         if (!row) {
           return undefined;
