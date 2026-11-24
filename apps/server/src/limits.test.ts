@@ -7,6 +7,7 @@ import {
   checkFollowUp,
   checkMentionWake,
   checkRoutineCreate,
+  checkWakeCreate,
   clampLimits,
   noProgressDelay,
   trackFailures,
@@ -170,5 +171,13 @@ describe("checkRoutineCreate", () => {
     expect(checkRoutineCreate({ source: "routine" })).toEqual(refuse("routine_approval"));
     expect(checkRoutineCreate({ source: null })).toEqual(allow);
     expect(checkRoutineCreate({ source: "human" })).toEqual(allow);
+  });
+});
+
+describe("checkWakeCreate", () => {
+  it("refuses only an unattended run in a tainted session", () => {
+    expect(checkWakeCreate({ attended: false, tainted: true })).toEqual(refuse("wake_approval"));
+    expect(checkWakeCreate({ attended: true, tainted: true })).toEqual(allow);
+    expect(checkWakeCreate({ attended: false, tainted: false })).toEqual(allow);
   });
 });

@@ -122,3 +122,10 @@ export function trackFailures(): (call: ToolCall) => Verdict {
 export function checkRoutineCreate(input: { source: WakeSource | null }): Verdict {
   return input.source === "routine" ? refuse("routine_approval") : allow;
 }
+
+export const maxPendingWakeups = 10;
+export const maxPendingWaits = 10;
+
+export function checkWakeCreate(input: { attended: boolean; tainted: boolean }): Verdict {
+  return !input.attended && input.tainted ? refuse("wake_approval") : allow;
+}

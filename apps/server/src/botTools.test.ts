@@ -751,3 +751,77 @@ describe("share_file", () => {
     expect(reply?.roomId).toBe(ada.roomId);
   });
 });
+
+describe("schedule_wakeup", () => {
+  function solo() {
+    openStore();
+    const [ada] = team("Ada");
+    if (!ada) {
+      throw new Error("no team");
+    }
+    return ada;
+  }
+
+  it("schedules a once routine for in_minutes, and refuses both or neither of at and in_minutes", () => {
+    const ada = solo();
+    say(ada.roomId, "go");
+    const run = start(ada.id);
+    const before = Date.now();
+    const result = call(run, "schedule_wakeup", { in_minutes: 30, note: "  Check the deploy " });
+    expect(result).toMatchObject({ status: "scheduled" });
+    const routine = store.getRoutine(String(result.routine_id));
+    expect(routine).toMatchObject({
+      kind: "once",
+      enabled: true,
+      name: "Wakeup: Check the deploy",
+      prompt: "Check the deploy",
+      fireAt: result.fire_at,
+    });
+    const delay = Date.parse(String(result.fire_at)) - before;
+    expect(delay).toBeGreaterThanOrEqual(30 * 60_000);
+    expect(delay).toBeLessThan(31 * 60_000);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    for (const args of [
+      { note: "x" },
+      { at, in_minutes: 5, note: "x" },
+      { at: new Date(Date.now() + 10_000).toISOString(), note: "x" },
+      { at: "tomorrow", note: "x" },
+      { in_minutes: 43_201, note: "x" },
+      { in_minutes: 5, note: "x", task_id: "someone-else" },
+    ]) {
+      expect(call(run, "schedule_wakeup", args)).toMatchObject({ status: "refused" });
+    }
+    expect(call(run, "schedule_wakeup", { at, note: "Later" })).toMatchObject({
+      status: "scheduled",
+      fire_at: at,
+    });
+    expect(store.pendingWakeups(ada.id)).toBe(2);
+  });
+
+  it("refuses an unattended tainted run with wake_approval and creates nothing", () => {
+    const ada = solo();
+    store.sendMessage({ id: crypto.randomUUID(), roomId: ada.roomId, body: "go", attended: false });
+    const run = start(ada.id);
+    store.markUntrusted(run.id);
+    expect(call(run, "schedule_wakeup", { in_minutes: 5, note: "Again" })).toMatchObject({
+      status: "refused",
+      reason: "wake_approval",
+    });
+    expect(store.state().routines).toEqual([]);
+  });
+
+  it("refuses an 11th pending wakeup", () => {
+    const ada = solo();
+    say(ada.roomId, "go");
+    const run = start(ada.id);
+    for (let i = 0; i < 10; i++) {
+      expect(call(run, "schedule_wakeup", { in_minutes: 5 + i, note: `n${i}` })).toMatchObject({
+        status: "scheduled",
+      });
+    }
+    expect(call(run, "schedule_wakeup", { in_minutes: 5, note: "one more" })).toMatchObject({
+      status: "refused",
+      reason: "too_many_wakeups",
+    });
+  });
+});

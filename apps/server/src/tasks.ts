@@ -18,6 +18,7 @@ const GrantRow = z.object({
   taskId: z.string().nullable(),
   source: WakeSource,
   attended: z.number().transform(Boolean),
+  tainted: z.number().transform(Boolean),
 });
 const ChainRow = z.object({ turns: z.number(), startedAt: z.string() });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
@@ -160,7 +161,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   );
   const selectGrant = db.prepare(
     `SELECT r.bot_id AS botId, s.room_id AS roomId, r.chain_id AS chainId, r.hop, r.depth,
-       r.task_id AS taskId, w.source, w.attended
+       r.task_id AS taskId, w.source, w.attended, s.tainted
      FROM runs r JOIN scopes s ON s.id = r.scope_id JOIN wakes w ON w.id = r.wake_id
      WHERE r.id = ? AND r.status = 'Running'`,
   );

@@ -7,7 +7,14 @@ import { z } from "zod";
 
 import { attachmentName, attachmentPath, receiveAttachment, refusedName } from "./attachments.ts";
 import type { BoxAttach } from "./boxRuntime.ts";
-import { checkDelegation, checkFollowUp, checkRoutineCreate, clampLimits } from "./limits.ts";
+import {
+  checkDelegation,
+  checkFollowUp,
+  checkRoutineCreate,
+  checkWakeCreate,
+  clampLimits,
+  maxPendingWakeups,
+} from "./limits.ts";
 import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
@@ -19,6 +26,7 @@ const activityRows = 10;
 const followUpKinds = ["ask", "answer", "rework", "cancel"] as const;
 const activityChars = 8000;
 const activityLineChars = 500;
+const maxWakeMinutes = 30 * 24 * 60;
 const schema = (properties: Record<string, object>, required = Object.keys(properties)) => ({
   type: "object",
   properties,
@@ -91,6 +99,21 @@ export const botTools = [
     inputSchema: schema({ name: text, prompt: text, cron: text, timezone: text }),
   },
   {
+    name: "schedule_wakeup",
+    description:
+      "Wakes you once, later, with your note. Give `at` (ISO time) or `in_minutes`, not both. End " +
+      "your turn after. To keep a task open while you wait on something, use wait_until.",
+    inputSchema: schema(
+      {
+        at: text,
+        in_minutes: { type: "integer", minimum: 1, maximum: maxWakeMinutes },
+        note: text,
+        task_id: text,
+      },
+      ["note"],
+    ),
+  },
+  {
     name: "share_file",
     description:
       "Attaches a file from your workspace to your reply, for the owner to download. Up to 50 MB.",
@@ -128,6 +151,15 @@ const CreateRoutine = z.object({
   cron: z.string().trim().min(1).max(100),
   timezone: z.string().trim().min(1).max(100),
 });
+
+const ScheduleWakeup = z
+  .object({
+    at: z.iso.datetime({ offset: true }).optional(),
+    in_minutes: z.number().int().min(1).max(maxWakeMinutes).optional(),
+    note: z.string().trim().min(1).max(2000),
+    task_id: z.string().trim().min(1).optional(),
+  })
+  .refine(({ at, in_minutes }) => (at === undefined) !== (in_minutes === undefined));
 
 const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
 const refused = (reason: string) =>
@@ -480,6 +512,45 @@ export function callBotTool(
             reason: verdict.verdict === "refuse" ? verdict.reason : null,
             note: "It stays off until the owner turns it on.",
           });
+    }
+    case "schedule_wakeup": {
+      const { data } = ScheduleWakeup.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      if (data.task_id !== undefined && data.task_id !== grant.taskId) {
+        return refused("not_your_task");
+      }
+      const fireMs = data.at
+        ? Date.parse(data.at)
+        : Date.parse(now) + (data.in_minutes ?? 0) * 60_000;
+      const delayMs = fireMs - Date.parse(now);
+      if (delayMs < 60_000 || delayMs > maxWakeMinutes * 60_000) {
+        return refused("out_of_range");
+      }
+      const verdict = checkWakeCreate(grant);
+      if (verdict.verdict === "refuse") {
+        return refused(verdict.reason);
+      }
+      const routine = store.scheduleWakeup(
+        {
+          botId: grant.botId,
+          name: `Wakeup: ${oneLine(data.note).slice(0, 70)}`,
+          prompt: data.note,
+          fireAt: new Date(fireMs).toISOString(),
+          createdByRunId: run.id,
+        },
+        maxPendingWakeups,
+      );
+      if ("refused" in routine) {
+        return refused(routine.refused);
+      }
+      return answer({
+        status: "scheduled",
+        routine_id: routine.id,
+        fire_at: routine.fireAt,
+        note: endTurn,
+      });
     }
     default:
       return refused("unknown_tool");

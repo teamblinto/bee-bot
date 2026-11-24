@@ -236,6 +236,7 @@ describe("Claude in a box", () => {
         "read_bot_activity",
         "ask_user",
         "create_routine",
+        "schedule_wakeup",
         "share_file",
         "follow_up",
         "task_status",

@@ -858,6 +858,7 @@ export const LimitRefusal = z.enum([
   "chain_turns",
   "chain_time",
   "routine_approval",
+  "wake_approval",
 ]);
 export type LimitRefusal = z.infer<typeof LimitRefusal>;
 

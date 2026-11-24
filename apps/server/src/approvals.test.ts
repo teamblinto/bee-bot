@@ -269,6 +269,7 @@ describe("the MCP endpoint", () => {
       "read_bot_activity",
       "ask_user",
       "create_routine",
+      "schedule_wakeup",
       "share_file",
     ];
     const browsing = [
