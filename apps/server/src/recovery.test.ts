@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { monthStart } from "./admission.ts";
 import { createApprovals } from "./approvals.ts";
+import { toolRules } from "./broker.ts";
 import { BoxLimitReached } from "./boxRuntime.ts";
 import { callBotTool } from "./botTools.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
@@ -156,32 +157,35 @@ describe("recovery policy", () => {
     expect(recoveryVerdict({ ...facts, continuedAt: stale })).toBe("continue");
   });
 
-  it("counts every Bee Bot tool that acts, connector calls and screen actions as unrepeatable", () => {
+  it("counts every Bee Bot tool as unrepeatable unless it is safe to repeat", () => {
+    const repeatable = new Set([
+      "task_status",
+      "read_bot_activity",
+      "memory_search",
+      "memory_get",
+      "browser_snapshot",
+      "computer_screenshot",
+      "computer_windows",
+      "computer_look",
+      "computer_desktop",
+      "request_takeover",
+      "share_file",
+    ]);
+    for (const name of Object.keys(toolRules)) {
+      const tool = `mcp__bee__${name}`;
+      expect(outwardTool(tool), tool).toBe(!repeatable.has(name));
+    }
     for (const tool of [
-      "mcp__bee__send_message",
+      "mcp__bee__memory_propose",
+      "mcp__bee__memory_forget",
+      "mcp__bee__ask_user",
       "mcp__bee__notify",
-      "mcp__bee__delegate",
-      "mcp__bee__handoff",
-      "mcp__bee__follow_up",
-      "mcp__bee__schedule_wakeup",
-      "mcp__bee__wait_until",
-      "mcp__bee__create_routine",
-      "mcp__bee__report_progress",
+      "mcp__bee__nope",
       "mcp__connectors__github_create_issue",
-      "mcp__bee__browser_click",
-      "mcp__bee__computer_type",
     ]) {
       expect(outwardTool(tool), tool).toBe(true);
     }
-    for (const tool of [
-      "Bash",
-      "Write",
-      "Patch",
-      "mcp__bee__task_status",
-      "mcp__bee__read_bot_activity",
-      "mcp__bee__browser_snapshot",
-      "mcp__bee__nope",
-    ]) {
+    for (const tool of ["Bash", "Write", "Patch"]) {
       expect(outwardTool(tool), tool).toBe(false);
     }
   });
