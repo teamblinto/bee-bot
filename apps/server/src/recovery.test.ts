@@ -12,7 +12,7 @@ import { BoxLimitReached } from "./boxRuntime.ts";
 import { callBotTool } from "./botTools.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
-import { continueWindowMs, recoveryVerdict } from "./recovery.ts";
+import { continueWindowMs, outwardTool, recoveryVerdict } from "./recovery.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 import { createSupervisor } from "./supervisor.ts";
 import { type AwakeClock, createAwakeClock, createWatchdog } from "./watchdog.ts";
@@ -35,20 +35,30 @@ const reply: TurnOutcome = { kind: "completed", text: "done" };
 
 function scriptedEngine() {
   const turns: Array<{
+    botId: string;
     prompt: string;
     resume: boolean;
     deliver: () => void;
-    tool: (id: string) => void;
+    tool: (id: string, name?: string) => void;
     toolEnd: (id: string) => void;
     finish: (outcome: TurnOutcome) => void;
   }> = [];
-  const runTurn: RunTurn = ({ prompt, resume, signal, onDelivered, onToolStart, onToolEnd }) =>
+  const runTurn: RunTurn = ({
+    prompt,
+    resume,
+    launch,
+    signal,
+    onDelivered,
+    onToolStart,
+    onToolEnd,
+  }) =>
     new Promise((resolve) => {
       turns.push({
+        botId: launch.botId,
         prompt,
         resume,
         deliver: onDelivered,
-        tool: (id) => onToolStart({ id, name: "Bash", detail: null }),
+        tool: (id, name = "Bash") => onToolStart({ id, name, detail: null }),
         toolEnd: (id) => onToolEnd(id, false),
         finish: resolve,
       });
@@ -117,17 +127,53 @@ describe("recovery policy", () => {
   const now = "2026-11-08T12:00:00.000Z";
   const ago = (ms: number) => new Date(Date.parse(now) - ms).toISOString();
 
-  it("holds a run with an effect that may or may not have happened", () => {
-    expect(recoveryVerdict({ unsettledEffects: 1, continuedAt: [], now })).toBe("hold");
+  const facts = {
+    unsettledEffects: 0,
+    outwardDone: false,
+    activeChildTasks: 0,
+    recoveredBefore: false,
+    continuedAt: [],
+    now,
+  };
+
+  it("waits on children, then fails an outward or twice-cut turn, then holds, then continues", () => {
+    const all = { ...facts, unsettledEffects: 1, outwardDone: true, recoveredBefore: true };
+    expect(recoveryVerdict({ ...all, activeChildTasks: 1 })).toBe("wait");
+    expect(recoveryVerdict(all)).toBe("fail");
+    expect(recoveryVerdict({ ...all, outwardDone: false })).toBe("fail");
+    expect(recoveryVerdict({ ...facts, unsettledEffects: 1 })).toBe("hold");
+    expect(recoveryVerdict(facts)).toBe("continue");
   });
 
   it("continues at most 3 times in 5 minutes", () => {
     const two = [ago(1000), ago(2000)];
-    expect(recoveryVerdict({ unsettledEffects: 0, continuedAt: two, now })).toBe("continue");
+    expect(recoveryVerdict({ ...facts, continuedAt: two })).toBe("continue");
     const three = [...two, ago(3000)];
-    expect(recoveryVerdict({ unsettledEffects: 0, continuedAt: three, now })).toBe("hold");
+    expect(recoveryVerdict({ ...facts, continuedAt: three })).toBe("hold");
     const stale = [...two, ago(continueWindowMs + 1)];
-    expect(recoveryVerdict({ unsettledEffects: 0, continuedAt: stale, now })).toBe("continue");
+    expect(recoveryVerdict({ ...facts, continuedAt: stale })).toBe("continue");
+  });
+
+  it("counts messages, connector calls and browser or desktop actions as outward", () => {
+    for (const tool of [
+      "mcp__bee__send_message",
+      "mcp__connectors__github_create_issue",
+      "mcp__bee__browser_click",
+      "mcp__bee__computer_type",
+    ]) {
+      expect(outwardTool(tool), tool).toBe(true);
+    }
+    for (const tool of [
+      "Bash",
+      "Write",
+      "Patch",
+      "mcp__bee__delegate",
+      "mcp__bee__notify",
+      "mcp__bee__browser_snapshot",
+      "mcp__bee__nope",
+    ]) {
+      expect(outwardTool(tool), tool).toBe(false);
+    }
   });
 });
 
@@ -244,18 +290,83 @@ describe("a crash", () => {
     expect(store.effects.unsettledEffects(id)).toEqual([]);
   });
 
-  it("continues a turn cut off with no tool in flight, but only 3 times in 5 minutes", async () => {
+  // Boss hands Ada a task, so Ada's turn, the second one, works on it.
+  async function handedTask(
+    process: ReturnType<typeof boot>,
+    engine: ReturnType<typeof scriptedEngine>,
+  ) {
+    const { store } = process;
+    const [boss, ada, ben] = ["Boss", "Ada", "Ben"].map((name) => createBot(store, name, "fake"));
+    if (!boss || !ada || !ben) {
+      throw new Error("no team");
+    }
+    store.rooms.createGroupRoom({ name: "Team", memberIds: [boss.id, ada.id, ben.id] });
+    process.send(boss, "go");
+    await expectTurns(engine, 1);
+    const bossRun = { id: latestRun(store, boss)?.id ?? "", botId: boss.id };
+    callBotTool(store, bossRun, "delegate", { to: "Ada", goal: "Plan it" });
+    engine.turns[0]?.finish(reply);
+    await expectTurns(engine, 2);
+    const task = store.state().tasks.find((t) => t.ownerBotId === ada.id);
+    if (!task) {
+      throw new Error("no task");
+    }
+    return { ada, ben, task, adaRun: { id: latestRun(store, ada)?.id ?? "", botId: ada.id } };
+  }
+
+  it("waits on a run that already delegated, and never re-runs it", async () => {
+    const before = scriptedEngine();
+    const first = boot(before.runTurn);
+    const { ada, ben, task, adaRun } = await handedTask(first, before);
+    callBotTool(first.store, adaRun, "delegate", { to: "Ben", goal: "Help Ada" });
+    await first.kill();
+
+    const after = scriptedEngine();
+    const { store } = boot(after.runTurn);
+    expect(store.state().runs.find(({ id }) => id === adaRun.id)?.status).toBe("Interrupted");
+    expect(store.tasks.getTask(task.id)?.status).toBe("waiting");
+    expect(store.recentRecoveries(ada.id, 1)).toEqual([]);
+    await expectTurns(after, 1);
+    expect(after.turns[0]?.botId).toBe(ben.id);
+    await ticks(1);
+    expect(after.turns).toHaveLength(1);
+  });
+
+  it.each([true, false])(
+    "fails and reports a run that already sent a message outward (confirmed: %s)",
+    async (confirmed) => {
+      const before = scriptedEngine();
+      const first = boot(before.runTurn);
+      const { ada, task } = await handedTask(first, before);
+      before.turns[1]?.tool("t1", "mcp__bee__send_message");
+      if (confirmed) {
+        before.turns[1]?.toolEnd("t1");
+      }
+      await first.kill();
+
+      const after = scriptedEngine();
+      const { store } = boot(after.runTurn);
+      expect(store.tasks.getTask(task.id)?.status).toBe("failed");
+      expect(store.state().messages.at(-1)).toMatchObject({
+        botId: ada.id,
+        body: "The server restarted after this turn had already acted outside Bee Bot, so it wasn't run again. Check what it did, then send a message to carry on.",
+      });
+      await ticks(1);
+      expect(after.turns.filter(({ botId }) => botId === ada.id)).toEqual([]);
+    },
+  );
+
+  it("re-runs a cut-off turn once, then fails it", async () => {
     let engine = scriptedEngine();
     let process = boot(engine.runTurn);
     const bot = createBot(process.store);
     process.send(bot, "hello");
-    for (let restart = 0; restart < 3; restart += 1) {
-      await expectTurns(engine, 1);
-      await process.kill();
-      engine = scriptedEngine();
-      process = boot(engine.runTurn);
-      process.supervisor.pump();
-    }
+    await expectTurns(engine, 1);
+    await process.kill();
+
+    engine = scriptedEngine();
+    process = boot(engine.runTurn);
+    process.supervisor.pump();
     await expectTurns(engine, 1);
     expect(engine.turns[0]?.prompt).toBe("hello");
     await process.kill();
@@ -265,6 +376,10 @@ describe("a crash", () => {
     await ticks(1);
     expect(engine.turns).toEqual([]);
     expect(latestRun(store, bot)?.status).toBe("Interrupted");
+    expect(store.state().messages.at(-1)).toMatchObject({
+      botId: bot.id,
+      body: "This turn was cut off twice, so Bee Bot stopped retrying it. Send a message to carry on.",
+    });
   });
 });
 

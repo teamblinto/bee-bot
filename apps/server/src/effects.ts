@@ -55,6 +55,10 @@ export function openEffects(db: DatabaseSync, { transaction }: StoreTx) {
     `SELECT ${effectColumns} FROM external_effects
      WHERE run_id = ? AND status = 'intended' ORDER BY rowid`,
   );
+  const selectDone = db.prepare(
+    `SELECT ${effectColumns} FROM external_effects
+     WHERE run_id = ? AND status IN ('done', 'uncertain') ORDER BY rowid`,
+  );
   const settleRun = db.prepare(
     `UPDATE external_effects SET status = ?, updated_at = ?
      WHERE run_id = ? AND status = 'intended' RETURNING ${effectColumns}`,
@@ -99,6 +103,8 @@ export function openEffects(db: DatabaseSync, { transaction }: StoreTx) {
     settleRunEffects: (runId: string, status: "done" | "uncertain") =>
       z.array(Effect).parse(settleRun.all(status, new Date().toISOString(), runId)),
     unsettledEffects: (runId: string) => z.array(Effect).parse(selectIntended.all(runId)),
+    // An uncertain effect may have happened, so it counts as done.
+    doneEffects: (runId: string) => z.array(Effect).parse(selectDone.all(runId)),
 
     enqueueOutbox: (input: {
       runId: string;

@@ -45,6 +45,7 @@ import { openIngest } from "./ingest.ts";
 import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
 import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
+import { outwardTool, type RecoveryVerdict } from "./recovery.ts";
 import { openRooms } from "./rooms.ts";
 import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
 import { openSkills, skillsDir } from "./skills.ts";
@@ -1539,7 +1540,8 @@ export function openEventStore(dataDir: string) {
   );
   const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
   const selectRunWake = db.prepare(
-    "SELECT w.source, w.attended FROM runs r JOIN wakes w ON w.id = r.wake_id WHERE r.id = ?",
+    `SELECT w.source, w.attended, w.idempotency_key AS key FROM runs r
+     JOIN wakes w ON w.id = r.wake_id WHERE r.id = ?`,
   );
   // A run carries the chain of the task input it answers, even when a human's wake started it,
   // and works on the one open task its bot owns.
@@ -2104,6 +2106,24 @@ export function openEventStore(dataDir: string) {
     );
   }
 
+  // A line from Bee in the room of the run, under the bot's name.
+  function addRunNotice(run: { botId: string; scopeId: string }, body: string) {
+    addMessage({
+      id: `notice:${NodeCrypto.randomUUID()}`,
+      roomId: getScope(run.scopeId).roomId,
+      author: "bot",
+      body,
+      tools: [],
+      workedMs: null,
+      botId: run.botId,
+      replyToId: null,
+      chainId: null,
+      hop: 0,
+      attachments: [],
+      createdAt: new Date().toISOString(),
+    });
+  }
+
   function addRun(wake: Wake, status: "Queued" | "Refused", reason: RunReason | null) {
     const parked = status === "Queued" ? requeueParked.get(wake.id, wake.scopeId) : undefined;
     if (parked) {
@@ -2639,6 +2659,7 @@ export function openEventStore(dataDir: string) {
   rebuildIndex();
 
   const tx: StoreTx = { transaction, emit };
+  const effects = openEffects(db, tx);
   const rooms = openRooms(db, tx);
   const tasks = openTasks(db, tx, {
     post: ({ id, roomId, botId, body, chainId, hop }) =>
@@ -2787,27 +2808,13 @@ export function openEventStore(dataDir: string) {
     postRunNotice: (runId: string, body: string) =>
       transaction(() => {
         const run = getRun(runId);
-        if (!run) {
-          return;
+        if (run) {
+          addRunNotice(run, body);
         }
-        addMessage({
-          id: `notice:${NodeCrypto.randomUUID()}`,
-          roomId: getScope(run.scopeId).roomId,
-          author: "bot",
-          body,
-          tools: [],
-          workedMs: null,
-          botId: run.botId,
-          replyToId: null,
-          chainId: null,
-          hop: 0,
-          attachments: [],
-          createdAt: new Date().toISOString(),
-        });
       }),
     vaultStore: openVaultStore(db, tx),
     appendAudit,
-    effects: openEffects(db, tx),
+    effects,
     policy: openPolicy(db, tx, getBot),
     egress: openEgress(db),
     onEvent: (listener: (event: ServerEvent) => void) => {
@@ -3249,7 +3256,7 @@ export function openEventStore(dataDir: string) {
     botStatus: (id: string) => getBot(id)?.status,
     runWake: (runId: string) =>
       z
-        .object({ source: WakeSource, attended: z.number().transform(Boolean) })
+        .object({ source: WakeSource, attended: z.number().transform(Boolean), key: z.string() })
         .safeParse(selectRunWake.get(runId)).data,
 
     wakeContext: (wake: Wake, now: string) => {
@@ -3831,19 +3838,40 @@ export function openEventStore(dataDir: string) {
     // Queued runs are left alone. An interrupted run either continues by a `recover:` wake, or
     // waits for a human: then its bot's pending wakes are closed, since firing one would resend the
     // interrupted input with no human deciding. That input stays unacked, so Continue or the next
-    // message carries all of it.
-    recover: (bootId: string, decide: (run: Run, now: string) => "continue" | "hold") =>
+    // message carries all of it. A waiting run's children wake it with their results. A failed
+    // run's input is acked, so no later wake can carry it into a repeat of what it did.
+    recover: (bootId: string, decide: (run: Run, now: string) => RecoveryVerdict) =>
       transaction(() => {
         const now = new Date().toISOString();
         for (const row of interruptRuns.all(now, bootId)) {
           const run = RunRow.parse(row);
           recordRun(run);
-          if (decide(run, now) === "continue") {
+          const verdict = decide(run, now);
+          if (verdict === "continue") {
             const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
             addWake(getScope(run.scopeId), `recover:${run.id}`, attended, "continue");
-          } else {
+            continue;
+          }
+          if (verdict !== "wait") {
             cancelPendingWakes.run(run.botId);
+          }
+          if (verdict !== "hold" && run.inputHighSeq !== null) {
+            advanceAck.run(run.inputHighSeq, run.scopeId);
+            advanceDelivered.run(run.inputHighSeq, run.scopeId);
+          }
+          if (verdict === "hold") {
             tasks.promoteNextTask(run.botId);
+          } else if (verdict === "wait") {
+            tasks.settleRun(run, "done", "");
+          } else {
+            tasks.settleRun(run, "failed", "");
+            const outward = effects.doneEffects(run.id).some(({ tool }) => outwardTool(tool));
+            addRunNotice(
+              run,
+              outward
+                ? "The server restarted after this turn had already acted outside Bee Bot, so it wasn't run again. Check what it did, then send a message to carry on."
+                : "This turn was cut off twice, so Bee Bot stopped retrying it. Send a message to carry on.",
+            );
           }
         }
         // Their tool calls died with the old process, so no decision can reach them.
