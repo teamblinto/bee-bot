@@ -1,5 +1,6 @@
 import type {
   Approval,
+  Bot,
   ChatState,
   Continuation,
   MemoryItem,
@@ -13,6 +14,7 @@ export type WaitingItem = { id: string; botId: string; createdAt: string } & (
   | { kind: "approval"; approval: Approval }
   | { kind: "continuation"; continuation: Continuation }
   | { kind: "routine"; routine: Routine; firing: RoutineFiring }
+  | { kind: "budget"; bot: Bot }
 );
 
 // Everything a bot is blocked on until the owner answers, oldest first. Archived bots can't be
@@ -47,6 +49,15 @@ export function waitingItems(chat: ChatState): WaitingItem[] {
         firing,
       })),
     ),
+    ...bots
+      .filter(({ pauseReason }) => pauseReason === "budget")
+      .map((bot) => ({
+        kind: "budget" as const,
+        id: `budget:${bot.id}`,
+        botId: bot.id,
+        createdAt: chat.runs.find(({ botId }) => botId === bot.id)?.endedAt ?? "",
+        bot,
+      })),
   ];
   return items
     .filter(({ botId }) => active.has(botId))
@@ -63,6 +74,9 @@ export function waitingKind(item: WaitingItem) {
   }
   if (item.kind === "continuation") {
     return item.continuation.kind === "hand_off" ? "Hand-off" : "Continuation";
+  }
+  if (item.kind === "budget") {
+    return "Daily limit";
   }
   return "Routine";
 }

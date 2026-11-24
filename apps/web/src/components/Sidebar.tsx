@@ -4,6 +4,7 @@ import {
   Clock,
   Gauge,
   Inbox,
+  ListTodo,
   LoaderCircle,
   type LucideIcon,
   Monitor,
@@ -14,6 +15,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { shortTime } from "../labels";
@@ -379,6 +381,11 @@ export function Sidebar({
               {count}
             </span>
           )}
+          <Tooltip label="Board" side="bottom">
+            <Link to="/board" aria-label="Board" className={railButton}>
+              <ListTodo {...iconProps} />
+            </Link>
+          </Tooltip>
           <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">
             {bots.map((bot) => {
               const state = botState(bot, waitingFor(bot.id), connection);
@@ -480,6 +487,10 @@ export function Sidebar({
               </span>
             )}
           </button>
+          <Link to="/board" className={rowClass}>
+            <ListTodo {...iconProps} className="shrink-0" />
+            Board
+          </Link>
           <SectionHeader
             label="Bots"
             action={<IconAction label="New bot" Icon={Plus} onClick={onNewBot} />}

@@ -415,6 +415,17 @@ const integer = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 export const formatUsd = (value: number) => usd.format(value);
 export const formatCount = (value: number) => integer.format(Math.round(value));
 
+export const dailyLimitLine = ({
+  dailyTokenCap,
+  dailyUsdCap,
+}: Pick<Bot, "dailyTokenCap" | "dailyUsdCap">) =>
+  [
+    dailyTokenCap !== null && `${formatCount(dailyTokenCap)} tokens`,
+    dailyUsdCap !== null && formatUsd(dailyUsdCap),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
 function trimmed(value: number) {
   const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
   return value.toFixed(digits).replace(/\.0+$/, "");

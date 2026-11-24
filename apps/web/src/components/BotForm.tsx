@@ -16,7 +16,7 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { codexRulesWarning, laneLabels, projectPathValue } from "../labels";
+import { codexRulesWarning, dailyLimitLine, laneLabels, projectPathValue } from "../labels";
 import {
   getConnectionState,
   postCommand,
@@ -143,6 +143,8 @@ export function BotForm({
   const [unattendedLane, setUnattendedLane] = useState<EngineLane>(
     bot?.unattendedLane ?? "api_key",
   );
+  const [tokenCap, setTokenCap] = useState(String(bot?.dailyTokenCap ?? ""));
+  const [usdCap, setUsdCap] = useState(String(bot?.dailyUsdCap ?? ""));
   const automatedAccessRead = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().chat.automatedAccessAcknowledgedAt !== null,
@@ -177,6 +179,10 @@ export function BotForm({
   const folder = projectPathValue(projectPath);
   const folderChanged = bot !== undefined && folder !== bot.projectPath;
   const botName = name.trim() || "this bot";
+  const dailyTokenCap = tokenCap.trim() ? Number(tokenCap) : null;
+  const dailyUsdCap = usdCap.trim() ? Number(usdCap) : null;
+  const capsChanged =
+    bot !== undefined && (dailyTokenCap !== bot.dailyTokenCap || dailyUsdCap !== bot.dailyUsdCap);
   const unsaved =
     bot !== undefined &&
     (name !== bot.name ||
@@ -189,6 +195,7 @@ export function BotForm({
       anySite !== bot.egressAnySite ||
       egressHosts.join() !== bot.egressHosts.join() ||
       unattendedLane !== bot.unattendedLane ||
+      capsChanged ||
       (laneChoice !== undefined && laneChoice !== savedLane));
 
   async function submit(event: FormEvent) {
@@ -259,9 +266,20 @@ export function BotForm({
             lane: unattendedLane,
           })
         : undefined;
+    const capResult =
+      boxed && capsChanged
+        ? await postCommand({ type: "raise-bot-cap", botId: boxed.id, dailyTokenCap, dailyUsdCap })
+        : undefined;
     saving.current = false;
     setBusy(false);
-    const results = [result, controlResult, boundaryResult, egressResult, unattendedResult];
+    const results = [
+      result,
+      controlResult,
+      boundaryResult,
+      egressResult,
+      unattendedResult,
+      capResult,
+    ];
     // The first refusal, so a later step that went through can't hide it.
     const last =
       results.find((step) => step?.ok === false) ??
@@ -541,6 +559,44 @@ export function BotForm({
                   </p>
                 </>
               )}
+            </Option>
+          )}
+          {bot && (
+            <Option
+              label="Daily limit"
+              value={dailyLimitLine({ dailyTokenCap, dailyUsdCap }) || "None"}
+            >
+              {accountId === "claude" && (
+                <label className={fieldClass}>
+                  <span className="field-label">Tokens a day</span>
+                  <input
+                    type="number"
+                    className="field text-ink placeholder:text-ink-faint"
+                    min={1000}
+                    max={1e9}
+                    step={1}
+                    placeholder="No limit"
+                    value={tokenCap}
+                    onChange={(event) => setTokenCap(event.target.value)}
+                  />
+                </label>
+              )}
+              <label className={fieldClass}>
+                <span className="field-label">Dollars a day (API key)</span>
+                <input
+                  type="number"
+                  className="field text-ink placeholder:text-ink-faint"
+                  min={0.01}
+                  max={10_000}
+                  step={0.01}
+                  placeholder="No limit"
+                  value={usdCap}
+                  onChange={(event) => setUsdCap(event.target.value)}
+                />
+              </label>
+              <p className="field-help">
+                It pauses for the rest of the day once it reaches a limit. Leave blank for no limit.
+              </p>
             </Option>
           )}
           <Option label="Folder" value={folder ?? "None"}>

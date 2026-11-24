@@ -7,3 +7,7 @@ import { getRouter } from "./router";
 it("has the index route", () => {
   expect(getRouter(createMemoryHistory()).routesByPath).toHaveProperty("/");
 });
+
+it("has the board route", () => {
+  expect(getRouter(createMemoryHistory()).routesByPath).toHaveProperty("/board");
+});

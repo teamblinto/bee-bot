@@ -25,6 +25,7 @@ const chat = (parts: Partial<ChatState>) =>
     routines: [],
     firings: [],
     memories: [],
+    runs: [],
     ...parts,
   }) as unknown as ChatState;
 
@@ -63,4 +64,21 @@ it("leaves out archived bots, whose chats can't be opened", () => {
   });
   expect(waitingItems(state)).toEqual([]);
   expect(memoriesToReview(state)).toEqual([]);
+});
+
+it("lists a bot paused for budget, and drops an archived one", () => {
+  const ada = { ...bot("ada"), pauseReason: "budget" } as Bot;
+  const items = waitingItems(
+    chat({
+      bots: [
+        ada,
+        { ...bot("max", "2026-01-01T00:00:00Z"), pauseReason: "budget" } as Bot,
+        { ...bot("eve"), pauseReason: "owner" } as Bot,
+      ],
+      runs: [{ botId: "ada", endedAt: "2026-01-01T00:05:00Z" }] as ChatState["runs"],
+    }),
+  );
+  expect(items).toEqual([
+    { kind: "budget", id: "budget:ada", botId: "ada", createdAt: "2026-01-01T00:05:00Z", bot: ada },
+  ]);
 });

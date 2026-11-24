@@ -1,10 +1,10 @@
-import type { Bot } from "@beebot/contracts";
+import type { Bot, Command } from "@beebot/contracts";
 import { Inbox, PanelLeft } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
-import { approvalTitle, memoryReview, shortTime } from "../labels";
+import { approvalTitle, dailyLimitLine, memoryReview, shortTime } from "../labels";
 import { memoriesToReview, type WaitingItem, waitingItems, waitingKind } from "../needsYou";
-import type { ConnectionState } from "../serverConnection";
+import { type ConnectionState, postCommand } from "../serverConnection";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { Avatar } from "./Avatar";
 import { RoutineCard } from "./RoutineCard";
@@ -67,6 +67,64 @@ function Section({
   );
 }
 
+function BudgetCard({ bot, connected }: { bot: Bot; connected: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const { dailyTokenCap, dailyUsdCap } = bot;
+
+  async function raise(command: Command) {
+    setBusy(true);
+    setError(undefined);
+    const result = await postCommand(command);
+    // On success this card closes when the bot's pause clears.
+    if (!result.ok) {
+      setBusy(false);
+      setError(result.message);
+    }
+  }
+
+  const disabled = busy || !connected;
+  return (
+    <article className="surface flex max-w-[560px] flex-col gap-2 p-4">
+      <h3 className="text-body-s font-medium">{bot.name} reached its daily limit</h3>
+      <p className="text-body-s text-ink-secondary">{dailyLimitLine(bot)} a day</p>
+      {error && <p className="text-caption text-ink-secondary">{error}</p>}
+      <div className="flex flex-wrap justify-end gap-2 pt-1">
+        <button
+          type="button"
+          className="button button-sm button-outline"
+          disabled={disabled}
+          onClick={() =>
+            void raise({
+              type: "raise-bot-cap",
+              botId: bot.id,
+              dailyTokenCap: null,
+              dailyUsdCap: null,
+            })
+          }
+        >
+          Remove limit
+        </button>
+        <button
+          type="button"
+          className="button button-sm button-primary"
+          disabled={disabled}
+          onClick={() =>
+            void raise({
+              type: "raise-bot-cap",
+              botId: bot.id,
+              dailyTokenCap: dailyTokenCap === null ? null : Math.min(dailyTokenCap * 2, 1e9),
+              dailyUsdCap: dailyUsdCap === null ? null : Math.min(dailyUsdCap * 2, 10_000),
+            })
+          }
+        >
+          Double and resume
+        </button>
+      </div>
+    </article>
+  );
+}
+
 function WaitingCard({
   item,
   bot,
@@ -81,6 +139,9 @@ function WaitingCard({
     return (
       <ContinuationCard name={bot.name} continuation={item.continuation} connected={connected} />
     );
+  }
+  if (item.kind === "budget") {
+    return <BudgetCard bot={bot} connected={connected} />;
   }
   if (item.kind === "routine") {
     return <RoutineCard routine={item.routine} firing={item.firing} connected={connected} />;
