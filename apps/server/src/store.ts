@@ -2572,19 +2572,23 @@ export function openEventStore(dataDir: string) {
     }
   }
 
-  function setPause(botId: string, reason: Bot["pauseReason"]) {
-    updateBotStatus.run(reason ? "paused" : "ready", reason, botId);
+  const spentToday = (botId: string, now: string) =>
+    z
+      .object({ usd: z.number(), tokens: z.number() })
+      .parse(sumBotSpend.get(botId, new Date(Date.parse(now) - 86_400_000).toISOString()));
+
+  // Whatever clears a pause, a bot still over its cap stays paused for it.
+  function setPause(botId: string, reason: Bot["pauseReason"], now = new Date().toISOString()) {
+    const before = getBot(botId);
+    const overCap = before && capHit(spentToday(botId, now), before);
+    const next = reason ?? (overCap ? "budget" : null);
+    updateBotStatus.run(next ? "paused" : "ready", next, botId);
     const bot = getBot(botId);
     if (bot) {
       emit({ type: "bot.changed", bot });
     }
     return bot;
   }
-
-  const spentToday = (botId: string, now: string) =>
-    z
-      .object({ usd: z.number(), tokens: z.number() })
-      .parse(sumBotSpend.get(botId, new Date(Date.parse(now) - 86_400_000).toISOString()));
 
   // shortcut: checked as a turn ends, so one turn can overshoot a cap by whatever it spends; cut a
   // turn off mid-way if that overshoot ever matters.
@@ -2598,7 +2602,7 @@ export function openEventStore(dataDir: string) {
       return setPause(botId, "budget");
     }
     if (!hit && bot.pauseReason === "budget") {
-      return setPause(botId, null);
+      return setPause(botId, null, now);
     }
     return bot;
   }
@@ -3266,7 +3270,7 @@ export function openEventStore(dataDir: string) {
         engine: bot.engineAccountId,
         // As index.ts launches it: a box bot takes its R7 lane, falling back to the account's.
         lane: (bot.boundary === "box" ? laneOfBox(bot) : null) ?? account.lane,
-        botStatus: bot.status,
+        botStatus: transaction(() => enforceSpendCaps(wake.botId, now))?.status ?? bot.status,
         runsInLastDay: Count.parse(countRecentRuns.get(wake.botId, dayAgo)).count,
         blockedUntil: account.blockedUntil,
         spentThisMonthUsd: spentSince(monthStart(now)),
@@ -3317,6 +3321,10 @@ export function openEventStore(dataDir: string) {
     // unseen. The session ID is durable before the engine can start.
     claimRun: (id: string, bootId: string, now: string) =>
       transaction((): ClaimedRun | undefined => {
+        const queued = getRun(id);
+        if (queued && enforceSpendCaps(queued.botId, now)?.status === "paused") {
+          return undefined;
+        }
         const row = claim.get(bootId, now, id, now);
         if (!row) {
           return undefined;

@@ -588,6 +588,91 @@ describe("spend caps", () => {
     await vi.waitFor(() => expect(latestRun(store, bot)).toMatchObject({ reason: "bot_paused" }));
     expect(engine.turns).toHaveLength(1);
   });
+
+  it("keeps a bot over its cap from running once an engine pause or the owner's clears", async () => {
+    const engine = scriptedEngine();
+    const hungry: RunTurn = (turn) => {
+      turn.onTokens?.(5000);
+      return engine.runTurn(turn);
+    };
+    const { store, send } = boot(hungry);
+    const bot = createBot(store);
+    store.setSpendCaps(bot.id, { dailyTokenCap: 4000, dailyUsdCap: null });
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+    engine.turns[0]?.finish({ kind: "auth_failed" });
+    await expectStatus(store, bot, "Failed");
+    expect(store.getBot(bot.id)?.pauseReason).toBe("auth_failed");
+
+    store.setBotPause(bot.id, null);
+    expect(store.getBot(bot.id)).toMatchObject({ status: "paused", pauseReason: "budget" });
+    store.setBotPause(bot.id, "owner");
+    store.setBotPause(bot.id, null);
+    expect(store.getBot(bot.id)).toMatchObject({ status: "paused", pauseReason: "budget" });
+  });
+
+  it("admits no wake for a ready bot that is over its cap", async () => {
+    const engine = scriptedEngine();
+    const { store, send } = boot(engine.runTurn);
+    const bot = createBot(store);
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+    store.recordTokens(latestRun(store, bot)!.id, 5000);
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    store.setSpendCaps(bot.id, { dailyTokenCap: 4000, dailyUsdCap: null });
+    expect(store.getBot(bot.id)?.status).toBe("ready");
+
+    send(bot, "again");
+    await vi.waitFor(() => expect(latestRun(store, bot)).toMatchObject({ reason: "bot_paused" }));
+    expect(store.getBot(bot.id)).toMatchObject({ status: "paused", pauseReason: "budget" });
+    expect(engine.turns).toHaveLength(1);
+  });
+
+  it("refuses a queued run whose bot went over its cap before it started", () => {
+    const engine = scriptedEngine();
+    const { store, supervisor } = boot(engine.runTurn);
+    const bot = createBot(store);
+    store.sendMessage({
+      id: NodeCrypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hi",
+      attended: true,
+    });
+    const [wake] = store.dueWakes(new Date().toISOString());
+    store.queueRun(wake!);
+    store.recordTokens(latestRun(store, bot)!.id, 5000);
+    store.setSpendCaps(bot.id, { dailyTokenCap: 4000, dailyUsdCap: null });
+
+    supervisor.pump();
+    expect(latestRun(store, bot)).toMatchObject({ status: "Refused", reason: "bot_paused" });
+    expect(store.getBot(bot.id)?.pauseReason).toBe("budget");
+    expect(engine.turns).toHaveLength(0);
+  });
+
+  it("drops spend older than a day out of the window, and the budget pause with it", () => {
+    const { store } = boot(scriptedEngine().runTurn);
+    const bot = createBot(store);
+    store.sendMessage({
+      id: NodeCrypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hi",
+      attended: true,
+    });
+    const [wake] = store.dueWakes(new Date().toISOString());
+    store.queueRun(wake!);
+    store.recordTokens(latestRun(store, bot)!.id, 5000);
+    store.setSpendCaps(bot.id, { dailyTokenCap: 4000, dailyUsdCap: null });
+    const now = Date.now();
+    const at = (hours: number) => new Date(now + hours * 3_600_000).toISOString();
+
+    expect(store.enforceSpendCaps(bot.id, at(23))?.pauseReason).toBe("budget");
+    expect(store.spentToday(bot.id, at(25))).toEqual({ usd: 0, tokens: 0 });
+    expect(store.enforceSpendCaps(bot.id, at(25))).toMatchObject({
+      status: "ready",
+      pauseReason: null,
+    });
+  });
 });
 
 describe("server mode limits", () => {

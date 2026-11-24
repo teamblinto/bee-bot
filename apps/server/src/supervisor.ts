@@ -504,6 +504,8 @@ export function createSupervisor({
     const claimed = store.claimRun(runId, bootId, now);
     if (claimed) {
       startTurn(claimed);
+    } else if (store.botStatus(botId) === "paused") {
+      store.refuseQueuedRun(runId, "bot_paused");
     }
   }
 
