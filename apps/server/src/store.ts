@@ -1788,6 +1788,11 @@ export function openEventStore(dataDir: string) {
     "SELECT MAX(created_at) AS at FROM messages WHERE author = 'human'",
   );
   const deleteRoutineRow = db.prepare("DELETE FROM routines WHERE id = ?");
+  // The task a bot's wakeup holds: the one its creating run worked on.
+  const selectWakeupTask = db.prepare(
+    `SELECT u.task_id AS taskId FROM routines r JOIN runs u ON u.id = r.created_by_run_id
+     WHERE r.id = ? AND r.kind = 'once' AND u.task_id IS NOT NULL`,
+  );
   const firingColumns = `id, routine_id AS routineId, slot, status, reason,
     missed_before AS missedBefore, attempts, retry_at AS retryAt, created_at AS createdAt,
     decided_at AS decidedAt`;
@@ -2348,6 +2353,8 @@ export function openEventStore(dataDir: string) {
     const row = selectRoutine.get(id);
     return row ? RoutineRow.parse(row) : undefined;
   };
+  const wakeupTask = (routineId: string) =>
+    z.object({ taskId: z.string() }).optional().parse(selectWakeupTask.get(routineId))?.taskId;
 
   function endOpenFiring(
     routineId: string,
@@ -2385,10 +2392,12 @@ export function openEventStore(dataDir: string) {
       insertFiring.get(id, routine.id, slot, status, reason, passedOver, now, decidedAt),
     );
     emit({ type: "firing.changed", firing });
+    return firing;
   }
 
   // Slots are walked on the cron's own clock, which runs `staggerMs` behind the wall clock.
-  function fireRoutine(row: unknown, now: string) {
+  // A wakeup that won't start on its own releases the task it held.
+  function fireRoutine(row: unknown, now: string, runsItself: (botId: string) => boolean) {
     const routine = RoutineRow.parse(row);
     const nextFireAt = z.string().parse(routine.nextFireAt);
     const cronNow = new Date(Date.parse(now) - routine.staggerMs).toISOString();
@@ -2398,11 +2407,15 @@ export function openEventStore(dataDir: string) {
     if (routine.kind === "once") {
       const slot = z.string().parse(routine.fireAt);
       transaction(() => {
-        if (!selectSlot.get(routine.id, slot)) {
-          recordFiring(routine, { slot, passedOver: 0 }, now);
-        }
+        const firing = selectSlot.get(routine.id, slot)
+          ? undefined
+          : recordFiring(routine, { slot, passedOver: 0 }, now);
         disableRoutine.run(null, routine.id);
         emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
+        const taskId = wakeupTask(routine.id);
+        if (taskId && !(firing?.status === "ready" && runsItself(routine.botId))) {
+          tasks.releaseIfUnheld(taskId);
+        }
       });
       return;
     }
@@ -2600,12 +2613,19 @@ export function openEventStore(dataDir: string) {
     wake: (scopeId, key, attended, chain) =>
       addWake(getScope(scopeId), key, attended, "task", chain),
     unanswered: (scopeId) => unackedInput(getScope(scopeId)).some(fromOwner),
+    timer: (task, { source, id, body }) => {
+      const roomId = getBot(task.ownerBotId)?.roomId ?? "";
+      postMessage({ id, roomId, body, attended: false, taskId: task.id }, source);
+    },
   });
   const waits = openWaits(db, tx, {
-    notice: (botId, id, body) => {
+    notice: (botId, id, body, taskId) => {
       const bot = getBot(botId);
       if (!bot || bot.archivedAt) {
         return "gone";
+      }
+      if (taskId && tasks.resumeHeld(taskId, { source: "wait", id: `wait:${id}`, body })) {
+        return "sent";
       }
       const posted = postMessage(
         { id: `wait:${id}`, roomId: bot.roomId, body, attended: false },
@@ -2665,18 +2685,25 @@ export function openEventStore(dataDir: string) {
       const routine = RoutineRow.parse(selectRoutine.get(firing.routineId));
       const lateMs = Math.max(Date.now() - Date.parse(firing.slot), 0);
       const { skipIfLaterMins } = routine;
+      const taskId = wakeupTask(routine.id);
       if (skipIfLaterMins !== null && lateMs > skipIfLaterMins * 60_000) {
         endOpenFiring(routine.id, "skipped", "too_late");
+        if (taskId) {
+          tasks.releaseIfUnheld(taskId);
+        }
         return "too_late";
       }
       const { id: botId, roomId, status, archivedAt } = BotRow.parse(selectBot.get(routine.botId));
       if (archivedAt) {
         return "bot_archived";
       }
-      if (status === "paused") {
+      // A held task goes through its bot's queue, which waits out a busy bot, and a paused one
+      // refuses it.
+      const held = taskId !== undefined && tasks.getTask(taskId)?.status === "waiting";
+      if (!held && status === "paused") {
         return "bot_paused";
       }
-      if (selectActiveRun.get(botId)) {
+      if (!held && selectActiveRun.get(botId)) {
         return "bot_busy";
       }
       const now = new Date().toISOString();
@@ -2687,7 +2714,9 @@ export function openEventStore(dataDir: string) {
       markRoutineAttempt.run(now, routine.id);
       emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
       const body = routineBody(routine, firing.slot, lateMs);
-      if (postMessage({ id: messageId, roomId, body, attended }, "routine") !== "sent") {
+      if (held) {
+        tasks.resumeHeld(taskId, { source: "routine", id: messageId, body });
+      } else if (postMessage({ id: messageId, roomId, body, attended }, "routine") !== "sent") {
         throw new Error(`firing ${id} could not post its message`);
       }
       return "started";
@@ -2887,7 +2916,7 @@ export function openEventStore(dataDir: string) {
       transaction(() => {
         if (archiveRow.run(new Date().toISOString(), id).changes > 0) {
           cancelPendingWakes.run(id);
-          waits.cancelWaits(id);
+          waits.cancelWaits(id).forEach(tasks.releaseIfUnheld);
           const bot = BotRow.parse(selectBot.get(id));
           emit({ type: "bot.archived", bot });
         }
@@ -3049,10 +3078,14 @@ export function openEventStore(dataDir: string) {
       }),
     deleteRoutine: (id: string) =>
       transaction(() => {
+        const taskId = wakeupTask(id);
         deleteFirings.run(id);
         const { changes } = deleteRoutineRow.run(id);
         if (changes > 0) {
           emit({ type: "routine.deleted", routineId: id });
+        }
+        if (taskId) {
+          tasks.releaseIfUnheld(taskId);
         }
         return changes > 0;
       }),
@@ -3088,7 +3121,7 @@ export function openEventStore(dataDir: string) {
     fireDueRoutines: (now: string, runsItself: (botId: string) => boolean = () => false) => {
       for (const row of selectDueRoutines.all(now)) {
         try {
-          fireRoutine(row, now);
+          fireRoutine(row, now, runsItself);
         } catch (error) {
           console.error(`beebotd: routine ${IdRow.safeParse(row).data?.id} failed`, error);
         }
@@ -3509,7 +3542,7 @@ export function openEventStore(dataDir: string) {
     stopBot: (botId: string) =>
       transaction(() => {
         cancelPendingWakes.run(botId);
-        waits.cancelWaits(botId);
+        waits.cancelWaits(botId).forEach(tasks.releaseIfUnheld);
         tasks.refuseQueued(botId);
         for (const row of cancelParked.all(new Date().toISOString(), botId)) {
           const parked = RunRow.parse(row);

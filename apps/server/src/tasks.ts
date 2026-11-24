@@ -70,6 +70,9 @@ const Pending = z.object({
   reason: z.enum(["blockers_resolved", "children_completed"]).optional(),
 });
 type Pending = z.infer<typeof Pending>;
+// A timer that fired for a held task: its notice is posted when the task opens.
+const Timer = z.object({ source: z.enum(["wait", "routine"]), id: z.string(), body: z.string() });
+export type Timer = z.infer<typeof Timer>;
 
 export type ChainPoint = { chainId: string | null; hop: number; depth: number };
 
@@ -78,6 +81,7 @@ export type TaskDelivery = {
   post: (message: { id: string; roomId: string; botId: string; body: string } & ChainPoint) => void;
   wake: (scopeId: string, key: string, attended: boolean, chain: ChainPoint) => void;
   unanswered: (scopeId: string) => boolean;
+  timer: (task: Task, timer: Timer) => void;
 };
 
 export type Refused = { refused: "fan_out" };
@@ -115,12 +119,18 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `SELECT ${taskColumns} FROM tasks WHERE status IN ${active} ORDER BY rowid`,
   );
   const countForRun = db.prepare("SELECT COUNT(*) AS count FROM tasks WHERE parent_run_id = ?");
+  // A pending wait on the task, or an enabled wakeup made by a run on it.
+  const holds = (id: string) =>
+    `(EXISTS (SELECT 1 FROM waits WHERE task_id = ${id} AND status = 'pending')
+      OR EXISTS (SELECT 1 FROM routines r JOIN runs u ON u.id = r.created_by_run_id
+        WHERE r.kind = 'once' AND r.enabled = 1 AND u.task_id = ${id}))`;
+  const selectHolds = db.prepare(`SELECT ${holds("?1")} AS held`);
+  // A bot waiting on a timer keeps its slot; one waiting only on children doesn't.
   const selectBusy = db.prepare(
-    `SELECT 1 FROM tasks WHERE owner_bot_id = ? AND status = 'open'
-     UNION ALL SELECT 1 FROM runs WHERE bot_id = ? AND status IN ('Queued', 'Running')`,
-  );
-  const selectWaiting = db.prepare(
-    `SELECT 1 FROM tasks WHERE requester_bot_id = ? AND status IN ${active}`,
+    `SELECT 1 FROM tasks WHERE owner_bot_id = ?1 AND status = 'open'
+     UNION ALL SELECT 1 FROM runs WHERE bot_id = ?1 AND status IN ('Queued', 'Running')
+     UNION ALL SELECT 1 FROM tasks t WHERE owner_bot_id = ?1 AND status = 'waiting'
+       AND ${holds("t.id")}`,
   );
   // A chain is human-origin when its first wake came from the owner.
   const selectNext = db.prepare(
@@ -167,6 +177,10 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const countChildren = db.prepare(
     `SELECT COUNT(*) AS count FROM tasks WHERE parent_task_id IS ? AND requester_bot_id = ?
        AND chain_id = ? AND status IN ${active}`,
+  );
+  const countSiblings = db.prepare(
+    `SELECT COUNT(*) AS count FROM tasks WHERE parent_task_id IS ? AND requester_bot_id = ?
+       AND chain_id = ? AND id <> ?`,
   );
   const endTask = db.prepare(
     `UPDATE tasks SET status = ?, result_message_id = ?, updated_at = ?
@@ -261,17 +275,51 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
   const noResult = (status: EndStatus) => `The task ended without a result (${status}).`;
 
-  // The owner posts the outcome where the task was asked, and the requester wakes to read it.
+  const activeChildren = (
+    taskId: string | null,
+    scope: { requesterBotId: string; chainId: string },
+  ) => Count.parse(countChildren.get(taskId, scope.requesterBotId, scope.chainId)).count;
+
+  const holdsTask = (taskId: string) =>
+    z.object({ held: z.number() }).parse(selectHolds.get(taskId)).held === 1;
+
+  // The owner posts the outcome where the task was asked, and the requester wakes to read it. A
+  // requester waiting on several children reads their results in one turn: each is posted as it
+  // ends, and only the last, or a failure, wakes it.
   function endWithResult(task: Task, status: EndStatus, body: string, attended: boolean) {
     const resultId = messageId("result");
-    const { chainId, hop, roomId } = task;
+    const { chainId, hop, roomId, requesterBotId } = task;
+    const now = new Date().toISOString();
+    const parent = task.parentTaskId ? getTask(task.parentTaskId) : undefined;
+    // The task itself is still active here.
+    const siblings = activeChildren(task.parentTaskId, { requesterBotId, chainId }) - 1;
+    if (parent?.status === "waiting" && (status !== "done" || siblings === 0)) {
+      const pending: Pending = {
+        from: task.ownerBotId,
+        via: "result",
+        body,
+        messageId: resultId,
+        reason: "children_completed",
+      };
+      changed(setStatus.get("queued", JSON.stringify(pending), now, parent.id));
+      const posted = promoteNextTask(parent.ownerBotId)?.id === parent.id;
+      changed(endTask.get(status, posted ? resultId : null, now, task.id));
+      return;
+    }
     deliver.post({ id: resultId, roomId, botId: task.ownerBotId, body, chainId, hop, depth: 0 });
-    const scope = ScopeRow.safeParse(selectRoomScope.get(roomId, task.requesterBotId)).data;
+    changed(endTask.get(status, resultId, now, task.id));
+    const batched = status === "done" && siblings > 0;
+    if (parent ? parent.status === "waiting" || parent.status === "queued" : batched) {
+      return;
+    }
+    const scope = ScopeRow.safeParse(selectRoomScope.get(roomId, requesterBotId)).data;
     if (scope) {
       const back = { chainId, hop, depth: Math.max(task.depth - 1, 0) };
-      deliver.wake(scope.scopeId, `result:${task.id}`, attended, back);
+      const hadSiblings =
+        !parent && Count.parse(countSiblings.get(null, requesterBotId, chainId, task.id)).count > 0;
+      const key = `${hadSiblings ? "children_completed" : "result"}:${task.id}`;
+      deliver.wake(scope.scopeId, key, attended, back);
     }
-    changed(endTask.get(status, resultId, new Date().toISOString(), task.id));
   }
 
   // Inside the caller's transaction. A task never opens on a busy bot, so its message is never
@@ -281,7 +329,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   // owner's private message out as its result.
   function promoteNextTask(botId: string): Task | undefined {
     const dm = ScopeRow.safeParse(selectDmScope.get(botId)).data;
-    if (selectBusy.get(botId, botId) || (dm && deliver.unanswered(dm.scopeId))) {
+    if (selectBusy.get(botId) || (dm && deliver.unanswered(dm.scopeId))) {
       return undefined;
     }
     const row = selectNext.get(botId);
@@ -296,7 +344,12 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       releaseDependents(queued.id);
       return promoteNextTask(botId);
     }
-    const pending = Pending.parse(JSON.parse(pendingJson));
+    const pending = z.union([Timer, Pending]).parse(JSON.parse(pendingJson));
+    if ("source" in pending) {
+      const task = changed(openQueued.get(new Date().toISOString(), queued.id));
+      deliver.timer(task, pending);
+      return task;
+    }
     // Only a delegate's first opening can have waited on blockers; later ones are follow-ups.
     const blockers =
       pending.via === "delegate"
@@ -330,14 +383,16 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     }
   }
 
-  // A delegate's outcome goes back once, with no acknowledgment turn. A run with its own
-  // delegations still active leaves its task to the run their results wake.
+  // A delegate's outcome goes back once, with no acknowledgment turn. A run whose task still has
+  // children out or a timer set leaves it waiting for the run they wake.
   function endRunTask(run: Pick<Run, "id" | "botId" | "taskId">, status: EndStatus, text: string) {
     const task = run.taskId ? getTask(run.taskId) : undefined;
     if (task?.status !== "open" || task.ownerBotId !== run.botId) {
       return;
     }
-    if (status === "done" && selectWaiting.get(run.botId)) {
+    const children = activeChildren(task.id, { requesterBotId: run.botId, chainId: task.chainId });
+    if (status === "done" && (children > 0 || holdsTask(task.id))) {
+      changed(setStatus.get("waiting", null, new Date().toISOString(), task.id));
       return;
     }
     if (task.kind !== "delegate") {
@@ -510,8 +565,33 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         return getTask(task.id) ?? task;
       }),
 
-    activeChildren: (taskId: string | null, scope: { requesterBotId: string; chainId: string }) =>
-      Count.parse(countChildren.get(taskId, scope.requesterBotId, scope.chainId)).count,
+    activeChildren,
+    holdsTask,
+
+    // Inside the caller's transaction. A fired timer queues its waiting task rather than opening
+    // it, so the busy and unanswered-DM checks still apply. False when the task isn't waiting.
+    resumeHeld: (taskId: string, timer: Timer) => {
+      const task = getTask(taskId);
+      if (task?.status !== "waiting") {
+        return false;
+      }
+      changed(setStatus.get("queued", JSON.stringify(timer), new Date().toISOString(), taskId));
+      promoteNextTask(task.ownerBotId);
+      return true;
+    },
+
+    // Inside the caller's transaction, after a hold went away without firing, so no task stays
+    // waiting on nothing.
+    releaseIfUnheld: (taskId: string) => {
+      const task = getTask(taskId);
+      if (task?.status !== "waiting" || holdsTask(taskId)) {
+        return;
+      }
+      if (activeChildren(taskId, { requesterBotId: task.ownerBotId, chainId: task.chainId }) > 0) {
+        return;
+      }
+      endWithResult(task, "cancelled", noResult("cancelled"), parentAttended(task));
+    },
 
     tasksOf: (botId: string, taskId?: string) =>
       taskId === undefined

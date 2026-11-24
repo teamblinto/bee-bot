@@ -792,6 +792,110 @@ describe("task queue", () => {
     });
   });
 
+  describe("inbox batching", () => {
+    // The bot's live run on its open task, as a requester of its own.
+    const bot = (name: string) =>
+      open().createBot({ name, personality: "", engineAccountId: "fake" });
+    const working = (owner: ReturnType<typeof bot>, task: { chainId: string }) => {
+      startRun(owner.id);
+      return { bot: owner, run: latestRun(owner.id), chainId: task.chainId };
+    };
+    const child = (from: ReturnType<typeof working>, to: string, parent: { id: string }) =>
+      delegate(from, to, from.chainId, { parentTaskId: parent.id });
+
+    it("delivers two children's results in one resume turn", () => {
+      store = openEventStore(dataDir);
+      const ben = bot("Ben");
+      const cy = bot("Cy");
+      const dee = bot("Dee");
+      const parent = delegate(requester("Ada"), ben.id);
+      const benRun = working(ben, parent);
+      child(benRun, cy.id, parent);
+      child(benRun, dee.id, parent);
+      finish(ben.id);
+      expect(store.tasks.getTask(parent.id)?.status).toBe("waiting");
+
+      finish(cy.id, "Completed", { reply: "Cy found it." });
+      expect(pendingKeys(ben.id)).toEqual([]);
+      expect(
+        open()
+          .state()
+          .messages.some((m) => m.roomId === ben.roomId && m.body === "Cy found it."),
+      ).toBe(true);
+
+      finish(dee.id, "Completed", { reply: "Dee found it." });
+      expect(pendingKeys(ben.id)).toEqual([expect.stringMatching(/^children_completed:/)]);
+      open().queueRun(dueWake(ben.id));
+      const run = latestRun(ben.id);
+      const claimed = open().claimRun(run.id, "boot", new Date().toISOString());
+      expect(claimed?.prompt).toContain("Cy found it.");
+      expect(claimed?.prompt).toContain("Dee found it.");
+      expect(latestRun(ben.id).taskId).toBe(parent.id);
+    });
+
+    it("resumes at once when a child fails, even with a sibling still out", () => {
+      store = openEventStore(dataDir);
+      const ben = bot("Ben");
+      const cy = bot("Cy");
+      const dee = bot("Dee");
+      const parent = delegate(requester("Ada"), ben.id);
+      const benRun = working(ben, parent);
+      child(benRun, cy.id, parent);
+      const out = child(benRun, dee.id, parent);
+      finish(ben.id);
+
+      finish(cy.id, "Failed");
+      expect(store.tasks.getTask(parent.id)?.status).toBe("open");
+      expect(store.tasks.getTask(out.id)?.status).toBe("open");
+      expect(pendingKeys(ben.id)).toEqual([expect.stringMatching(/^children_completed:/)]);
+    });
+
+    it("lets a bot waiting only on children take a queued task meanwhile", () => {
+      store = openEventStore(dataDir);
+      const ben = bot("Ben");
+      const cy = bot("Cy");
+      const parent = delegate(requester("Ada"), ben.id);
+      const benRun = working(ben, parent);
+      child(benRun, cy.id, parent);
+      const other = delegate(requester("Eve"), ben.id);
+      expect(other.status).toBe("queued");
+
+      finish(ben.id);
+      expect(store.tasks.getTask(parent.id)?.status).toBe("waiting");
+      expect(store.tasks.getTask(other.id)?.status).toBe("open");
+    });
+
+    // README open question 5: in Phase 1 each requester's task stayed open, so neither bot freed up.
+    it("lets two chains that delegate to each other's busy bots both finish", () => {
+      store = openEventStore(dataDir);
+      const ada = bot("Ada");
+      const ben = bot("Ben");
+      const ta = delegate(requester("Xi"), ada.id, "chain-a");
+      const tb = delegate(requester("Yu"), ben.id, "chain-b");
+      const adaRun = working(ada, ta);
+      const benRun = working(ben, tb);
+      const toBen = child(adaRun, ben.id, ta);
+      const toAda = child(benRun, ada.id, tb);
+      expect([toBen.status, toAda.status]).toEqual(["queued", "queued"]);
+
+      finish(ada.id);
+      finish(ben.id);
+      expect(store.tasks.getTask(ta.id)?.status).toBe("waiting");
+      expect(store.tasks.getTask(toAda.id)?.status).toBe("open");
+      expect(store.tasks.getTask(toBen.id)?.status).toBe("open");
+      for (let turn = 0; turn < 2; turn++) {
+        finish(ada.id);
+        finish(ben.id);
+      }
+      expect([ta, tb, toBen, toAda].map((t) => open().tasks.getTask(t.id)?.status)).toEqual([
+        "done",
+        "done",
+        "done",
+        "done",
+      ]);
+    });
+  });
+
   it("carries a timer's task on the wake its message makes or joins", () => {
     store = openEventStore(dataDir);
     const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });

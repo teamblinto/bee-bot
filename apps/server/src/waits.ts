@@ -72,7 +72,8 @@ export function openWaits(
   const setCondition = db.prepare("UPDATE waits SET condition_json = ? WHERE id = ?");
   const setStatus = db.prepare("UPDATE waits SET status = ? WHERE id = ? AND status = 'pending'");
   const cancelForBot = db.prepare(
-    "UPDATE waits SET status = 'cancelled' WHERE status = 'pending' AND (? IS NULL OR bot_id = ?)",
+    `UPDATE waits SET status = 'cancelled' WHERE status = 'pending' AND (? IS NULL OR bot_id = ?)
+     RETURNING task_id AS taskId`,
   );
   const selectForTask = db.prepare(
     "SELECT 1 FROM waits WHERE task_id = ? AND status = 'pending' LIMIT 1",
@@ -145,10 +146,13 @@ export function openWaits(
         const status = sent === "gone" ? "cancelled" : outcome === "met" ? "met" : "expired";
         return setStatus.run(status, id).changes > 0;
       }),
-    // Not wrapped, so a store write that already holds the transaction can call it.
-    cancelWaits: (botId: string | null) => {
-      cancelForBot.run(botId, botId);
-    },
+    // Not wrapped, so a store write that already holds the transaction can call it. Returns the
+    // tasks the cancelled waits held.
+    cancelWaits: (botId: string | null) =>
+      z
+        .array(z.object({ taskId: z.string().nullable() }))
+        .parse(cancelForBot.all(botId, botId))
+        .flatMap(({ taskId }) => (taskId ? [taskId] : [])),
     pendingForTask: (taskId: string) => selectForTask.get(taskId) !== undefined,
   };
 }
