@@ -273,6 +273,37 @@ describe("the tasks_v2 migration", () => {
   });
 });
 
+describe("the task_tree migration", () => {
+  it("gives old tasks a root, a human origin and no blockers", () => {
+    const db = new DatabaseSync(dbPath());
+    migrate(
+      db,
+      migrations.findIndex(({ name }) => name === "task_tree"),
+    );
+    db.exec(`INSERT INTO bots (id, name, personality, status, created_at)
+        VALUES ('ada', 'Ada', '', 'ready', 'then'), ('ben', 'Ben', '', 'ready', 'then');
+      INSERT INTO rooms (id, default_bot_id, created_at) VALUES ('room', 'ada', 'then');
+      INSERT INTO scopes (id, room_id, bot_id) VALUES ('scope', 'room', 'ada');
+      INSERT INTO wakes (id, bot_id, scope_id, idempotency_key, attended, status, created_at)
+        VALUES ('w1', 'ada', 'scope', 'message:m1', 1, 'done', 'then');
+      INSERT INTO runs (id, bot_id, scope_id, wake_id, engine_account_id, status, created_at)
+        VALUES ('r1', 'ada', 'scope', 'w1', 'fake', 'Completed', 'then');
+      INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
+          owner_bot_id, room_id, goal, status, delivery_key, created_at, updated_at)
+        VALUES ('t1', 'delegate', 'chain', 1, 1, 'r1', 'ada', 'ben', 'room', 'Look', 'open', 'k1',
+          'then', 'then');`);
+    db.close();
+
+    store = openEventStore(dataDir);
+    expect(store.state().tasks).toMatchObject([
+      { id: "t1", rootTaskId: "t1", parentTaskId: null, origin: "human", blockedBy: [] },
+    ]);
+    const check = new DatabaseSync(dbPath());
+    expect(() => check.exec("UPDATE tasks SET origin = 'bogus'")).toThrow(/CHECK/);
+    check.close();
+  });
+});
+
 describe("task queue", () => {
   const dueWake = (botId: string) => {
     const wake = open()
@@ -304,9 +335,15 @@ describe("task queue", () => {
     check.close();
     return { bot, run: latestRun(bot.id), chainId: String(chain?.chainId) };
   };
-  const delegate = (from: ReturnType<typeof requester>, to: string, chainId = "chain") => {
+  const delegate = (
+    from: ReturnType<typeof requester>,
+    to: string,
+    chainId = "chain",
+    tree: Partial<TaskInput> = {},
+  ) => {
     const task = open().tasks.createTask(
       {
+        ...tree,
         kind: "delegate",
         chainId,
         hop: 1,
@@ -655,6 +692,101 @@ describe("task queue", () => {
     const task = delegate(requester("Ada"), ben.id);
     store.recover("next-boot", () => "hold");
     expect(store.tasks.getTask(task.id)?.status).toBe("open");
+  });
+
+  describe("blockers", () => {
+    const botBodies = (roomId: string) =>
+      open()
+        .state()
+        .messages.filter((m) => m.roomId === roomId && m.author === "bot")
+        .map(({ body }) => body);
+
+    it.each(["Completed", "Failed"] as const)(
+      "holds a blocked task until its blocker ends, then opens it with blockers_resolved (%s)",
+      (ended) => {
+        store = openEventStore(dataDir);
+        const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+        const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+        const ada = requester("Ada");
+        const t1 = delegate(ada, ben.id);
+        const t2 = delegate(ada, cy.id, "chain", { blockedBy: [t1.id] });
+        expect(t2).toMatchObject({ status: "queued", blockedBy: [t1.id] });
+        expect(botBodies(cy.roomId)).toEqual([]);
+        expect(pendingKeys(cy.id)).toEqual([]);
+
+        finish(ben.id, ended, { reply: "Found it." });
+        const status = ended === "Completed" ? "done" : "failed";
+        expect(store.tasks.getTask(t2.id)?.status).toBe("open");
+        expect(pendingKeys(cy.id)).toEqual([expect.stringMatching(/^blockers_resolved:/)]);
+        expect(botBodies(cy.roomId).at(-1)).toMatch(
+          new RegExp(`\n\nBlocker ${t1.id} ended: ${status}\\.$`),
+        );
+      },
+    );
+
+    it("records the outcome of a done task", () => {
+      store = openEventStore(dataDir);
+      const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+      const t1 = delegate(requester("Ada"), ben.id);
+      finish(ben.id, "Completed", { reply: "Found it." });
+      expect(store.tasks.getTask(t1.id)).toMatchObject({
+        status: "done",
+        outcome: { summary: "Found it." },
+        progressAt: expect.any(String),
+      });
+    });
+
+    it("leaves a dependent queued when its blocker is stopped, until its owner next frees up", () => {
+      store = openEventStore(dataDir);
+      const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+      const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+      const ada = requester("Ada");
+      const t1 = delegate(ada, ben.id);
+      const t2 = delegate(ada, cy.id, "chain", { blockedBy: [t1.id] });
+      startRun(ben.id);
+      store.stopBot(ben.id);
+      open().finishRun(latestRun(ben.id).id, "boot", { status: "Cancelled", reason: "stopped" });
+      expect(store.tasks.getTask(t1.id)?.status).toBe("cancelled");
+      expect(store.tasks.getTask(t2.id)?.status).toBe("queued");
+      expect(botBodies(cy.roomId)).toEqual([]);
+
+      queueOwnerRun(cy);
+      finish(cy.id);
+      expect(store.tasks.getTask(t2.id)?.status).toBe("open");
+      expect(botBodies(cy.roomId).at(-1)).toMatch(/ended: cancelled\.$/);
+    });
+  });
+
+  it("carries a timer's task on the wake its message makes or joins", () => {
+    store = openEventStore(dataDir);
+    const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+    const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+    const ada = requester("Ada");
+    const t1 = delegate(ada, ben.id);
+    const t2 = delegate(ada, cy.id);
+    const note = (roomId: string, taskId?: string) =>
+      open().sendMessage({
+        id: crypto.randomUUID(),
+        roomId,
+        body: "x",
+        attended: false,
+        ...(taskId && { taskId }),
+      });
+    const wakeTasks = (botId: string) => {
+      const check = new DatabaseSync(dbPath());
+      const found = rows(
+        check,
+        `SELECT task_id AS taskId FROM wakes WHERE bot_id = '${botId}' AND attended = 0`,
+      ).map(({ taskId }) => taskId);
+      check.close();
+      return found;
+    };
+    note(ben.roomId, t1.id);
+    note(ben.roomId, t2.id);
+    expect(wakeTasks(ben.id)).toEqual([t1.id]);
+    note(cy.roomId);
+    note(cy.roomId, t2.id);
+    expect(wakeTasks(cy.id)).toEqual([t2.id]);
   });
 
   it("keeps queued tasks across a restart", () => {

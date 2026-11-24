@@ -22,7 +22,15 @@ const GrantRow = z.object({
 });
 const ChainRow = z.object({ turns: z.number(), startedAt: z.string() });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
-const NextRow = Task.extend({ pendingJson: z.string() });
+const json = <T extends z.ZodType>(schema: T) =>
+  z.string().transform((text): z.infer<T> => schema.parse(JSON.parse(text)));
+const TaskRow = Task.extend({
+  outcome: json(Task.shape.outcome).nullable(),
+  blockedBy: json(Task.shape.blockedBy),
+});
+const NextRow = TaskRow.extend({ pendingJson: z.string() });
+const OwnerRow = z.object({ id: z.string() });
+const Blocker = z.object({ id: z.string(), status: Task.shape.status });
 
 export type TaskInput = Pick<
   Task,
@@ -35,7 +43,11 @@ export type TaskInput = Pick<
   | "ownerBotId"
   | "roomId"
   | "goal"
-> & { deliveryKey: string; attended: boolean };
+> &
+  Partial<Pick<Task, "parentTaskId" | "origin" | "doneWhen" | "blockedBy">> & {
+    deliveryKey: string;
+    attended: boolean;
+  };
 
 // How a bot-written message was sent. Its id starts with this, and the provenance label reads it back.
 const viaNames = [
@@ -50,7 +62,14 @@ const viaNames = [
 export type Via = (typeof viaNames)[number];
 const vias = new Set<string>(viaNames);
 // What a queued task posts when it opens.
-const Pending = z.object({ from: z.string(), via: z.enum(viaNames), body: z.string() });
+const Pending = z.object({
+  from: z.string(),
+  via: z.enum(viaNames),
+  body: z.string(),
+  messageId: z.string().optional(),
+  reason: z.enum(["blockers_resolved", "children_completed"]).optional(),
+});
+type Pending = z.infer<typeof Pending>;
 
 export type ChainPoint = { chainId: string | null; hop: number; depth: number };
 
@@ -85,7 +104,9 @@ export const inboundText = (message: Parameters<typeof provenanceLabel>[0] & { b
 export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deliver: TaskDelivery) {
   const taskColumns = `id, kind, chain_id AS chainId, hop, depth, parent_run_id AS parentRunId,
     requester_bot_id AS requesterBotId, owner_bot_id AS ownerBotId, room_id AS roomId, goal,
-    status, result_message_id AS resultMessageId, created_at AS createdAt,
+    status, result_message_id AS resultMessageId, parent_task_id AS parentTaskId,
+    root_task_id AS rootTaskId, origin, done_when AS doneWhen, outcome_json AS outcome,
+    progress_at AS progressAt, blocked_by_json AS blockedBy, created_at AS createdAt,
     updated_at AS updatedAt`;
   const active = "('queued', 'open', 'waiting', 'needs_input')";
   const selectTask = db.prepare(`SELECT ${taskColumns} FROM tasks WHERE id = ?`);
@@ -105,6 +126,8 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectNext = db.prepare(
     `SELECT ${taskColumns}, pending_json AS pendingJson FROM tasks t
      WHERE owner_bot_id = ? AND status = 'queued'
+       AND NOT EXISTS (SELECT 1 FROM json_each(t.blocked_by_json) j JOIN tasks b ON b.id = j.value
+         WHERE b.status IN ${active})
      ORDER BY (SELECT w.source FROM wakes w WHERE w.chain_id = t.chain_id
          ORDER BY w.rowid LIMIT 1) = 'human' DESC,
        created_at, rowid
@@ -126,8 +149,24 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   );
   const insertTask = db.prepare(
     `INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
-       owner_bot_id, room_id, goal, status, delivery_key, pending_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) RETURNING ${taskColumns}`,
+       owner_bot_id, room_id, goal, status, delivery_key, pending_json, parent_task_id,
+       root_task_id, origin, done_when, blocked_by_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING ${taskColumns}`,
+  );
+  const setOutcome = db.prepare(
+    "UPDATE tasks SET outcome_json = ?, progress_at = ?, updated_at = ? WHERE id = ?",
+  );
+  const selectBlockers = db.prepare(
+    "SELECT b.id, b.status FROM json_each(?) j JOIN tasks b ON b.id = j.value ORDER BY j.key",
+  );
+  const selectDependentOwners = db.prepare(
+    `SELECT DISTINCT t.owner_bot_id AS id FROM tasks t JOIN json_each(t.blocked_by_json) j
+     WHERE t.status = 'queued' AND j.value = ?`,
+  );
+  const countChildren = db.prepare(
+    `SELECT COUNT(*) AS count FROM tasks WHERE parent_task_id IS ? AND requester_bot_id = ?
+       AND chain_id = ? AND status IN ${active}`,
   );
   const endTask = db.prepare(
     `UPDATE tasks SET status = ?, result_message_id = ?, updated_at = ?
@@ -197,11 +236,11 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
   const getTask = (id: string) => {
     const row = selectTask.get(id);
-    return row ? Task.parse(row) : undefined;
+    return row ? TaskRow.parse(row) : undefined;
   };
 
   const changed = (row: unknown) => {
-    const task = Task.parse(row);
+    const task = TaskRow.parse(row);
     emit({ type: "task.changed", task });
     return task;
   };
@@ -256,13 +295,38 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       endWithResult(queued, "failed", noResult("failed"), attended);
       return promoteNextTask(botId);
     }
-    const { from, via, body } = Pending.parse(JSON.parse(pendingJson));
+    const pending = Pending.parse(JSON.parse(pendingJson));
+    // Only a delegate's first opening can have waited on blockers; later ones are follow-ups.
+    const blockers =
+      pending.via === "delegate"
+        ? z.array(Blocker).parse(selectBlockers.all(JSON.stringify(queued.blockedBy)))
+        : [];
     const task = changed(openQueued.get(new Date().toISOString(), queued.id));
-    const id = messageId(via);
+    deliverTask(task, scope, attended, {
+      ...pending,
+      body: pending.body + blockers.map((b) => `\n\nBlocker ${b.id} ended: ${b.status}.`).join(""),
+      reason: pending.reason ?? (blockers.length > 0 ? "blockers_resolved" : undefined),
+    });
+    return task;
+  }
+
+  function deliverTask(
+    task: Task,
+    scope: z.infer<typeof ScopeRow>,
+    attended: boolean,
+    { from, via, body, messageId: given, reason }: Pending,
+  ) {
+    const id = given ?? messageId(via);
     const { chainId, hop, depth } = task;
     deliver.post({ id, roomId: scope.roomId, botId: from, body, chainId, hop, depth });
-    deliver.wake(scope.scopeId, `task:${id}`, attended, { chainId, hop, depth });
-    return task;
+    deliver.wake(scope.scopeId, `${reason ?? "task"}:${id}`, attended, { chainId, hop, depth });
+  }
+
+  // A stopped blocker resolves nothing: its dependents wait for their owner's next promotion.
+  function releaseDependents(taskId: string) {
+    for (const { id } of z.array(OwnerRow).parse(selectDependentOwners.all(taskId))) {
+      promoteNextTask(id);
+    }
   }
 
   // A delegate's outcome goes back once, with no acknowledgment turn. A run with its own
@@ -279,13 +343,17 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       changed(endTask.get(status, null, new Date().toISOString(), task.id));
       return;
     }
+    if (status === "done") {
+      const now = new Date().toISOString();
+      setOutcome.run(JSON.stringify({ summary: text.slice(0, 2000) }), now, now, task.id);
+    }
     const { attended } = Attended.parse(selectRunAttended.get(run.id));
     endWithResult(task, status, status === "done" ? text : noResult(status), attended);
   }
 
   return {
     getTask,
-    activeTasks: () => z.array(Task).parse(selectActive.all()),
+    activeTasks: () => z.array(TaskRow).parse(selectActive.all()),
     promoteNextTask,
 
     // The count and the insert share one write lock, so parallel calls can't pass the cap
@@ -295,7 +363,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       transaction((): Task | Refused => {
         const existing = selectByKey.get(input.deliveryKey);
         if (existing) {
-          return Task.parse(existing);
+          return TaskRow.parse(existing);
         }
         if (Count.parse(countForRun.get(input.parentRunId)).count >= maxFanOut) {
           return { refused: "fan_out" };
@@ -305,10 +373,14 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         if (!ownerScope(input)) {
           throw new Error(`${ownerBotId} has nowhere to receive the task`);
         }
-        const pending = { from: requesterBotId, via: kind, body: input.goal };
+        const doneWhen = input.doneWhen ?? null;
+        const body = doneWhen ? `${input.goal}\n\nDone when: ${doneWhen}` : input.goal;
+        const pending = { from: requesterBotId, via: kind, body };
+        const id = NodeCrypto.randomUUID();
+        const parent = input.parentTaskId ? getTask(input.parentTaskId) : undefined;
         const task = changed(
           insertTask.get(
-            NodeCrypto.randomUUID(),
+            id,
             kind,
             chainId,
             hop,
@@ -320,6 +392,11 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
             input.goal,
             input.deliveryKey,
             JSON.stringify(pending),
+            parent?.id ?? null,
+            parent?.rootTaskId ?? id,
+            parent?.origin ?? input.origin ?? "human",
+            doneWhen,
+            JSON.stringify(input.blockedBy ?? []),
             now,
             now,
           ),
@@ -360,7 +437,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         if (!row) {
           return undefined;
         }
-        if (!ownerScope(Task.parse(row))) {
+        if (!ownerScope(TaskRow.parse(row))) {
           throw new Error(`${toBotId} has nowhere to receive the task`);
         }
         const task = changed(row);
@@ -426,12 +503,18 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
             : JSON.stringify({ from: botId, via: "follow_up", body: message });
         changed(setStatus.get(kind === "cancel" ? "cancelled" : "queued", pending, now, task.id));
         promoteNextTask(task.ownerBotId);
+        if (kind === "cancel") {
+          releaseDependents(task.id);
+        }
         return getTask(task.id) ?? task;
       }),
 
+    activeChildren: (taskId: string | null, scope: { requesterBotId: string; chainId: string }) =>
+      Count.parse(countChildren.get(taskId, scope.requesterBotId, scope.chainId)).count,
+
     tasksOf: (botId: string, taskId?: string) =>
       taskId === undefined
-        ? z.array(Task).parse(selectMine.all(botId, botId))
+        ? z.array(TaskRow).parse(selectMine.all(botId, botId))
         : [getTask(taskId)].filter(
             (task): task is Task =>
               task !== undefined && (task.requesterBotId === botId || task.ownerBotId === botId),
@@ -482,22 +565,26 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
     // Inside the store's transaction that stops the bot, before its runs settle, so none opens.
     refuseQueued: (botId: string) => {
-      for (const task of z.array(Task).parse(selectQueued.all(botId))) {
+      for (const task of z.array(TaskRow).parse(selectQueued.all(botId))) {
         endWithResult(task, "refused", noResult("refused"), parentAttended(task));
       }
     },
 
     // A task opened by a wake the stop cancelled has no run to settle it.
     cancelUnstarted: (botId: string) => {
-      for (const task of z.array(Task).parse(selectUnstarted.all(botId))) {
+      for (const task of z.array(TaskRow).parse(selectUnstarted.all(botId))) {
         endWithResult(task, "cancelled", noResult("cancelled"), parentAttended(task));
       }
     },
 
     // Inside the store's transaction that ends the run. Every end frees the bot for its next task.
+    // Only a stop cancels a run, and a stop resolves no blockers.
     settleRun: (run: Pick<Run, "id" | "botId" | "taskId">, status: EndStatus, text: string) => {
       endRunTask(run, status, text);
       promoteNextTask(run.botId);
+      if (run.taskId && status !== "cancelled") {
+        releaseDependents(run.taskId);
+      }
     },
   };
 }

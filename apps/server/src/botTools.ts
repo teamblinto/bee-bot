@@ -54,7 +54,20 @@ export const botTools = [
     description:
       "Gives a task to another bot. Returns a task id at once; end your turn, and the result " +
       "arrives later as a new message.",
-    inputSchema: schema({ to: { type: "string", description: "Bot name or id" }, goal: text }),
+    inputSchema: schema(
+      {
+        to: { type: "string", description: "Bot name or id" },
+        goal: text,
+        done_when: { type: "string", description: "What finished looks like" },
+        blocked_by: {
+          type: "array",
+          items: text,
+          maxItems: 10,
+          description: "Task ids that must end before this one starts",
+        },
+      },
+      ["to", "goal"],
+    ),
   },
   {
     name: "handoff",
@@ -162,7 +175,16 @@ export type UserQuestion = { runId: string; botId: string; messageId: string; qu
 const Body = z.string().trim().min(1).max(32_000);
 const Send = z.object({ text: Body, room_id: z.string().optional() });
 const Notify = z.object({ text: Body });
-const Delegate = z.object({ to: z.string().trim().min(1), goal: Body });
+const Delegate = z.object({
+  to: z.string().trim().min(1),
+  goal: Body,
+  done_when: z.string().trim().min(1).max(2000).optional(),
+  blocked_by: z
+    .array(z.string())
+    .max(10)
+    .refine((ids) => new Set(ids).size === ids.length)
+    .optional(),
+});
 const Handoff = z.object({ to: z.string().trim().min(1), note: Body });
 const Ask = z.object({ question: Body });
 const FollowUp = z.object({
@@ -454,6 +476,14 @@ export function callBotTool(
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
       }
+      const blockedBy = data.blocked_by ?? [];
+      const unknown = blockedBy.some((id) => {
+        const blocker = store.tasks.getTask(id);
+        return blocker?.requesterBotId !== grant.botId && blocker?.ownerBotId !== grant.botId;
+      });
+      if (unknown) {
+        return refused("unknown_blocker");
+      }
       const digest = NodeCrypto.createHash("sha256").update(`${target.id}\n${data.goal}`);
       const task = store.tasks.createTask(
         {
@@ -466,6 +496,11 @@ export function callBotTool(
           ownerBotId: target.id,
           roomId: grant.roomId,
           goal: data.goal,
+          parentTaskId: grant.taskId,
+          origin:
+            grant.source === "routine" ? "routine" : grant.source === "wait" ? "wake" : "human",
+          doneWhen: data.done_when ?? null,
+          blockedBy,
           deliveryKey: `${run.id}:${digest.digest("hex")}`,
           attended: grant.attended,
         },

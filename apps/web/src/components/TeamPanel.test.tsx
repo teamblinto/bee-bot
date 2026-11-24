@@ -24,6 +24,13 @@ const task: Task = {
   goal: "Draft the hero\nwith a bold headline",
   status: "queued",
   resultMessageId: null,
+  parentTaskId: null,
+  rootTaskId: "t1",
+  origin: "human",
+  doneWhen: null,
+  outcome: null,
+  progressAt: null,
+  blockedBy: [],
   createdAt: "2026-11-23T00:00:00.000Z",
   updatedAt: "2026-11-23T00:00:00.000Z",
 };

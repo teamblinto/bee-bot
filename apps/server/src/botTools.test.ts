@@ -352,6 +352,55 @@ describe("delegation limits", () => {
     ).toContain("run_ended");
   });
 
+  it("records parent, root and origin from the run, not from the model", () => {
+    openStore();
+    const [ada, ben, cy] = team("Ada", "Ben", "Cy");
+    if (!ada || !ben || !cy) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    const parent = start(ada.id);
+    const first = call(parent, "delegate", { to: "Ben", goal: "Find B" });
+    const t1 = store.tasks.getTask(String(first.task_id));
+    expect(t1).toMatchObject({ parentTaskId: null, rootTaskId: t1?.id, origin: "human" });
+    finish(parent.id, "Asked Ben.");
+    const child = start(ben.id);
+    const spoofed = { parent_task_id: "forged", root_task_id: "forged", origin: "board" };
+    const second = call(child, "delegate", {
+      ...spoofed,
+      to: "Cy",
+      goal: "Find C",
+      done_when: "C is known",
+    });
+    expect(store.tasks.getTask(String(second.task_id))).toMatchObject({
+      parentTaskId: t1?.id,
+      rootTaskId: t1?.rootTaskId,
+      origin: "human",
+      doneWhen: "C is known",
+    });
+    finish(child.id, "Asked Cy.");
+    expect(start(cy.id).prompt).toContain("Find C\n\nDone when: C is known");
+  });
+
+  it("refuses a blocker the caller has nothing to do with", () => {
+    openStore();
+    const { ada, cy, task_id } = delegated();
+    say(cy.roomId, "go");
+    const other = start(cy.id);
+    for (const blocked_by of [[task_id], ["missing"]]) {
+      expect(call(other, "delegate", { to: "Ada", goal: "Wait", blocked_by })).toMatchObject({
+        status: "refused",
+        reason: "unknown_blocker",
+      });
+    }
+    say(ada.roomId, "and?");
+    const parent = start(ada.id);
+    expect(
+      call(parent, "delegate", { to: "Cy", goal: "After Ben", blocked_by: [task_id] }),
+    ).toMatchObject({ status: "delegated", queued: true });
+    expect(store.state().tasks).toHaveLength(2);
+  });
+
   it("asks the owner before a routine's run can make a routine", () => {
     openStore();
     const [ada] = team("Ada");

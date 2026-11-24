@@ -524,6 +524,46 @@ describe("stop-all", () => {
     expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
     expect(follow(asker.id, "answer")).toEqual({ refused: "wrong_state" });
   });
+
+  it("opens no blocked task when everything stops", async () => {
+    const engine = scriptedEngine();
+    const { store, supervisor, send } = boot(engine.runTurn);
+    const asker = createBot(store, "Asker");
+    const helper = createBot(store, "Helper");
+    const third = createBot(store, "Third");
+    send(asker, "go");
+    await expectTurns(engine, 1);
+    const delegate = (ownerBotId: string, deliveryKey: string, blockedBy: string[] = []) => {
+      const task = store.tasks.createTask(
+        {
+          kind: "delegate",
+          chainId: "chain",
+          hop: 1,
+          depth: 1,
+          parentRunId: latestRun(store, asker)?.id ?? "",
+          requesterBotId: asker.id,
+          ownerBotId,
+          roomId: asker.roomId,
+          goal: "help",
+          deliveryKey,
+          attended: true,
+          blockedBy,
+        },
+        3,
+      );
+      if ("refused" in task) {
+        throw new Error("refused");
+      }
+      return task;
+    };
+    const t1 = delegate(helper.id, "k1");
+    const t2 = delegate(third.id, "k2", [t1.id]);
+
+    supervisor.stopAll();
+    expect(store.tasks.getTask(t2.id)?.status).toBe("cancelled");
+    expect(store.state().messages.filter((m) => m.roomId === third.roomId)).toEqual([]);
+    expect(store.dueWakes(new Date(Date.now() + 120_000).toISOString())).toEqual([]);
+  });
 });
 
 describe("server mode limits", () => {

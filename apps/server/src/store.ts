@@ -960,6 +960,22 @@ export const migrations: Array<{
     ALTER TABLE wakes_new RENAME TO wakes;
     CREATE INDEX wakes_pending ON wakes (scope_id) WHERE status = 'pending';`,
   },
+  {
+    name: "task_tree",
+    sql: `DELETE FROM events;
+    ALTER TABLE tasks ADD COLUMN parent_task_id TEXT REFERENCES tasks (id);
+    ALTER TABLE tasks ADD COLUMN root_task_id TEXT;
+    ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'
+      CHECK (origin IN ('human', 'routine', 'meeting', 'wake', 'board'));
+    ALTER TABLE tasks ADD COLUMN done_when TEXT;
+    ALTER TABLE tasks ADD COLUMN outcome_json TEXT;
+    ALTER TABLE tasks ADD COLUMN progress_at TEXT;
+    ALTER TABLE tasks ADD COLUMN blocked_by_json TEXT NOT NULL DEFAULT '[]';
+    UPDATE tasks SET root_task_id = id;
+    CREATE INDEX tasks_by_root ON tasks (root_task_id);
+    CREATE INDEX tasks_by_parent ON tasks (parent_task_id) WHERE parent_task_id IS NOT NULL;
+    ALTER TABLE wakes ADD COLUMN task_id TEXT REFERENCES tasks (id);`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1334,6 +1350,9 @@ export function openEventStore(dataDir: string) {
     `DELETE FROM waits WHERE bot_id = $bot OR created_by_run_id IN ${botRuns}
        OR task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
     `UPDATE runs SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
+    `UPDATE wakes SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
+    `UPDATE tasks SET parent_task_id = NULL
+       WHERE parent_task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
     `UPDATE tasks SET result_message_id = NULL
        WHERE result_message_id IN (SELECT id FROM messages WHERE room_id = $dm)`,
     `DELETE FROM tasks WHERE ${doomedTasks}`,
@@ -1486,9 +1505,10 @@ export function openEventStore(dataDir: string) {
   const wakeColumns = "id, bot_id AS botId, scope_id AS scopeId, attended";
   const insertWake = db.prepare(
     `INSERT OR IGNORE INTO wakes
-     (id, bot_id, scope_id, idempotency_key, attended, source, chain_id, hop, depth, status,
-       created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+     (id, bot_id, scope_id, idempotency_key, attended, source, chain_id, hop, depth, task_id,
+       status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
   );
+  const joinWakeTask = db.prepare("UPDATE wakes SET task_id = COALESCE(task_id, ?) WHERE id = ?");
   const selectPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND attended = ? AND status = 'pending'",
   );
@@ -1516,8 +1536,8 @@ export function openEventStore(dataDir: string) {
   // and works on the one open task its bot owns.
   const selectOrigin = db.prepare(
     `SELECT chain_id AS chainId, hop, depth,
-       CASE WHEN source IN ('task', 'continue') THEN (SELECT id FROM tasks
-         WHERE owner_bot_id = wakes.bot_id AND status = 'open') END AS taskId
+       COALESCE(task_id, CASE WHEN source IN ('task', 'continue') THEN (SELECT id FROM tasks
+         WHERE owner_bot_id = wakes.bot_id AND status = 'open') END) AS taskId
      FROM wakes WHERE id = ? OR (scope_id = ? AND status = 'pending' AND source = 'task')
      ORDER BY source = 'task' DESC, hop DESC LIMIT 1`,
   );
@@ -2039,6 +2059,7 @@ export function openEventStore(dataDir: string) {
     attended: boolean,
     source: WakeSource,
     { chainId, hop, depth }: ChainPoint = { chainId: null, hop: 0, depth: 0 },
+    taskId: string | null = null,
   ) {
     // An archived bot never runs, so nothing may queue work for it.
     if (isArchived(scope.botId)) {
@@ -2054,6 +2075,7 @@ export function openEventStore(dataDir: string) {
       chainId,
       hop,
       depth,
+      taskId,
       new Date().toISOString(),
     );
   }
@@ -2192,6 +2214,7 @@ export function openEventStore(dataDir: string) {
       replyToId?: string;
       attachmentIds?: string[];
       mentions?: string[];
+      taskId?: string;
     },
     source: WakeSource = "human",
   ) {
@@ -2247,10 +2270,15 @@ export function openEventStore(dataDir: string) {
         resumeRoutines();
       }
       const pending = selectPendingWake.get(scope.id, input.attended ? 1 : 0);
+      const taskId = input.taskId ?? null;
       if (!pending) {
-        addWake(scope, `message:${input.id}`, input.attended, source, chain);
-      } else if (source !== "wait") {
-        releaseWake.run(IdRow.parse(pending).id);
+        addWake(scope, `message:${input.id}`, input.attended, source, chain, taskId);
+        return "sent";
+      }
+      const { id } = IdRow.parse(pending);
+      joinWakeTask.run(taskId, id);
+      if (source !== "wait") {
+        releaseWake.run(id);
       }
       return "sent";
     }

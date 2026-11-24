@@ -915,6 +915,8 @@ export type Room = z.infer<typeof Room>;
 // the member whose key it equals, or else the one member whose key it starts.
 export const mentionKey = (name: string) => name.toLowerCase().replace(/\s+/g, "");
 
+export const TaskOrigin = z.enum(["human", "routine", "meeting", "wake", "board"]);
+export type TaskOrigin = z.infer<typeof TaskOrigin>;
 export const Task = z.object({
   id: z.string(),
   kind: z.enum(["delegate", "handoff", "consult", "meeting_action", "board"]),
@@ -937,6 +939,13 @@ export const Task = z.object({
     "cancelled",
   ]),
   resultMessageId: z.string().nullable(),
+  parentTaskId: z.string().nullable(),
+  rootTaskId: z.string(),
+  origin: TaskOrigin,
+  doneWhen: z.string().nullable(),
+  outcome: z.object({ summary: z.string().optional() }).nullable(),
+  progressAt: z.string().nullable(),
+  blockedBy: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
