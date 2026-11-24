@@ -76,11 +76,9 @@ function BudgetCard({ bot, connected }: { bot: Bot; connected: boolean }) {
     setBusy(true);
     setError(undefined);
     const result = await postCommand(command);
-    // On success this card closes when the bot's pause clears.
-    if (!result.ok) {
-      setBusy(false);
-      setError(result.message);
-    }
+    // A raise can leave the bot still over its limit, so the card may stay open.
+    setBusy(false);
+    if (!result.ok) setError(result.message);
   }
 
   const disabled = busy || !connected;
