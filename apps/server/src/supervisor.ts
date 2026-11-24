@@ -398,6 +398,13 @@ export function createSupervisor({
             console.error(`beebotd: cost of run ${run.id} was not recorded`, error);
           }
         },
+        onTokens: (tokens) => {
+          try {
+            store.recordTokens(run.id, tokens);
+          } catch (error) {
+            console.error(`beebotd: tokens of run ${run.id} were not recorded`, error);
+          }
+        },
         permissions: { url: permissionsUrl(), token },
         onDelivered: () => {
           try {

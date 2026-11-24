@@ -178,6 +178,7 @@ export function pauseLine(
       "CLAUDE_CONFIG_DIR is set and Bee Bot ignores it, so Claude looks logged out. Run claude auth login, then Resume.",
     browser_session:
       "A site in this bot's browser needs you. Open Browser from the bot menu and take control.",
+    budget: "Paused at its daily spend cap. Raise the cap, or Resume for one more turn.",
   };
   return (accountId === "codex" ? codexPauseLines[reason] : undefined) ?? lines[reason];
 }

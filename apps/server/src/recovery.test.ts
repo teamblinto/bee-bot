@@ -566,6 +566,30 @@ describe("stop-all", () => {
   });
 });
 
+describe("spend caps", () => {
+  it("pauses a bot with reason budget when a turn takes it past its daily token cap", async () => {
+    const engine = scriptedEngine();
+    const hungry: RunTurn = (turn) => {
+      turn.onTokens?.(5000);
+      return engine.runTurn(turn);
+    };
+    const { store, send } = boot(hungry);
+    const bot = createBot(store);
+    store.setSpendCaps(bot.id, { dailyTokenCap: 4000, dailyUsdCap: null });
+    send(bot, "hello");
+    await expectTurns(engine, 1);
+    expect(store.getBot(bot.id)?.status).toBe("ready");
+    engine.turns[0]?.finish(reply);
+    await expectStatus(store, bot, "Completed");
+    expect(store.getBot(bot.id)).toMatchObject({ status: "paused", pauseReason: "budget" });
+    expect(store.spentToday(bot.id, new Date().toISOString())).toEqual({ usd: 0, tokens: 5000 });
+
+    send(bot, "again");
+    await vi.waitFor(() => expect(latestRun(store, bot)).toMatchObject({ reason: "bot_paused" }));
+    expect(engine.turns).toHaveLength(1);
+  });
+});
+
 describe("server mode limits", () => {
   it("lets a running turn finish over budget, then refuses the next API-key run", async () => {
     const engine = scriptedEngine();

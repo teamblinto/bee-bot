@@ -81,6 +81,8 @@ const bot = {
   avatarSeed: 5,
   projectPath: null,
   archivedAt: null,
+  dailyTokenCap: null,
+  dailyUsdCap: null,
 } as const;
 
 const preview = () => host.querySelector("img.size-16")?.getAttribute("src");

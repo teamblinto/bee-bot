@@ -62,6 +62,13 @@ export function admit(admission: Admission) {
   return decision;
 }
 
+export const capHit = (
+  spent: { usd: number; tokens: number },
+  { dailyTokenCap, dailyUsdCap }: Pick<Bot, "dailyTokenCap" | "dailyUsdCap">,
+) =>
+  (dailyTokenCap !== null && spent.tokens >= dailyTokenCap) ||
+  (dailyUsdCap !== null && spent.usd >= dailyUsdCap);
+
 export const monthStart = (now: string) => `${now.slice(0, 7)}-01T00:00:00.000Z`;
 
 // The same patterns `beebot-provision user quota` checks before it writes them.

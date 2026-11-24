@@ -1,6 +1,13 @@
 import { expect, it } from "vite-plus/test";
 
-import { admit, cellLimits, dailyRunCap, defaultMaxActiveBoxes, monthStart } from "./admission.ts";
+import {
+  admit,
+  capHit,
+  cellLimits,
+  dailyRunCap,
+  defaultMaxActiveBoxes,
+  monthStart,
+} from "./admission.ts";
 
 const now = "2026-11-05T12:00:00.000Z";
 const later = "2026-11-05T13:00:00.000Z";
@@ -107,4 +114,12 @@ it("reads the operator's limits, failing closed on a malformed one", () => {
   ]) {
     expect(cellLimits(env)).toHaveProperty("error");
   }
+});
+
+it("capHit trips at either daily cap, and never with both caps cleared", () => {
+  const caps = { dailyTokenCap: 4000, dailyUsdCap: 2 };
+  expect(capHit({ tokens: 3999, usd: 1.99 }, caps)).toBe(false);
+  expect(capHit({ tokens: 4000, usd: 0 }, caps)).toBe(true);
+  expect(capHit({ tokens: 0, usd: 2 }, caps)).toBe(true);
+  expect(capHit({ tokens: 1e9, usd: 1e6 }, { dailyTokenCap: null, dailyUsdCap: null })).toBe(false);
 });

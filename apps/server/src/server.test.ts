@@ -1223,6 +1223,89 @@ describe("headless process", () => {
   );
 });
 
+describe("spend caps", () => {
+  async function boot(runTurn?: RunTurn) {
+    const store = openEventStore(dataDir);
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [appOrigin],
+      store,
+      probeEngine,
+      probeCodex: async () => healthy,
+      ...(runTurn && { runTurn }),
+    });
+    cleanups.push(async () => {
+      await server.close();
+      store.close();
+    });
+    return { server, store, base: `http://127.0.0.1:${server.port}` };
+  }
+
+  const raise = (
+    base: string,
+    botId: string,
+    dailyTokenCap: number | null,
+    dailyUsdCap: number | null = null,
+  ) => command(base, { type: "raise-bot-cap", botId, dailyTokenCap, dailyUsdCap });
+
+  it("pauses at once when a cap drops below today's spend, and resumes when raised", async () => {
+    const runTurn: RunTurn = async ({ onTokens }) => {
+      onTokens?.(5000);
+      return { kind: "completed", text: "done" };
+    };
+    const { server, store, base } = await boot(runTurn);
+    const bot = (await (await createBot(base)).json()) as Bot;
+    await subscribe(server.port, 0);
+    await command(base, {
+      type: "send-message",
+      messageId: crypto.randomUUID(),
+      roomId: bot.roomId,
+      body: "hi",
+    });
+    await vi.waitFor(() => expect(store.state().runs[0]?.status).toBe("Completed"));
+    expect(store.getBot(bot.id)?.status).toBe("ready");
+
+    const lowered = await raise(base, bot.id, 4000);
+    expect(lowered.status).toBe(200);
+    expect(await lowered.json()).toMatchObject({
+      status: "paused",
+      pauseReason: "budget",
+      dailyTokenCap: 4000,
+    });
+    expect(await (await raise(base, bot.id, 10_000)).json()).toMatchObject({
+      status: "ready",
+      pauseReason: null,
+      dailyTokenCap: 10_000,
+    });
+
+    await raise(base, bot.id, 4000);
+    await command(base, { type: "set-bot-paused", botId: bot.id, paused: true });
+    expect(await (await raise(base, bot.id, null)).json()).toMatchObject({ pauseReason: "owner" });
+  });
+
+  it("refuses a token cap on a Codex bot, a cap of nothing, and an unknown bot", async () => {
+    const { base } = await boot();
+    const bot = (await (await createBot(base)).json()) as Bot;
+    const codex = (await command(base, {
+      type: "create-bot",
+      name: "Cy",
+      personality: "",
+      engineAccountId: "codex",
+      model: "gpt-5.6-luna",
+    }).then((response) => response.json())) as Bot;
+
+    const unsupported = await raise(base, codex.id, 5000);
+    expect(unsupported.status).toBe(400);
+    expect(await unsupported.json()).toEqual({ code: "token_cap_unsupported" });
+    expect(await (await raise(base, codex.id, null, 5)).json()).toMatchObject({ dailyUsdCap: 5 });
+    expect((await raise(base, bot.id, null, 0)).status).toBe(400);
+    expect((await raise(base, bot.id, -1)).status).toBe(400);
+    expect((await raise(base, crypto.randomUUID(), null)).status).toBe(404);
+  });
+});
+
 describe("the Codex account", () => {
   const codexStatus = (pauseReason: EngineStatus["pauseReason"]): EngineStatus => ({
     ...healthy,

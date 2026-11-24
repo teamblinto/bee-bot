@@ -255,6 +255,8 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   avatarSeed: 7,
   projectPath: null,
   archivedAt: null,
+  dailyTokenCap: null,
+  dailyUsdCap: null,
 });
 
 function renderControls(current: Bot) {

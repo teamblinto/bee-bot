@@ -177,6 +177,8 @@ export type RunTurn = (turn: {
   onRateLimit: (updates: WindowUpdate[]) => void;
   // What the engine says an attempt on the API-key lane cost, in dollars, as it ends.
   onCost?: (usd: number) => void;
+  // The tokens an attempt used, on either lane, as it ends.
+  onTokens?: (tokens: number) => void;
   // Where this run asks for tool approval. The token is a secret: never log it or put it on argv.
   permissions: { url: string; token: string };
   // Call once the prompt reached the engine: from then on it must never be sent again.

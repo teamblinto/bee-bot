@@ -267,6 +267,8 @@ const bot: Bot = {
   avatarSeed: 7,
   projectPath: null,
   archivedAt: null,
+  dailyTokenCap: null,
+  dailyUsdCap: null,
 };
 
 function renderTranscript(items: TranscriptItem[]) {

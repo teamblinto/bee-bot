@@ -273,6 +273,19 @@ describe("tokenMeter", () => {
     // (3000 * 16 + 600 * 80 + 10000 * 1.6) / 1e6
     expect(meter.ceilingUsd()).toBeCloseTo(0.112, 9);
   });
+
+  it("totals input, output and cache creation, leaving out cache reads", () => {
+    const meter = tokenMeter();
+    expect(meter.total()).toBe(0);
+    meter.see("msg_1", {
+      input_tokens: 100,
+      output_tokens: 20,
+      cache_creation_input_tokens: 300,
+      cache_read_input_tokens: 50_000,
+    });
+    meter.see("msg_2", { input_tokens: 5, output_tokens: 7 });
+    expect(meter.total()).toBe(432);
+  });
 });
 
 describe("a turn", () => {

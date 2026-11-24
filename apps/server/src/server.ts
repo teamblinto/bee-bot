@@ -1149,6 +1149,21 @@ export async function startServer({
         const bot = store.setBotPause(command.botId, command.paused ? "owner" : null);
         return bot ? { status: 200, body: bot } : notFound;
       }
+      case "raise-bot-cap": {
+        const { botId, dailyTokenCap, dailyUsdCap } = command;
+        const bot = store.getBot(botId);
+        if (!bot) {
+          return notFound;
+        }
+        // Only Claude reports the tokens a turn used.
+        if (dailyTokenCap !== null && bot.engineAccountId !== "claude") {
+          return { status: 400, body: { code: "token_cap_unsupported" } };
+        }
+        store.setSpendCaps(botId, { dailyTokenCap, dailyUsdCap });
+        const capped = store.enforceSpendCaps(botId, new Date().toISOString());
+        supervisor.pump();
+        return { status: 200, body: capped };
+      }
       case "send-message": {
         const { messageId: id, roomId, body, replyToId, attachmentIds, mentions } = command;
         const result = store.sendMessage({

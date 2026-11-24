@@ -91,6 +91,8 @@ export const PauseReason = z.enum([
   "credential_source",
   // A site wants a sign-in or a challenge solved, or a browser action is the owner's to do.
   "browser_session",
+  // A daily token or dollar cap was reached. Raising the cap above today's spend clears it.
+  "budget",
 ]);
 export type PauseReason = z.infer<typeof PauseReason>;
 
@@ -175,6 +177,9 @@ export const Bot = z.object({
   projectPath: z.string().nullable(),
   // Set while archived: the bot keeps its data but never runs, and no one can reach it.
   archivedAt: z.string().nullable(),
+  // Over a rolling 24 hours. Null is no cap.
+  dailyTokenCap: z.number().int().nullable(),
+  dailyUsdCap: z.number().nullable(),
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -1348,6 +1353,13 @@ export const Command = z.discriminatedUnion("type", [
     access: BotAccess.optional(),
   }),
   z.object({ type: z.literal("set-bot-paused"), botId: z.uuid(), paused: z.boolean() }),
+  // Sets, raises or clears both daily caps at once. Null clears one.
+  z.object({
+    type: z.literal("raise-bot-cap"),
+    botId: z.uuid(),
+    dailyTokenCap: z.number().int().min(1000).max(1e9).nullable(),
+    dailyUsdCap: z.number().min(0.01).max(10_000).nullable(),
+  }),
   z
     .object({
       type: z.literal("send-message"),

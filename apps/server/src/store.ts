@@ -32,7 +32,7 @@ import {
 } from "@beebot/contracts";
 import { z } from "zod";
 
-import { monthStart } from "./admission.ts";
+import { capHit, monthStart } from "./admission.ts";
 import { chainAudit, openAudit } from "./audit.ts";
 import { type InboxFile, inboxName, openAttachments } from "./attachments.ts";
 import { openBoxes } from "./boxes.ts";
@@ -976,6 +976,14 @@ export const migrations: Array<{
     CREATE INDEX tasks_by_parent ON tasks (parent_task_id) WHERE parent_task_id IS NOT NULL;
     ALTER TABLE wakes ADD COLUMN task_id TEXT REFERENCES tasks (id);`,
   },
+  {
+    name: "bot_spend_caps",
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN daily_token_cap INTEGER;
+    ALTER TABLE bots ADD COLUMN daily_usd_cap REAL;
+    ALTER TABLE spend ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX runs_by_task ON runs (task_id) WHERE task_id IS NOT NULL;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1264,7 +1272,8 @@ export function openEventStore(dataDir: string) {
     r.id AS roomId, b.engine_account_id AS engineAccountId, b.model, b.effort, b.mode, b.access,
     b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
     b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
-    b.archived_at AS archivedAt,
+    b.archived_at AS archivedAt, b.daily_token_cap AS dailyTokenCap,
+    b.daily_usd_cap AS dailyUsdCap,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
   const selectBots = db.prepare(
@@ -1600,6 +1609,16 @@ export function openEventStore(dataDir: string) {
      WHERE bot_id = ? AND status != 'Refused' AND created_at > ?`,
   );
   const insertSpend = db.prepare("INSERT INTO spend (run_id, at, cost_usd) VALUES (?, ?, ?)");
+  const insertTokens = db.prepare(
+    "INSERT INTO spend (run_id, at, cost_usd, tokens) VALUES (?, ?, 0, ?)",
+  );
+  const sumBotSpend = db.prepare(
+    `SELECT COALESCE(SUM(s.cost_usd), 0) AS usd, COALESCE(SUM(s.tokens), 0) AS tokens
+     FROM spend s JOIN runs r ON r.id = s.run_id WHERE r.bot_id = ? AND s.at >= ?`,
+  );
+  const updateSpendCaps = db.prepare(
+    "UPDATE bots SET daily_token_cap = ?, daily_usd_cap = ? WHERE id = ?",
+  );
   const sumSpend = db.prepare(
     "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM spend WHERE at >= ?",
   );
@@ -2562,6 +2581,28 @@ export function openEventStore(dataDir: string) {
     return bot;
   }
 
+  const spentToday = (botId: string, now: string) =>
+    z
+      .object({ usd: z.number(), tokens: z.number() })
+      .parse(sumBotSpend.get(botId, new Date(Date.parse(now) - 86_400_000).toISOString()));
+
+  // shortcut: checked as a turn ends, so one turn can overshoot a cap by whatever it spends; cut a
+  // turn off mid-way if that overshoot ever matters.
+  function enforceSpendCaps(botId: string, now: string) {
+    const bot = getBot(botId);
+    if (!bot) {
+      return undefined;
+    }
+    const hit = capHit(spentToday(botId, now), bot);
+    if (hit && bot.status === "ready") {
+      return setPause(botId, "budget");
+    }
+    if (!hit && bot.pauseReason === "budget") {
+      return setPause(botId, null);
+    }
+    return bot;
+  }
+
   function clearEnginePauses(engineAccountId: string, reasons: PauseReason[] = enginePauses) {
     for (const bot of z.array(BotRow).parse(selectBots.all())) {
       const paused = bot.pauseReason && reasons.includes(bot.pauseReason);
@@ -3238,6 +3279,21 @@ export function openEventStore(dataDir: string) {
       insertSpend.run(runId, new Date().toISOString(), costUsd);
     },
     spentSince,
+    recordTokens: (runId: string, tokens: number) => {
+      insertTokens.run(runId, new Date().toISOString(), tokens);
+    },
+    spentToday,
+    setSpendCaps: (botId: string, caps: Pick<Bot, "dailyTokenCap" | "dailyUsdCap">) =>
+      transaction(() => {
+        updateSpendCaps.run(caps.dailyTokenCap, caps.dailyUsdCap, botId);
+        const bot = getBot(botId);
+        if (bot) {
+          emit({ type: "bot.changed", bot });
+        }
+        return bot;
+      }),
+    enforceSpendCaps: (botId: string, now: string) =>
+      transaction(() => enforceSpendCaps(botId, now)),
     closeWake: (id: string) => {
       markWakeDone.run(id);
     },
@@ -3349,6 +3405,10 @@ export function openEventStore(dataDir: string) {
     steerInput: (runId: string) => {
       const run = getRun(runId);
       if (run?.status !== "Running" || run.inputHighSeq === null) {
+        return undefined;
+      }
+      // A paused bot's turn runs out, but takes no more work.
+      if (getBot(run.botId)?.status === "paused") {
         return undefined;
       }
       const scope = getScope(run.scopeId);
@@ -3487,6 +3547,7 @@ export function openEventStore(dataDir: string) {
         if (finished.pauseBot) {
           setPause(run.botId, finished.pauseBot);
         }
+        enforceSpendCaps(run.botId, now);
       }),
 
     // Mid-turn, a group post routes and spends the round as a final reply does. A DM never routes.

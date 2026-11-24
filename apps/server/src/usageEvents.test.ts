@@ -25,6 +25,8 @@ const bot: Bot = {
   avatarSeed: 0,
   projectPath: "C:/Users/owner/project",
   archivedAt: null,
+  dailyTokenCap: null,
+  dailyUsdCap: null,
 };
 
 const run: Run = {

@@ -40,6 +40,8 @@ const bot: Bot = {
   avatarSeed: 7,
   projectPath: null,
   archivedAt: null,
+  dailyTokenCap: null,
+  dailyUsdCap: null,
 };
 const message = (id: string): ChatMessage => ({
   id,

@@ -174,6 +174,17 @@ export function tokenMeter() {
       }
       return usd;
     },
+    // Cache reads cost about a tenth as much, and would swamp a token cap.
+    total() {
+      let tokens = 0;
+      for (const counts of messages.values()) {
+        tokens +=
+          (counts.input_tokens ?? 0) +
+          (counts.output_tokens ?? 0) +
+          (counts.cache_creation_input_tokens ?? 0);
+      }
+      return tokens;
+    },
   };
 }
 
@@ -544,6 +555,7 @@ type Attempt = {
   onThinking: (state: ThinkingState) => void;
   onRateLimit: (updates: WindowUpdate[]) => void;
   onCost?: ((usd: number) => void) | undefined;
+  onTokens?: ((tokens: number) => void) | undefined;
   onDelivered: () => void;
 };
 
@@ -561,6 +573,7 @@ function runProcess({
   onThinking,
   onRateLimit,
   onCost,
+  onTokens,
   onDelivered,
 }: Attempt) {
   return new Promise<TurnOutcome | "in_use">((resolve) => {
@@ -643,6 +656,10 @@ function runProcess({
         if (usd > 0) {
           onCost?.(usd);
         }
+      }
+      const tokens = meter.total();
+      if (tokens > 0) {
+        onTokens?.(tokens);
       }
       for (const cancel of timers) {
         cancel();
@@ -878,6 +895,7 @@ export function createClaudeRunTurn({
     onThinking,
     onRateLimit,
     onCost,
+    onTokens,
     onDelivered,
     onSteerable,
     permissions,
@@ -936,6 +954,7 @@ export function createClaudeRunTurn({
         onThinking,
         onRateLimit,
         onCost,
+        onTokens,
         onDelivered: delivered,
       });
 
