@@ -1518,7 +1518,11 @@ export function openEventStore(dataDir: string) {
      (id, bot_id, scope_id, idempotency_key, attended, source, chain_id, hop, depth, task_id,
        status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
   );
-  const joinWakeTask = db.prepare("UPDATE wakes SET task_id = COALESCE(task_id, ?) WHERE id = ?");
+  // A wake that takes on a task runs on the task's chain.
+  const joinWakeTask = db.prepare(
+    `UPDATE wakes SET task_id = ?1, chain_id = ?2, hop = ?3, depth = ?4
+     WHERE id = ?5 AND task_id IS NULL AND ?1 IS NOT NULL`,
+  );
   const selectPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND attended = ? AND status = 'pending'",
   );
@@ -2259,6 +2263,8 @@ export function openEventStore(dataDir: string) {
       attachmentIds?: string[];
       mentions?: string[];
       taskId?: string;
+      // A task's timer: only its owner wakes, on the task's own chain.
+      timer?: { scopeId: string; chain: ChainPoint };
     },
     source: WakeSource = "human",
   ) {
@@ -2286,7 +2292,8 @@ export function openEventStore(dataDir: string) {
       return bot !== undefined && !bot.archivedAt;
     });
     const now = new Date().toISOString();
-    const chain = { chainId: NodeCrypto.randomUUID(), hop: 0, depth: 0 };
+    const fresh = { chainId: NodeCrypto.randomUUID(), hop: 0, depth: 0 };
+    const chain = input.timer?.chain ?? fresh;
     const message: ChatMessage = {
       id: input.id,
       roomId: room.id,
@@ -2297,12 +2304,14 @@ export function openEventStore(dataDir: string) {
       botId: null,
       replyToId: replyTo?.id ?? null,
       chainId: chain.chainId,
-      hop: 0,
+      hop: chain.hop,
       attachments,
       createdAt: now,
     };
-    if (room.kind === "dm") {
-      const scope = Scope.parse(selectScopeForRoom.get(room.id));
+    if (room.kind === "dm" || input.timer) {
+      const scope = input.timer
+        ? getScope(input.timer.scopeId)
+        : Scope.parse(selectScopeForRoom.get(room.id));
       if (isArchived(scope.botId)) {
         return "bot_archived";
       }
@@ -2320,7 +2329,7 @@ export function openEventStore(dataDir: string) {
         return "sent";
       }
       const { id } = IdRow.parse(pending);
-      joinWakeTask.run(taskId, id);
+      joinWakeTask.run(taskId, chain.chainId, chain.hop, chain.depth, id);
       if (source !== "wait") {
         releaseWake.run(id);
       }
@@ -2347,8 +2356,8 @@ export function openEventStore(dataDir: string) {
     addMessage(message, mentions);
     attachmentStore.claim(message.id, room.id, attachmentIds);
     resumeRoutines();
-    rooms.startRound(room.id, chain.chainId, now);
-    wakeMembers(room.id, routed.botIds, `message:${input.id}`, input.attended, source, chain);
+    rooms.startRound(room.id, fresh.chainId, now);
+    wakeMembers(room.id, routed.botIds, `message:${input.id}`, input.attended, source, fresh);
     return "sent";
   }
 
@@ -2680,9 +2689,10 @@ export function openEventStore(dataDir: string) {
     wake: (scopeId, key, attended, chain) =>
       addWake(getScope(scopeId), key, attended, "task", chain),
     unanswered: (scopeId) => unackedInput(getScope(scopeId)).some(fromOwner),
-    timer: (task, { source, id, body }) => {
-      const roomId = getBot(task.ownerBotId)?.roomId ?? "";
-      postMessage({ id, roomId, body, attended: false, taskId: task.id }, source);
+    timer: (task, { scopeId, roomId }, { source, id, body }) => {
+      const { chainId, hop, depth } = task;
+      const timer = { scopeId, chain: { chainId, hop, depth } };
+      postMessage({ id, roomId, body, attended: false, taskId: task.id, timer }, source);
     },
   });
   // A delegation is done once the child exists, whether or not it has finished.

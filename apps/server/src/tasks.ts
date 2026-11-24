@@ -90,7 +90,7 @@ export type TaskDelivery = {
   post: (message: { id: string; roomId: string; botId: string; body: string } & ChainPoint) => void;
   wake: (scopeId: string, key: string, attended: boolean, chain: ChainPoint) => void;
   unanswered: (scopeId: string) => boolean;
-  timer: (task: Task, timer: Timer) => void;
+  timer: (task: Task, scope: { scopeId: string; roomId: string }, timer: Timer) => void;
 };
 
 export type Refused = { refused: "fan_out" };
@@ -375,7 +375,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     const pending = z.union([Timer, Pending]).parse(JSON.parse(pendingJson));
     if ("source" in pending) {
       const task = changed(openQueued.get(new Date().toISOString(), queued.id));
-      deliver.timer(task, pending);
+      deliver.timer(task, scope, pending);
       return task;
     }
     // Only a delegate's first opening can have waited on blockers; later ones are follow-ups.

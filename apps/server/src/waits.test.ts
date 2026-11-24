@@ -67,13 +67,13 @@ function requester(name: string) {
   return { bot, runId: run.id };
 }
 
-function delegate(from: ReturnType<typeof requester>, to: string) {
+function delegate(from: ReturnType<typeof requester>, to: string, depth = 1) {
   const task = store.tasks.createTask(
     {
       kind: "delegate",
       chainId: "chain",
       hop: 1,
-      depth: 1,
+      depth,
       parentRunId: from.runId,
       requesterBotId: from.bot.id,
       ownerBotId: to,
@@ -375,16 +375,15 @@ describe("timer-held tasks", () => {
     ).map((row) => row.key);
 
   // Ada asks Ben for a task, and Ben's run on it is live.
-  function benOnTask() {
+  function benOnTask(depth = 1) {
     const ada = requester("Ada");
     const ben = createBot("Ben");
-    const task = delegate(ada, ben.id);
+    const task = delegate(ada, ben.id, depth);
     return { ada, ben, task, runId: runOn(ben) };
   }
 
-  function heldByWait() {
-    const held = benOnTask();
-    const idle = createBot("Cy");
+  function heldByWait(held = benOnTask()) {
+    const idle = createBot("Idle");
     store.waits.createWait(
       {
         botId: held.ben.id,
@@ -412,6 +411,78 @@ describe("timer-held tasks", () => {
     finish(held.runId);
     return { ...held, routine, fireAt };
   }
+
+  // The wait fires and Ben's next run picks the task back up, with Cy sharing a room with Ben.
+  function resumed(held: ReturnType<typeof heldByWait>) {
+    const cy = createBot("Cy");
+    store.rooms.createGroupRoom({ name: "Pair", memberIds: [held.ben.id, cy.id] });
+    createWaitEvaluator(store, noProbes, () => {}).tick(at(0));
+    const runId = runOn(held.ben);
+    expect(runTask(runId)).toBe(held.task.id);
+    const delegateTo = (to: string) =>
+      JSON.parse(
+        callBotTool(store, { id: runId, botId: held.ben.id }, "delegate", { to, goal: "Dig" }),
+      ) as Record<string, unknown>;
+    return { ...held, cy, runId, delegateTo };
+  }
+
+  it("resumes a timer-held task at its own depth, so the depth ceiling still holds", () => {
+    const { delegateTo } = resumed(heldByWait(benOnTask(2)));
+    expect(delegateTo("Cy")).toMatchObject({ status: "refused", reason: "depth" });
+  });
+
+  it("keeps a resumed task waiting until a child its resumed run delegated finishes", () => {
+    const { ben, cy, task, runId, delegateTo } = resumed(heldByWait());
+    expect(delegateTo("Cy")).toMatchObject({ status: "delegated" });
+    finish(runId);
+    expect(store.tasks.getTask(task.id)?.status).toBe("waiting");
+
+    finish(runOn(cy));
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    expect(runTask(runOn(ben))).toBe(task.id);
+  });
+
+  it("doesn't renew a task's progress budget because its wait fired", () => {
+    const held = heldByWait();
+    const past = at(-3_600_000);
+    query(`UPDATE tasks SET created_at = '${past}' WHERE id = '${held.task.id}'`);
+    query(`UPDATE runs SET created_at = '${past}' WHERE id = '${held.runId}'`);
+    const { runId } = resumed(held);
+    expect(store.tasks.runGrant(runId)?.tree?.renewedAt).toBe(past);
+  });
+
+  it("resumes a held handoff in its group room", () => {
+    const ada = requester("Ada");
+    const ben = createBot("Ben");
+    const room = store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.bot.id, ben.id] });
+    const task = store.tasks.createTask(
+      {
+        kind: "handoff",
+        chainId: "chain",
+        hop: 1,
+        depth: 0,
+        parentRunId: ada.runId,
+        requesterBotId: ada.bot.id,
+        ownerBotId: ben.id,
+        roomId: room?.id ?? "",
+        goal: "Take it",
+        deliveryKey: crypto.randomUUID(),
+        attended: true,
+      },
+      3,
+    );
+    if ("refused" in task) {
+      throw new Error("refused");
+    }
+    heldByWait({ ada, ben, task, runId: runOn(ben) });
+    createWaitEvaluator(store, noProbes, () => {}).tick(at(0));
+
+    const notice = store.state().messages.find((m) => m.id.startsWith("wait:"));
+    expect(notice?.roomId).toBe(room?.id);
+    const runId = runOn(ben);
+    expect(runTask(runId)).toBe(task.id);
+    expect(store.tasks.runGrant(runId)?.roomId).toBe(room?.id);
+  });
 
   it("keeps a waiting task's bot busy until the wait fires, then resumes that task", () => {
     const { ada, ben, task } = heldByWait();
