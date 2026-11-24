@@ -235,7 +235,7 @@ const countClass =
 const emptyClass = "px-2 py-1 text-caption text-ink-secondary";
 
 const rowClass =
-  "flex h-8 w-full items-center gap-2 rounded-row px-2 text-left text-body-s transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:font-medium";
+  "flex h-8 w-full items-center gap-2 rounded-row px-2 text-left text-body-s transition-colors hover:bg-hover focus-visible:-outline-offset-2 aria-[current=true]:bg-raised aria-[current=true]:font-medium aria-[current=page]:bg-raised aria-[current=page]:font-medium";
 
 function RoomRow({
   room,
@@ -280,7 +280,7 @@ const statusDots = {
 };
 
 const railButton =
-  "button button-icon relative aria-[current=true]:bg-raised aria-[current=true]:text-ink";
+  "button button-icon relative aria-[current=true]:bg-raised aria-[current=true]:text-ink aria-[current=page]:bg-raised aria-[current=page]:text-ink";
 
 export function Sidebar({
   connection,
