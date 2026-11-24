@@ -271,6 +271,7 @@ describe("the MCP endpoint", () => {
       "create_routine",
       "schedule_wakeup",
       "wait_until",
+      "report_progress",
       "share_file",
     ];
     const browsing = [

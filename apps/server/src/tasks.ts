@@ -21,6 +21,14 @@ const GrantRow = z.object({
   tainted: z.number().transform(Boolean),
 });
 const ChainRow = z.object({ turns: z.number(), startedAt: z.string() });
+const TreeRow = z.object({
+  rootTaskId: z.string(),
+  unattended: z.number().transform(Boolean),
+  turns: z.number(),
+  turnsSinceProgress: z.number(),
+  requestsSinceProgress: z.number(),
+  renewedAt: z.string(),
+});
 const Attended = z.object({ attended: z.number().transform(Boolean) });
 const json = <T extends z.ZodType>(schema: T) =>
   z.string().transform((text): z.infer<T> => schema.parse(JSON.parse(text)));
@@ -58,6 +66,7 @@ const viaNames = [
   "notify",
   "question",
   "follow_up",
+  "progress",
 ] as const;
 export type Via = (typeof viaNames)[number];
 const vias = new Set<string>(viaNames);
@@ -223,8 +232,24 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   );
   const selectChain = db.prepare(
     `SELECT COUNT(*) AS turns, MIN(created_at) AS startedAt FROM runs
-     WHERE chain_id = ? OR id = ?`,
+     WHERE (chain_id = ?1 OR id = ?1) AND created_at >= ?2`,
   );
+  // The tree's budgets renew from its latest progress, never from before the chain began.
+  const selectTree = db.prepare(
+    `WITH root AS (SELECT r.id, r.origin, r.created_at FROM tasks t
+         JOIN tasks r ON r.id = t.root_task_id WHERE t.id = ?1),
+       tree AS (SELECT id, created_at FROM tasks WHERE root_task_id = (SELECT id FROM root)),
+       renewed AS (SELECT MAX(COALESCE((SELECT MAX(progress_at) FROM tasks
+           WHERE root_task_id = root.id), root.created_at), ?2) AS at FROM root)
+     SELECT root.id AS rootTaskId, root.origin <> 'human' AS unattended,
+       renewed.at AS renewedAt,
+       (SELECT COUNT(*) FROM runs WHERE task_id IN (SELECT id FROM tree)) AS turns,
+       (SELECT COUNT(*) FROM runs WHERE task_id IN (SELECT id FROM tree)
+         AND created_at > renewed.at) AS turnsSinceProgress,
+       (SELECT COUNT(*) FROM tree WHERE created_at > renewed.at) AS requestsSinceProgress
+     FROM root, renewed`,
+  );
+  const setProgress = db.prepare("UPDATE tasks SET progress_at = ?, updated_at = ? WHERE id = ?");
   // Each step goes from a task to the run that asked for it, and from that run to its own task.
   const selectAncestors = db.prepare(
     `WITH RECURSIVE up (task_id) AS (
@@ -612,7 +637,13 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       }
       const run = GrantRow.parse(row);
       const chainId = run.chainId ?? runId;
-      const chain = { ...run, ...ChainRow.parse(selectChain.get(chainId, chainId)), chainId };
+      const whole = ChainRow.parse(selectChain.get(chainId, ""));
+      const tree = run.taskId ? TreeRow.parse(selectTree.get(run.taskId, whole.startedAt)) : null;
+      const sinceProgress = tree && {
+        turns: ChainRow.pick({ turns: true }).parse(selectChain.get(chainId, tree.renewedAt)).turns,
+        startedAt: tree.renewedAt,
+      };
+      const chain = { ...run, ...(sinceProgress ?? whole), chainId, tree };
       const ancestors = run.taskId ? z.array(BotRef).parse(selectAncestors.all(run.taskId)) : [];
       return {
         ...chain,
@@ -643,6 +674,23 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         const id = messageId(via);
         deliver.post({ ...from, id, roomId, body });
         return id;
+      }),
+
+    // Posted into the task's room as data for whoever reads it there; it wakes nobody.
+    reportProgress: (taskId: string, botId: string, note: string) =>
+      transaction(() => {
+        const task = getTask(taskId);
+        if (!task) {
+          return undefined;
+        }
+        if (task.ownerBotId !== botId && task.requesterBotId !== botId) {
+          return "not_yours" as const;
+        }
+        const now = new Date().toISOString();
+        setProgress.run(now, now, taskId);
+        const { chainId, hop, depth, roomId } = task;
+        deliver.post({ id: messageId("progress"), roomId, botId, body: note, chainId, hop, depth });
+        return changed(selectTask.get(taskId));
       }),
 
     dmRoom: (botId: string) => ScopeRow.safeParse(selectDmScope.get(botId)).data?.roomId,

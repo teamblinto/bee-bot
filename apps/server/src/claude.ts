@@ -71,6 +71,7 @@ const beeTools = [
   "create_routine",
   "schedule_wakeup",
   "wait_until",
+  "report_progress",
   "share_file",
   "follow_up",
   "task_status",

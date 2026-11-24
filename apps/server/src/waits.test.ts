@@ -443,6 +443,24 @@ describe("timer-held tasks", () => {
     expect(runTask(runOn(ben))).toBe(task.id);
   });
 
+  it("keeps a resumed timer-held task queued while the bot's DM has unanswered human input", () => {
+    const { ben, task } = heldByWait();
+    store.sendMessage({ id: crypto.randomUUID(), roomId: ben.roomId, body: "hey", attended: true });
+    const evaluator = createWaitEvaluator(store, noProbes, () => {});
+
+    evaluator.tick(at(0));
+    evaluator.tick(at(1000));
+    expect(store.tasks.getTask(task.id)?.status).toBe("queued");
+    expect(notices(ben)).toEqual([]);
+
+    const answering = runOn(ben);
+    expect(runTask(answering)).toBeNull();
+    expect(store.tasks.getTask(task.id)?.status).toBe("queued");
+    finish(answering);
+    expect(store.tasks.getTask(task.id)?.status).toBe("open");
+    expect(runTask(runOn(ben))).toBe(task.id);
+  });
+
   it("releases a held task when its timer goes away", () => {
     const first = heldByWakeup();
     expect(store.tasks.getTask(first.task.id)?.status).toBe("waiting");

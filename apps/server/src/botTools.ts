@@ -12,6 +12,7 @@ import {
   checkDelegation,
   checkFollowUp,
   checkRoutineCreate,
+  checkTreeBudget,
   checkWakeCreate,
   clampLimits,
   maxPendingWakeups,
@@ -158,6 +159,13 @@ export const botTools = [
     }),
   },
   {
+    name: "report_progress",
+    description:
+      "Records progress on a task you gave or were given, with a short note the task's room " +
+      "sees. Progress renews the task's turn and delegation budgets.",
+    inputSchema: schema({ task_id: text, note: text }),
+  },
+  {
     name: "share_file",
     description:
       "Attaches a file from your workspace to your reply, for the owner to download. Up to 50 MB.",
@@ -213,6 +221,11 @@ const ScheduleWakeup = z
     task_id: z.string().trim().min(1).optional(),
   })
   .refine(({ at, in_minutes }) => (at === undefined) !== (in_minutes === undefined));
+
+const ReportProgress = z.object({
+  task_id: z.string().trim().min(1),
+  note: z.string().trim().min(1).max(2000),
+});
 
 const WaitUrl = z.string().trim().min(1).max(2048);
 const WaitUntil = z.object({
@@ -472,7 +485,12 @@ export function callBotTool(
       if ("refused" in target) {
         return refused(target.refused);
       }
-      const verdict = checkDelegation(limits, { chain, tasksInRun: grant.tasksInRun, now });
+      const verdict = checkDelegation(limits, {
+        chain,
+        tasksInRun: grant.tasksInRun,
+        now,
+        tree: grant.tree,
+      });
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
       }
@@ -658,6 +676,10 @@ export function callBotTool(
       if (delayMs < 60_000 || delayMs > maxWakeMinutes * 60_000) {
         return refused("out_of_range");
       }
+      const budget = checkTreeBudget(limits, grant.tree);
+      if (budget.verdict === "refuse") {
+        return refused(budget.reason);
+      }
       const verdict = checkWakeCreate(grant);
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
@@ -694,6 +716,10 @@ export function callBotTool(
       if ("alreadyMet" in condition) {
         return answer({ status: "already_met", task_status: condition.alreadyMet });
       }
+      const budget = checkTreeBudget(limits, grant.tree);
+      if (budget.verdict === "refuse") {
+        return refused(budget.reason);
+      }
       const verdict = checkWakeCreate(grant);
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
@@ -722,6 +748,17 @@ export function callBotTool(
         expires_at: wait.expiresAt,
         note: `End your turn now. You'll be woken when it holds or at the timeout.${hostOnly}`,
       });
+    }
+    case "report_progress": {
+      const { data } = ReportProgress.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      const task = store.tasks.reportProgress(data.task_id, grant.botId, data.note);
+      if (!task || task === "not_yours") {
+        return refused("not_your_task");
+      }
+      return answer({ status: "recorded", task_id: task.id });
     }
     default:
       return refused("unknown_tool");

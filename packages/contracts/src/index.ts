@@ -867,6 +867,8 @@ export const LimitRefusal = z.enum([
   "chain_time",
   "routine_approval",
   "wake_approval",
+  "progress_budget",
+  "tree_budget",
 ]);
 export type LimitRefusal = z.infer<typeof LimitRefusal>;
 
@@ -880,6 +882,8 @@ export const Limits = z.object({
   postWindowMs: limit,
   chainTurns: limit,
   chainWallMs: limit,
+  progressRequests: limit,
+  treeTurns: limit,
 });
 export type Limits = z.infer<typeof Limits>;
 export const LimitOverrides = Limits.partial();
@@ -895,6 +899,8 @@ export const limitDefaults: Limits = {
   postWindowMs: 5 * minute,
   chainTurns: 20,
   chainWallMs: 60 * minute,
+  progressRequests: 24,
+  treeTurns: 300,
 };
 
 export const limitCeilings: Limits = { ...limitDefaults, hop: 4, depth: 4 };

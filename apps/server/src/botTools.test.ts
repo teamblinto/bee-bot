@@ -942,3 +942,116 @@ describe("wait_until", () => {
     expect(created?.condition).toEqual({ kind: "file_exists", path: "out/report.pdf" });
   });
 });
+
+describe("progress budgets", () => {
+  const past = (minutes: number) => new Date(Date.UTC(2020, 0, 1) + minutes * 60_000).toISOString();
+  function seed(sql: string, rows: unknown[][]) {
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    const statement = db.prepare(sql);
+    for (const row of rows) statement.run(...(row as string[]));
+    db.close();
+  }
+  // Every run so far started long ago, and the task just after, so seeded rows count after both.
+  function backdated() {
+    const { ada, ben, cy, task_id } = delegated();
+    const owner = start(ben.id);
+    seed("UPDATE runs SET created_at = ?", [[past(0)]]);
+    seed("UPDATE tasks SET created_at = ? WHERE id = ?", [[past(1), String(task_id)]]);
+    return { ada, ben, cy, task_id: String(task_id), owner };
+  }
+  const copyRun = (chained: boolean) =>
+    `INSERT INTO runs (id, bot_id, scope_id, wake_id, engine_account_id, status, chain_id,
+       task_id, created_at)
+     SELECT ?1, bot_id, scope_id, wake_id, engine_account_id, 'Completed',
+       ${chained ? "chain_id" : "NULL"}, task_id, ?3 FROM runs WHERE id = ?2`;
+
+  it("refuses the 25th request since progress, and report_progress renews it", () => {
+    openStore();
+    const { ada, cy, task_id, owner } = backdated();
+    seed(
+      `INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
+         owner_bot_id, room_id, goal, status, delivery_key, parent_task_id, root_task_id,
+         created_at, updated_at)
+       SELECT ?1, kind, chain_id, hop, depth, parent_run_id, requester_bot_id, owner_bot_id,
+         room_id, goal, 'done', ?1, id, id, ?2, ?2 FROM tasks WHERE id = ?3`,
+      Array.from({ length: 24 }, (_, i) => [`seed-${i}`, past(2 + i), task_id]),
+    );
+    expect(call(owner, "delegate", { to: "Cy", goal: "One more" })).toMatchObject({
+      status: "refused",
+      reason: "progress_budget",
+    });
+
+    say(cy.roomId, "go");
+    const stranger = start(cy.id);
+    for (const id of [task_id, "missing"]) {
+      expect(call(stranger, "report_progress", { task_id: id, note: "Mine" })).toMatchObject({
+        status: "refused",
+        reason: "not_your_task",
+      });
+    }
+    expect(call(owner, "report_progress", { task_id, note: "" })).toMatchObject({
+      status: "refused",
+    });
+    expect(call(owner, "report_progress", { task_id, note: "Half done." })).toEqual({
+      status: "recorded",
+      task_id,
+    });
+    expect(store.tasks.getTask(task_id)?.progressAt).not.toBeNull();
+    const posted = store.state().messages.filter(({ id }) => id.startsWith("progress:"));
+    expect(posted).toMatchObject([{ roomId: ada.roomId, body: "Half done." }]);
+    expect(store.dueWakes(new Date().toISOString()).filter((w) => w.botId === ada.id)).toEqual([]);
+    expect(call(owner, "delegate", { to: "Cy", goal: "One more" })).toMatchObject({
+      status: "delegated",
+    });
+  });
+
+  it("caps an unattended tree's total turns, but never a human one", () => {
+    openStore();
+    const { ben, task_id } = delegated();
+    const owner = start(ben.id);
+    const now = new Date().toISOString();
+    seed(
+      copyRun(false),
+      Array.from({ length: 300 }, (_, i) => [`seed-${i}`, owner.id, now]),
+    );
+    const waitUntil = () =>
+      call(owner, "wait_until", {
+        condition: { kind: "url_changes", url: "https://example.com/" },
+        note: "Later",
+        timeout_minutes: 30,
+      });
+    const delegate = () => call(owner, "delegate", { to: "Cy", goal: "Help" });
+
+    seed("UPDATE tasks SET origin = 'routine' WHERE id = ?", [[task_id]]);
+    for (const result of [
+      waitUntil(),
+      delegate(),
+      call(owner, "schedule_wakeup", { in_minutes: 5, note: "Again" }),
+    ]) {
+      expect(result).toMatchObject({ status: "refused", reason: "tree_budget" });
+    }
+
+    seed("UPDATE tasks SET origin = 'human' WHERE id = ?", [[task_id]]);
+    expect(waitUntil()).toMatchObject({ status: "waiting" });
+    expect(delegate()).toMatchObject({ status: "delegated" });
+  });
+
+  it("renews chain turns from progress, so a long productive tree keeps delegating", () => {
+    openStore();
+    const { task_id, owner } = backdated();
+    seed(
+      copyRun(true),
+      Array.from({ length: 20 }, (_, i) => [`seed-${i}`, owner.id, past(2 + i)]),
+    );
+    expect(call(owner, "delegate", { to: "Cy", goal: "Help" })).toMatchObject({
+      status: "refused",
+      reason: "chain_turns",
+    });
+    expect(call(owner, "report_progress", { task_id, note: "Step 1 done." })).toMatchObject({
+      status: "recorded",
+    });
+    expect(call(owner, "delegate", { to: "Cy", goal: "Help" })).toMatchObject({
+      status: "delegated",
+    });
+  });
+});

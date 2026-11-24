@@ -49,6 +49,7 @@ const beeRules: Record<string, ToolRule> = {
   create_routine: { labels: legs("sideEffect") },
   schedule_wakeup: { labels: legs("sideEffect") },
   wait_until: { labels: legs("sideEffect") },
+  report_progress: { labels: legs("sideEffect") },
   // The file goes to the owner alone, like a reply, so it reads the workspace and nothing more.
   share_file: { labels: legs("readsPrivate") },
 };

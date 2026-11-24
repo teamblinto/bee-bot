@@ -14,6 +14,16 @@ export type Verdict = { verdict: "allow" } | { verdict: "refuse"; reason: LimitR
 // What a run carries from its chain. `startedAt` is the chain's first wake.
 export type Chain = { hop: number; depth: number; turns: number; startedAt: string };
 
+// A run's task tree, counted from the root task. `renewedAt` is its last progress.
+export type Tree = {
+  rootTaskId: string;
+  unattended: boolean;
+  turns: number;
+  turnsSinceProgress: number;
+  requestsSinceProgress: number;
+  renewedAt: string;
+};
+
 export type ToolCall = { tool: string; input: string; failed: boolean };
 
 const minute = 60_000;
@@ -54,13 +64,24 @@ function checkChain(limits: Limits, chain: Chain, now: string): Verdict {
 // the one `createTask` reserves.
 export function checkDelegation(
   limits: Limits,
-  input: { chain: Chain; tasksInRun: number; now: string },
+  input: { chain: Chain; tasksInRun: number; now: string; tree?: Tree | null },
 ): Verdict {
+  const tree = input.tree ?? null;
+  const budget = checkTreeBudget(limits, tree);
+  if (budget.verdict === "refuse") return budget;
+  if (tree && tree.requestsSinceProgress >= limits.progressRequests) {
+    return refuse("progress_budget");
+  }
   const chained = checkChain(limits, input.chain, input.now);
   if (chained.verdict === "refuse") return chained;
   if (input.chain.depth + 1 > limits.depth) return refuse("depth");
   if (input.tasksInRun >= limits.fanOut) return refuse("fan_out");
   return allow;
+}
+
+// Only unattended work has a hard total; a human's tree runs as long as it keeps making progress.
+export function checkTreeBudget(limits: Limits, tree: Tree | null): Verdict {
+  return tree?.unattended && tree.turns >= limits.treeTurns ? refuse("tree_budget") : allow;
 }
 
 // Called once per mentioned bot, in mention order. `mentions` is that bot's 1-based position, so

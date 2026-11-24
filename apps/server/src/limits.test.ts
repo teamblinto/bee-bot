@@ -7,6 +7,7 @@ import {
   checkFollowUp,
   checkMentionWake,
   checkRoutineCreate,
+  checkTreeBudget,
   checkWakeCreate,
   clampLimits,
   noProgressDelay,
@@ -31,6 +32,11 @@ describe("clampLimits", () => {
       mentions: 4,
       posts: 2,
     });
+  });
+
+  it("defaults the tree budgets to their ceilings", () => {
+    expect(limits).toMatchObject({ progressRequests: 24, treeTurns: 300 });
+    expect(clampLimits({ treeTurns: 999 }).treeTurns).toBe(300);
   });
 
   it("lets an owner lower a limit", () => {
@@ -179,5 +185,39 @@ describe("checkWakeCreate", () => {
     expect(checkWakeCreate({ attended: false, tainted: true })).toEqual(refuse("wake_approval"));
     expect(checkWakeCreate({ attended: true, tainted: true })).toEqual(allow);
     expect(checkWakeCreate({ attended: false, tainted: false })).toEqual(allow);
+  });
+});
+
+describe("tree budgets", () => {
+  const tree = {
+    rootTaskId: "root",
+    unattended: true,
+    turns: 299,
+    turnsSinceProgress: 0,
+    requestsSinceProgress: 0,
+    renewedAt: startedAt,
+  };
+
+  it("checkTreeBudget refuses only an unattended tree at 300 turns", () => {
+    expect(checkTreeBudget(limits, null)).toEqual(allow);
+    expect(checkTreeBudget(limits, tree)).toEqual(allow);
+    expect(checkTreeBudget(limits, { ...tree, turns: 300 })).toEqual(refuse("tree_budget"));
+    expect(checkTreeBudget(limits, { ...tree, turns: 300, unattended: false })).toEqual(allow);
+  });
+
+  it("checkDelegation refuses progress_budget at 24 requests since progress", () => {
+    const input = { chain, tasksInRun: 0, now };
+    expect(
+      checkDelegation(limits, { ...input, tree: { ...tree, requestsSinceProgress: 23 } }),
+    ).toEqual(allow);
+    expect(
+      checkDelegation(limits, { ...input, tree: { ...tree, requestsSinceProgress: 24 } }),
+    ).toEqual(refuse("progress_budget"));
+    expect(
+      checkDelegation(limits, {
+        ...input,
+        tree: { ...tree, turns: 300, requestsSinceProgress: 24 },
+      }),
+    ).toEqual(refuse("tree_budget"));
   });
 });
