@@ -11,6 +11,7 @@ import {
   routinesNotice,
 } from "../labels";
 import {
+  cronLine,
   dayNames,
   defaultPreset,
   presetCron,
@@ -124,18 +125,18 @@ export function RoutinesPanel({
     }
   }
 
-  function edit(routine: Routine) {
+  function edit(routine: Routine, cron: string) {
     setName(routine.name);
     setPrompt(routine.prompt);
-    setPreset(presetOf(routine.cron) ?? defaultPreset);
+    setPreset(presetOf(cron) ?? defaultPreset);
     setSkipIfLaterMins(routine.skipIfLaterMins);
     setEditing(routine);
     setTried(false);
     setError(undefined);
   }
 
-  function setEnabled(routine: Routine, enabled: boolean) {
-    const { id: routineId, name, prompt, cron, timezone, skipIfLaterMins } = routine;
+  function setEnabled(routine: Routine, cron: string, enabled: boolean) {
+    const { id: routineId, name, prompt, timezone, skipIfLaterMins } = routine;
     const fields = { name, prompt, cron, timezone, enabled, skipIfLaterMins };
     void send({ type: "update-routine", routineId, ...fields }, () => {});
   }
@@ -279,7 +280,7 @@ export function RoutinesPanel({
                 />
               </label>
             </div>
-            {preset.time && <p className={metaClass}>{scheduleLine(presetCron(preset))}</p>}
+            {preset.time && <p className={metaClass}>{cronLine(presetCron(preset))}</p>}
           </div>
           <label className={fieldLabelClass}>
             Skip if late
@@ -328,6 +329,7 @@ export function RoutinesPanel({
         )}
         {routines.map((routine) => {
           const firing = firings.find(({ routineId }) => routineId === routine.id);
+          const { cron } = routine;
           return (
             <article
               key={routine.id}
@@ -340,15 +342,17 @@ export function RoutinesPanel({
                 >
                   {routine.name}
                 </h3>
-                <Switch
-                  label={`${routine.name} on`}
-                  on={routine.enabled}
-                  disabled={disabled}
-                  onChange={(on) => setEnabled(routine, on)}
-                />
+                {cron !== null && (
+                  <Switch
+                    label={`${routine.name} on`}
+                    on={routine.enabled}
+                    disabled={disabled}
+                    onChange={(on) => setEnabled(routine, cron, on)}
+                  />
+                )}
               </div>
               <p className={`text-body-s ${routine.enabled ? "" : "text-ink-secondary"}`}>
-                {scheduleLine(routine.cron)}
+                {scheduleLine(routine)}
               </p>
               <div className="flex flex-col gap-1">
                 <p className={metaClass}>{nextDueLine(routine)}</p>
@@ -365,7 +369,9 @@ export function RoutinesPanel({
                 <RowMenu
                   label={`${routine.name} actions`}
                   items={[
-                    { label: "Edit", disabled, onSelect: () => edit(routine) },
+                    ...(cron === null
+                      ? []
+                      : [{ label: "Edit", disabled, onSelect: () => edit(routine, cron) }]),
                     {
                       label: "Delete",
                       danger: true,

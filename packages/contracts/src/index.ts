@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 42;
+export const protocolVersion = 43;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -799,7 +799,9 @@ export const Routine = z.object({
   botId: z.string(),
   name: RoutineName,
   prompt: MessageBody,
-  cron: z.string(),
+  kind: z.enum(["cron", "once"]),
+  cron: z.string().nullable(),
+  fireAt: z.string().nullable(),
   timezone: z.string(),
   enabled: z.boolean(),
   skipIfLaterMins: z.number().nullable(),

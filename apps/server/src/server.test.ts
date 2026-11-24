@@ -724,6 +724,38 @@ describe("memory commands", () => {
   });
 });
 
+describe("routine commands", () => {
+  it("refuses to edit a once routine", async () => {
+    const { base, store } = await start();
+    const bot = Bot.parse(await (await createBot(base)).json());
+    store.sendMessage({ id: crypto.randomUUID(), roomId: bot.roomId, body: "x", attended: true });
+    for (const wake of store.dueWakes(new Date().toISOString())) {
+      store.queueRun(wake);
+    }
+    const createdByRunId = store.queuedRuns()[0]?.id ?? "";
+    store.refuseQueuedRun(createdByRunId, "stopped");
+    const fireAt = new Date(Date.now() + 3_600_000).toISOString();
+    const input = { botId: bot.id, name: "Wakeup", prompt: "Check", fireAt, createdByRunId };
+    const routine = store.scheduleWakeup(input, 10);
+    if ("refused" in routine) {
+      throw new Error("refused");
+    }
+    const response = await command(base, {
+      type: "update-routine",
+      routineId: routine.id,
+      name: "Wakeup",
+      prompt: "Check",
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      enabled: true,
+      skipIfLaterMins: null,
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "once_routine" });
+    expect(store.getRoutine(routine.id)).toMatchObject({ kind: "once", cron: null });
+  });
+});
+
 describe("bot models", () => {
   it("defaults to sonnet, and an edit without a model keeps the bot's own", async () => {
     const { base, store } = await start();

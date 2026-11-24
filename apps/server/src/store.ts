@@ -886,6 +886,40 @@ export const migrations: Array<{
     name: "limits_settings",
     sql: "ALTER TABLE settings ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';",
   },
+  {
+    name: "routines_once",
+    sql: `DELETE FROM events;
+    CREATE TABLE routines_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'cron' CHECK (kind IN ('cron', 'once')),
+      cron TEXT,
+      fire_at TEXT,
+      timezone TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      skip_if_later_mins INTEGER,
+      next_fire_at TEXT,
+      created_at TEXT NOT NULL,
+      created_by_run_id TEXT REFERENCES runs (id),
+      approved_at TEXT,
+      paused_reason TEXT,
+      setup_failures INTEGER NOT NULL DEFAULT 0,
+      last_tick_at TEXT,
+      last_attempt_at TEXT,
+      CHECK ((kind = 'cron' AND cron IS NOT NULL) OR (kind = 'once' AND fire_at IS NOT NULL))
+    );
+    INSERT INTO routines_new (rowid, id, bot_id, name, prompt, cron, timezone, enabled,
+        skip_if_later_mins, next_fire_at, created_at, created_by_run_id, approved_at, paused_reason,
+        setup_failures, last_tick_at, last_attempt_at)
+      SELECT rowid, id, bot_id, name, prompt, cron, timezone, enabled, skip_if_later_mins,
+        next_fire_at, created_at, created_by_run_id, approved_at, paused_reason, setup_failures,
+        last_tick_at, last_attempt_at FROM routines;
+    DROP TABLE routines;
+    ALTER TABLE routines_new RENAME TO routines;
+    CREATE INDEX routines_due ON routines (next_fire_at) WHERE enabled = 1;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -966,7 +1000,10 @@ const WakeRow = z.object({
 export type Wake = z.infer<typeof WakeRow>;
 const RoutineRow = Routine.omit({ staggerMs: true })
   .extend({ enabled: z.number().transform(Boolean) })
-  .transform((routine) => ({ ...routine, staggerMs: staggerMs(routine.id) }));
+  .transform((routine) => ({
+    ...routine,
+    staggerMs: routine.kind === "once" ? 0 : staggerMs(routine.id),
+  }));
 const SetupFailures = z.object({ setupFailures: z.number() });
 const LastActivity = z.object({ at: z.string().nullable() });
 
@@ -1087,12 +1124,15 @@ export function migrate(db: DatabaseSync, upTo = migrations.length) {
 
 type RoutineFields = Pick<
   Routine,
-  "name" | "prompt" | "cron" | "timezone" | "enabled" | "skipIfLaterMins"
->;
+  "name" | "prompt" | "timezone" | "enabled" | "skipIfLaterMins"
+> & { cron: string };
 
-function routineBody({ name, timezone, prompt }: Routine, slot: string, lateMs: number) {
+function routineBody({ kind, name, timezone, prompt }: Routine, slot: string, lateMs: number) {
   const lateBy = Math.round(lateMs / 60_000);
-  const header = `[Routine "${oneLine(name)}": scheduled_for ${slot} (${timezone}), late_by ${lateBy} minutes]`;
+  const header =
+    kind === "once"
+      ? `[Wakeup you scheduled for ${slot} (UTC), late_by ${lateBy} minutes]`
+      : `[Routine "${oneLine(name)}": scheduled_for ${slot} (${timezone}), late_by ${lateBy} minutes]`;
   return `${header}\n\n${prompt}`;
 }
 
@@ -1627,7 +1667,8 @@ export function openEventStore(dataDir: string) {
      ORDER BY f.rank LIMIT ${searchRows}`,
   );
 
-  const routineColumns = `id, bot_id AS botId, name, prompt, cron, timezone, enabled,
+  const routineColumns = `id, bot_id AS botId, name, prompt, kind, cron, fire_at AS fireAt,
+    timezone, enabled,
     skip_if_later_mins AS skipIfLaterMins, next_fire_at AS nextFireAt,
     paused_reason AS pausedReason, last_tick_at AS lastTickAt,
     last_attempt_at AS lastAttemptAt, created_at AS createdAt`;
@@ -1642,6 +1683,14 @@ export function openEventStore(dataDir: string) {
     `INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, skip_if_later_mins,
        next_fire_at, created_by_run_id, approved_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertWakeup = db.prepare(
+    `INSERT INTO routines (id, bot_id, name, prompt, kind, fire_at, timezone, enabled,
+       next_fire_at, created_by_run_id, approved_at, created_at)
+     VALUES (?, ?, ?, ?, 'once', ?, 'UTC', 1, ?, ?, ?, ?)`,
+  );
+  const countWakeups = db.prepare(
+    "SELECT COUNT(*) AS count FROM routines WHERE bot_id = ? AND kind = 'once' AND enabled = 1",
   );
   // An owner enabling a routine a bot made is the approval it waited for.
   const approveRoutine = db.prepare(
@@ -2268,13 +2317,25 @@ export function openEventStore(dataDir: string) {
     if (nextFireAt > cronNow) {
       return;
     }
-    const next = nextSlot(routine, cronNow);
+    if (routine.kind === "once") {
+      const slot = z.string().parse(routine.fireAt);
+      transaction(() => {
+        if (!selectSlot.get(routine.id, slot)) {
+          recordFiring(routine, { slot, passedOver: 0 }, now);
+        }
+        disableRoutine.run(null, routine.id);
+        emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
+      });
+      return;
+    }
+    const schedule = { cron: z.string().parse(routine.cron), timezone: routine.timezone };
+    const next = nextSlot(schedule, cronNow);
     transaction(() => {
       if (next === null) {
         endOpenFiring(routine.id, "skipped", "disabled");
         disableRoutine.run(null, routine.id);
       } else {
-        const due = dueSlot(routine, nextFireAt, cronNow);
+        const due = dueSlot(schedule, nextFireAt, cronNow);
         // A slot on record changes nothing, so a repeat can't close the card it opened.
         if (!selectSlot.get(routine.id, due.slot)) {
           // First, so a client that replaces by routine ends on the new firing.
@@ -2901,6 +2962,29 @@ export function openEventStore(dataDir: string) {
         }
         return changes > 0;
       }),
+    scheduleWakeup: (
+      input: {
+        botId: string;
+        name: string;
+        prompt: string;
+        fireAt: string;
+        createdByRunId: string;
+      },
+      max: number,
+    ) =>
+      transaction(() => {
+        const { botId, name, prompt, fireAt, createdByRunId } = input;
+        if (Count.parse(countWakeups.get(botId)).count >= max) {
+          return { refused: "too_many_wakeups" } as const;
+        }
+        const now = new Date().toISOString();
+        const id = NodeCrypto.randomUUID();
+        insertWakeup.run(id, botId, name, prompt, fireAt, fireAt, createdByRunId, now, now);
+        const routine = RoutineRow.parse(selectRoutine.get(id));
+        emit({ type: "routine.changed", routine });
+        return routine;
+      }),
+    pendingWakeups: (botId: string) => Count.parse(countWakeups.get(botId)).count,
 
     // Row by row, so one bad row can't block the others. A slot is decided only by comparing the
     // wall clock with the stored time, so a laptop's sleep is just a catch-up on the next tick.

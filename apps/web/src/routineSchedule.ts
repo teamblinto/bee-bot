@@ -1,3 +1,7 @@
+import type { Routine } from "@beebot/contracts";
+
+import { dayAndTime } from "./labels";
+
 export const repeats = ["daily", "weekdays", "weekly"] as const;
 export type Repeat = (typeof repeats)[number];
 export type SchedulePreset = { repeat: Repeat; day: number; time: string };
@@ -36,7 +40,7 @@ export function presetOf(cron: string): SchedulePreset | undefined {
     : { repeat: "weekly", day: Number(field), time };
 }
 
-export function scheduleLine(cron: string) {
+export function cronLine(cron: string) {
   const preset = presetOf(cron);
   if (!preset) {
     return cron;
@@ -45,3 +49,6 @@ export function scheduleLine(cron: string) {
   const when = { daily: "Every day", weekdays: "Weekdays", weekly: `${dayNames[day]}s` };
   return `${when[repeat]} at ${time}`;
 }
+
+export const scheduleLine = ({ cron, fireAt }: Pick<Routine, "cron" | "fireAt">) =>
+  fireAt !== null ? `Once at ${dayAndTime(fireAt)}` : cronLine(cron ?? "");

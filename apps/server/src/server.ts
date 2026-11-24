@@ -1285,6 +1285,9 @@ export async function startServer({
         return { status: 200, body: routine };
       }
       case "update-routine": {
+        if (store.getRoutine(command.routineId)?.kind === "once") {
+          return { status: 409, body: { code: "once_routine" } };
+        }
         const problem = scheduleProblem(command, new Date().toISOString());
         if (problem) {
           return { status: 400, body: { code: problem } };

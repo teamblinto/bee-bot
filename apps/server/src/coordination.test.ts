@@ -705,27 +705,25 @@ describe("account concurrency", () => {
 
   it("keeps account events from before the migration readable", () => {
     const db = new DatabaseSync(dbPath());
-    migrate(
-      db,
-      migrations.findIndex(({ name }) => name === "account_concurrency"),
-    );
+    const index = migrations.findIndex(({ name }) => name === "account_concurrency");
+    migrate(db, index);
     const account = { id: "fake", label: "Fake", lane: "subscription", blockedUntil: null };
     db.prepare("INSERT INTO events (type, payload, created_at) VALUES (?, ?, ?)").run(
       "account.changed",
       JSON.stringify({ type: "account.changed", account }),
       "then",
     );
-    db.close();
-
-    store = openEventStore(dataDir);
-    expect(store.eventsAfter(0)).toMatchObject([
-      { type: "account.changed", account: { ...account, maxConcurrentRuns: 1 } },
-    ]);
-    const check = new DatabaseSync(dbPath());
-    expect(rows(check, "PRAGMA index_list(runs)").map(({ name }) => name)).not.toContain(
+    // Stops here: routines_once, later, clears the event log.
+    migrate(db, index + 1);
+    const [event] = rows(db, "SELECT payload FROM events");
+    expect(JSON.parse(String(event?.payload))).toMatchObject({
+      type: "account.changed",
+      account: { ...account, maxConcurrentRuns: 1 },
+    });
+    expect(rows(db, "PRAGMA index_list(runs)").map(({ name }) => name)).not.toContain(
       "runs_one_running_per_account",
     );
-    check.close();
+    db.close();
   });
 });
 

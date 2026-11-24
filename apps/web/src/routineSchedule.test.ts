@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 
-import { presetCron, presetOf, scheduleLine } from "./routineSchedule";
+import { presetCron, presetOf, cronLine } from "./routineSchedule";
 
 it("turns each preset into a single-hour cron and back", () => {
   const presets = [
@@ -13,7 +13,7 @@ it("turns each preset into a single-hour cron and back", () => {
 });
 
 it("describes presets, and shows anything else as it is", () => {
-  expect(scheduleLine("30 9 * * 1-5")).toBe("Weekdays at 09:30");
-  expect(scheduleLine("0 18 * * 5")).toBe("Fridays at 18:00");
-  expect(scheduleLine("*/30 * * * *")).toBe("*/30 * * * *");
+  expect(cronLine("30 9 * * 1-5")).toBe("Weekdays at 09:30");
+  expect(cronLine("0 18 * * 5")).toBe("Fridays at 18:00");
+  expect(cronLine("*/30 * * * *")).toBe("*/30 * * * *");
 });

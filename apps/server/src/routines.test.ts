@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot, scheduleProblem } from "./routines.ts";
-import { type EventStore, type FinishedRun, openEventStore } from "./store.ts";
+import { type EventStore, type FinishedRun, migrate, migrations, openEventStore } from "./store.ts";
 
 const now = "2026-03-10T12:00:00.000Z";
 const utc = (cron: string) => ({ cron, timezone: "UTC" });
@@ -506,5 +506,122 @@ describe("firing", () => {
     expect(latestFirings).toHaveLength(2);
     expect(latest(first)?.slot).toBe("2026-03-11T09:00:00.000Z");
     expect(latest(second)?.slot).toBe("2026-03-11T09:00:00.000Z");
+  });
+
+  describe("once routines", () => {
+    const at = (base: string, ms: number) => new Date(Date.parse(base) + ms).toISOString();
+
+    function endedRun() {
+      store.sendMessage({ id: crypto.randomUUID(), roomId: bot.roomId, body: "x", attended: true });
+      for (const wake of store.dueWakes(new Date().toISOString())) {
+        store.queueRun(wake);
+      }
+      const id = store.queuedRuns()[0]?.id ?? "";
+      store.refuseQueuedRun(id, "stopped");
+      return id;
+    }
+
+    function wakeup(fireAt: string, createdByRunId = endedRun()) {
+      const input = {
+        botId: bot.id,
+        name: "Wakeup: check",
+        prompt: "Check",
+        fireAt,
+        createdByRunId,
+      };
+      return store.scheduleWakeup(input, 10);
+    }
+
+    it("fires once at fire_at, then turns itself off", () => {
+      const now = new Date().toISOString();
+      const fireAt = at(now, 60_000);
+      const routine = wakeup(fireAt);
+      if ("refused" in routine) {
+        throw new Error("refused");
+      }
+      expect(routine).toMatchObject({ kind: "once", fireAt, cron: null, timezone: "UTC" });
+      store.fireDueRoutines(now);
+      expect(firings()).toEqual([]);
+      store.fireDueRoutines(at(now, 61_000));
+      expect(firings()).toEqual([{ slot: fireAt, status: "ready", reason: null, missedBefore: 0 }]);
+      expect(store.getRoutine(routine.id)).toMatchObject({ enabled: false, nextFireAt: null });
+      store.fireDueRoutines(at(now, 3_600_000));
+      expect(firings()).toHaveLength(1);
+      expect(store.startFiring(firingId(routine), true)).toBe("started");
+      expect(store.state().messages.at(-1)?.body).toMatch(
+        new RegExp(
+          `^\\[Wakeup you scheduled for ${fireAt} \\(UTC\\), late_by 0 minutes\\]\n\nCheck$`,
+        ),
+      );
+    });
+
+    it("fires a once routine that came due while the server was down exactly once", () => {
+      const fireAt = at(new Date().toISOString(), 60_000);
+      wakeup(fireAt);
+      store.close();
+      store = openEventStore(dataDir);
+      store.fireDueRoutines(at(fireAt, 2 * 3_600_000));
+      store.fireDueRoutines(at(fireAt, 2 * 3_600_000 + 1000));
+      expect(firings()).toEqual([
+        { slot: fireAt, status: "ready", reason: "catch_up", missedBefore: 0 },
+      ]);
+    });
+
+    it("refuses an 11th pending wakeup, and counts only enabled once rows", () => {
+      const run = endedRun();
+      const fireAt = at(new Date().toISOString(), 60_000);
+      routineDue(slot);
+      for (let index = 0; index < 10; index += 1) {
+        expect(wakeup(fireAt, run)).not.toHaveProperty("refused");
+      }
+      expect(store.pendingWakeups(bot.id)).toBe(10);
+      expect(wakeup(fireAt, run)).toEqual({ refused: "too_many_wakeups" });
+      store.fireDueRoutines(at(fireAt, 1000));
+      expect(store.pendingWakeups(bot.id)).toBe(0);
+      expect(wakeup(fireAt, run)).not.toHaveProperty("refused");
+    });
+  });
+});
+
+describe("the routines_once migration", () => {
+  it("keeps cron routines through the rebuild", () => {
+    const dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-routines-once-"));
+    const dbPath = NodePath.join(dataDir, "beebot.db");
+    try {
+      const db = new DatabaseSync(dbPath);
+      migrate(
+        db,
+        migrations.findIndex(({ name }) => name === "routines_once"),
+      );
+      db.exec(`INSERT INTO bots (id, name, personality, status, created_at)
+          VALUES ('ada', 'Ada', '', 'ready', 'then');
+        INSERT INTO rooms (id, default_bot_id, created_at) VALUES ('room', 'ada', 'then');
+        INSERT INTO routines (id, bot_id, name, prompt, cron, timezone, enabled, created_at)
+          VALUES ('routine', 'ada', 'Daily', 'Go', '0 9 * * *', 'UTC', 1, 'then');
+        INSERT INTO routine_firings (id, routine_id, slot, status, missed_before, created_at)
+          VALUES ('firing', 'routine', 'slot', 'ran', 0, 'then');`);
+      db.close();
+
+      const store = openEventStore(dataDir);
+      try {
+        const { routines, firings } = store.state();
+        expect(routines).toMatchObject([{ id: "routine", kind: "cron", fireAt: null }]);
+        expect(firings).toMatchObject([{ id: "firing", routineId: "routine" }]);
+      } finally {
+        store.close();
+      }
+
+      const check = new DatabaseSync(dbPath);
+      try {
+        expect(() =>
+          check.exec(`INSERT INTO routines (id, bot_id, name, prompt, kind, timezone, enabled,
+              created_at) VALUES ('once', 'ada', 'Once', 'Go', 'once', 'UTC', 1, 'then')`),
+        ).toThrow(/CHECK/);
+      } finally {
+        check.close();
+      }
+    } finally {
+      NodeFS.rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
