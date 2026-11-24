@@ -293,6 +293,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     const scope = ownerScope(queued);
     if (!scope) {
       endWithResult(queued, "failed", noResult("failed"), attended);
+      releaseDependents(queued.id);
       return promoteNextTask(botId);
     }
     const pending = Pending.parse(JSON.parse(pendingJson));

@@ -755,6 +755,41 @@ describe("task queue", () => {
       expect(store.tasks.getTask(t2.id)?.status).toBe("open");
       expect(botBodies(cy.roomId).at(-1)).toMatch(/ended: cancelled\.$/);
     });
+
+    it("opens a dependent when its queued blocker fails because the owner left the room", () => {
+      store = openEventStore(dataDir);
+      const ben = store.createBot({ name: "Ben", personality: "", engineAccountId: "fake" });
+      const cy = store.createBot({ name: "Cy", personality: "", engineAccountId: "fake" });
+      queueOwnerRun(ben);
+      const ada = requester("Ada");
+      const roomId =
+        store.rooms.createGroupRoom({ name: "Team", memberIds: [ada.bot.id, ben.id] })?.id ?? "";
+      const t1 = store.tasks.createTask(
+        {
+          kind: "handoff",
+          chainId: "chain",
+          hop: 1,
+          depth: 0,
+          parentRunId: ada.run.id,
+          requesterBotId: ada.bot.id,
+          ownerBotId: ben.id,
+          roomId,
+          goal: "Take it",
+          deliveryKey: "handoff",
+          attended: true,
+        },
+        3,
+      );
+      const t1Id = "id" in t1 ? t1.id : "";
+      const t2 = delegate(ada, cy.id, "chain", { blockedBy: [t1Id] });
+      expect(t2.status).toBe("queued");
+      store.rooms.removeMember(roomId, ben.id);
+
+      finish(ben.id);
+      expect(store.tasks.getTask(t1Id)?.status).toBe("failed");
+      expect(store.tasks.getTask(t2.id)?.status).toBe("open");
+      expect(botBodies(cy.roomId).at(-1)).toMatch(/ended: failed\.$/);
+    });
   });
 
   it("carries a timer's task on the wake its message makes or joins", () => {
