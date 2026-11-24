@@ -175,6 +175,7 @@ export async function probeUrl(url: string, lookup: Lookup = systemLookup) {
           servername: target.hostname,
           path: `${target.pathname}${target.search}`,
           headers: { host: target.hostname },
+          agent: false,
           signal: AbortSignal.timeout(20_000),
         },
         resolve,

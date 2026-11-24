@@ -3,13 +3,12 @@ import { EventEmitter } from "node:events";
 import * as NodeFS from "node:fs";
 import type * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
-import type * as NodeHttpsModule from "node:https";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Readable } from "node:stream";
 
 import type { Bot } from "@beebot/contracts";
-import { Readable } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -18,7 +17,7 @@ import { type EventStore, openEventStore } from "./store.ts";
 import { createWaitEvaluator, probeUrl, type WaitCondition, type WaitProbes } from "./waits.ts";
 
 vi.mock("node:https", async (importOriginal) => {
-  const actual = await importOriginal<typeof NodeHttpsModule>();
+  const actual = await importOriginal<typeof NodeHttps>();
   const get = vi.fn(actual.get);
   return { ...actual, default: { ...actual, get }, get };
 });
@@ -348,6 +347,7 @@ describe("waits", () => {
       servername: "docs.example.com",
       path: "/ready?x=1",
       headers: { host: "docs.example.com" },
+      agent: false,
     });
   });
 });
