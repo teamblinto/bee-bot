@@ -10,7 +10,7 @@ import { outcomeText } from "./continuations.ts";
 import type { RunTurn, Steer, ThinkingState, ToolStart, TurnOutcome } from "./engine.ts";
 import { backoffUntil } from "./limits.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
-import { continueCap, outwardTool, recoveryVerdict } from "./recovery.ts";
+import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 import type { InboxFile } from "./attachments.ts";
 import type { WindowUpdate } from "./usage.ts";
@@ -176,11 +176,12 @@ export function createSupervisor({
     const unsettledEffects = store.effects.settleRunEffects(run.id, "uncertain").length;
     return recoveryVerdict({
       unsettledEffects,
-      outwardDone: store.effects.doneEffects(run.id).some(({ tool }) => outwardTool(tool)),
+      outwardDone: store.actedOnce(run.id),
       activeChildTasks: store.tasks.activeChildren(run.taskId, {
         requesterBotId: run.botId,
         chainId: run.chainId ?? run.id,
       }),
+      taskHeld: run.taskId !== null && store.tasks.holdsTask(run.taskId),
       recoveredBefore: store.runWake(run.id)?.key.startsWith("recover:") ?? false,
       continuedAt: store.recentRecoveries(run.botId, continueCap),
       now: at,

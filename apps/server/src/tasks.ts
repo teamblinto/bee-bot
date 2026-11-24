@@ -595,6 +595,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
     activeChildren,
     holdsTask,
+    createdByRun: (runId: string) => Count.parse(countForRun.get(runId)).count,
 
     // Inside the caller's transaction. A fired timer queues its waiting task rather than opening
     // it, so the busy and unanswered-DM checks still apply. False when the task isn't waiting.

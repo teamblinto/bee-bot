@@ -2685,6 +2685,10 @@ export function openEventStore(dataDir: string) {
       postMessage({ id, roomId, body, attended: false, taskId: task.id }, source);
     },
   });
+  // A delegation is done once the child exists, whether or not it has finished.
+  const actedOnce = (runId: string) =>
+    tasks.createdByRun(runId) > 0 ||
+    effects.doneEffects(runId).some(({ tool }) => outwardTool(tool));
   const waits = openWaits(db, tx, {
     notice: (botId, id, body, taskId) => {
       const bot = getBot(botId);
@@ -3865,11 +3869,10 @@ export function openEventStore(dataDir: string) {
             tasks.settleRun(run, "done", "");
           } else {
             tasks.settleRun(run, "failed", "");
-            const outward = effects.doneEffects(run.id).some(({ tool }) => outwardTool(tool));
             addRunNotice(
               run,
-              outward
-                ? "The server restarted after this turn had already acted outside Bee Bot, so it wasn't run again. Check what it did, then send a message to carry on."
+              actedOnce(run.id)
+                ? "The server restarted after this turn had already done something that can't safely be repeated, so it wasn't run again. Check what it did, then send a message to carry on."
                 : "This turn was cut off twice, so Bee Bot stopped retrying it. Send a message to carry on.",
             );
           }
@@ -3877,6 +3880,8 @@ export function openEventStore(dataDir: string) {
         // Their tool calls died with the old process, so no decision can reach them.
         expireApprovals.all(new Date().toISOString()).forEach(recordApproval);
       }),
+
+    actedOnce,
 
     recentRecoveries: (botId: string, limit: number) =>
       z

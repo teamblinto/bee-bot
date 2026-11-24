@@ -131,6 +131,7 @@ describe("recovery policy", () => {
     unsettledEffects: 0,
     outwardDone: false,
     activeChildTasks: 0,
+    taskHeld: false,
     recoveredBefore: false,
     continuedAt: [],
     now,
@@ -139,6 +140,7 @@ describe("recovery policy", () => {
   it("waits on children, then fails an outward or twice-cut turn, then holds, then continues", () => {
     const all = { ...facts, unsettledEffects: 1, outwardDone: true, recoveredBefore: true };
     expect(recoveryVerdict({ ...all, activeChildTasks: 1 })).toBe("wait");
+    expect(recoveryVerdict({ ...all, taskHeld: true })).toBe("wait");
     expect(recoveryVerdict(all)).toBe("fail");
     expect(recoveryVerdict({ ...all, outwardDone: false })).toBe("fail");
     expect(recoveryVerdict({ ...facts, unsettledEffects: 1 })).toBe("hold");
@@ -154,9 +156,17 @@ describe("recovery policy", () => {
     expect(recoveryVerdict({ ...facts, continuedAt: stale })).toBe("continue");
   });
 
-  it("counts messages, connector calls and browser or desktop actions as outward", () => {
+  it("counts every Bee Bot tool that acts, connector calls and screen actions as unrepeatable", () => {
     for (const tool of [
       "mcp__bee__send_message",
+      "mcp__bee__notify",
+      "mcp__bee__delegate",
+      "mcp__bee__handoff",
+      "mcp__bee__follow_up",
+      "mcp__bee__schedule_wakeup",
+      "mcp__bee__wait_until",
+      "mcp__bee__create_routine",
+      "mcp__bee__report_progress",
       "mcp__connectors__github_create_issue",
       "mcp__bee__browser_click",
       "mcp__bee__computer_type",
@@ -167,8 +177,8 @@ describe("recovery policy", () => {
       "Bash",
       "Write",
       "Patch",
-      "mcp__bee__delegate",
-      "mcp__bee__notify",
+      "mcp__bee__task_status",
+      "mcp__bee__read_bot_activity",
       "mcp__bee__browser_snapshot",
       "mcp__bee__nope",
     ]) {
@@ -349,12 +359,97 @@ describe("a crash", () => {
       expect(store.tasks.getTask(task.id)?.status).toBe("failed");
       expect(store.state().messages.at(-1)).toMatchObject({
         botId: ada.id,
-        body: "The server restarted after this turn had already acted outside Bee Bot, so it wasn't run again. Check what it did, then send a message to carry on.",
+        body: "The server restarted after this turn had already done something that can't safely be repeated, so it wasn't run again. Check what it did, then send a message to carry on.",
       });
       await ticks(1);
       expect(after.turns.filter(({ botId }) => botId === ada.id)).toEqual([]);
     },
   );
+
+  it.each([
+    "mcp__bee__schedule_wakeup",
+    "mcp__bee__wait_until",
+    "mcp__bee__create_routine",
+    "mcp__bee__handoff",
+    "mcp__bee__follow_up",
+    "mcp__bee__notify",
+    "mcp__bee__report_progress",
+  ])("fails and reports a run that already called %s", async (tool) => {
+    const before = scriptedEngine();
+    const first = boot(before.runTurn);
+    const { ada, task } = await handedTask(first, before);
+    before.turns[1]?.tool("t1", tool);
+    before.turns[1]?.toolEnd("t1");
+    await first.kill();
+
+    const after = scriptedEngine();
+    const { store, supervisor } = boot(after.runTurn);
+    expect(store.tasks.getTask(task.id)?.status).toBe("failed");
+    expect(store.state().messages.at(-1)).toMatchObject({
+      botId: ada.id,
+      body: "The server restarted after this turn had already done something that can't safely be repeated, so it wasn't run again. Check what it did, then send a message to carry on.",
+    });
+    supervisor.pump();
+    await ticks(1);
+    expect(after.turns.filter(({ botId }) => botId === ada.id)).toEqual([]);
+  });
+
+  it("leaves a task its wait holds waiting, and never re-runs the turn", async () => {
+    const before = scriptedEngine();
+    const first = boot(before.runTurn);
+    const { ada, ben, task, adaRun } = await handedTask(first, before);
+    before.turns[1]?.tool("t1", "mcp__bee__wait_until");
+    callBotTool(first.store, adaRun, "wait_until", {
+      condition: { kind: "bot_idle", bot_id: ben.id },
+      note: "Wait for Ben",
+      timeout_minutes: 5,
+    });
+    before.turns[1]?.toolEnd("t1");
+    await first.kill();
+
+    const after = scriptedEngine();
+    const { store, supervisor } = boot(after.runTurn);
+    expect(store.tasks.getTask(task.id)?.status).toBe("waiting");
+    supervisor.pump();
+    await ticks(1);
+    expect(after.turns.filter(({ botId }) => botId === ada.id)).toEqual([]);
+  });
+
+  it("re-runs a turn that only read", async () => {
+    const before = scriptedEngine();
+    const first = boot(before.runTurn);
+    const { ada } = await handedTask(first, before);
+    before.turns[1]?.tool("t1", "mcp__bee__task_status");
+    before.turns[1]?.toolEnd("t1");
+    await first.kill();
+
+    const after = scriptedEngine();
+    const { supervisor } = boot(after.runTurn);
+    supervisor.pump();
+    await expectTurns(after, 1);
+    expect(after.turns[0]?.botId).toBe(ada.id);
+  });
+
+  it("fails and reports a run whose delegations already finished, and never delegates again", async () => {
+    const before = scriptedEngine();
+    const first = boot(before.runTurn);
+    const { ada, task, adaRun } = await handedTask(first, before);
+    const delegated = callBotTool(first.store, adaRun, "delegate", { to: "Ben", goal: "Help" });
+    const { task_id } = JSON.parse(delegated) as { task_id: string };
+    first.store.tasks.finishTask(task_id, "done");
+    await first.kill();
+
+    const after = scriptedEngine();
+    const { store, supervisor } = boot(after.runTurn);
+    expect(store.tasks.getTask(task.id)?.status).toBe("failed");
+    expect(store.state().messages.at(-1)).toMatchObject({
+      botId: ada.id,
+      body: "The server restarted after this turn had already done something that can't safely be repeated, so it wasn't run again. Check what it did, then send a message to carry on.",
+    });
+    supervisor.pump();
+    await ticks(1);
+    expect(after.turns.filter(({ botId }) => botId === ada.id)).toEqual([]);
+  });
 
   it("re-runs a cut-off turn once, then fails it", async () => {
     let engine = scriptedEngine();
