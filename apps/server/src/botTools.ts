@@ -544,7 +544,12 @@ export function callBotTool(
       }
       // A handoff moves work sideways, so only the hop grows.
       const sideways = { ...chain, depth: chain.depth - 1 };
-      const verdict = checkDelegation(limits, { chain: sideways, tasksInRun: 0, now });
+      const verdict = checkDelegation(limits, {
+        chain: sideways,
+        tasksInRun: 0,
+        now,
+        tree: grant.tree,
+      });
       if (verdict.verdict === "refuse") {
         return refused(verdict.reason);
       }
@@ -593,6 +598,13 @@ export function callBotTool(
       const { data } = FollowUp.safeParse(args);
       if (!data) {
         return malformed(name);
+      }
+      // An answer or cancel only settles what the tree already asked, so it passes a spent budget.
+      if (data.kind === "ask" || data.kind === "rework") {
+        const budget = checkTreeBudget(limits, grant.tree);
+        if (budget.verdict === "refuse") {
+          return refused(budget.reason);
+        }
       }
       const verdict = checkFollowUp(limits, { chain, now });
       if (verdict.verdict === "refuse") {

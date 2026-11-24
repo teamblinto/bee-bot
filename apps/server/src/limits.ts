@@ -64,9 +64,9 @@ function checkChain(limits: Limits, chain: Chain, now: string): Verdict {
 // the one `createTask` reserves.
 export function checkDelegation(
   limits: Limits,
-  input: { chain: Chain; tasksInRun: number; now: string; tree?: Tree | null },
+  input: { chain: Chain; tasksInRun: number; now: string; tree: Tree | null },
 ): Verdict {
-  const tree = input.tree ?? null;
+  const { tree } = input;
   const budget = checkTreeBudget(limits, tree);
   if (budget.verdict === "refuse") return budget;
   if (tree && tree.requestsSinceProgress >= limits.progressRequests) {

@@ -58,41 +58,43 @@ describe("checkFollowUp", () => {
 
 describe("checkDelegation", () => {
   it("refuses the hop after the limit", () => {
-    expect(checkDelegation(limits, { chain: { ...chain, hop: 1 }, tasksInRun: 0, now })).toEqual(
-      allow,
-    );
-    expect(checkDelegation(limits, { chain: { ...chain, hop: 2 }, tasksInRun: 0, now })).toEqual(
-      refuse("hop"),
-    );
+    expect(
+      checkDelegation(limits, { chain: { ...chain, hop: 1 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(allow);
+    expect(
+      checkDelegation(limits, { chain: { ...chain, hop: 2 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(refuse("hop"));
   });
 
   it("refuses a child past the spawn depth", () => {
-    expect(checkDelegation(limits, { chain: { ...chain, depth: 1 }, tasksInRun: 0, now })).toEqual(
-      allow,
-    );
-    expect(checkDelegation(limits, { chain: { ...chain, depth: 2 }, tasksInRun: 0, now })).toEqual(
-      refuse("depth"),
-    );
+    expect(
+      checkDelegation(limits, { chain: { ...chain, depth: 1 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(allow);
+    expect(
+      checkDelegation(limits, { chain: { ...chain, depth: 2 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(refuse("depth"));
   });
 
   it("refuses a 4th task in one run", () => {
-    expect(checkDelegation(limits, { chain, tasksInRun: 2, now })).toEqual(allow);
-    expect(checkDelegation(limits, { chain, tasksInRun: 3, now })).toEqual(refuse("fan_out"));
+    expect(checkDelegation(limits, { chain, tasksInRun: 2, now, tree: null })).toEqual(allow);
+    expect(checkDelegation(limits, { chain, tasksInRun: 3, now, tree: null })).toEqual(
+      refuse("fan_out"),
+    );
   });
 
   it("refuses once the chain spends its turns or time", () => {
-    expect(checkDelegation(limits, { chain: { ...chain, turns: 19 }, tasksInRun: 0, now })).toEqual(
-      allow,
-    );
-    expect(checkDelegation(limits, { chain: { ...chain, turns: 20 }, tasksInRun: 0, now })).toEqual(
-      refuse("chain_turns"),
-    );
-    expect(checkDelegation(limits, { chain, tasksInRun: 0, now: at(60 * minute - 1) })).toEqual(
-      allow,
-    );
-    expect(checkDelegation(limits, { chain, tasksInRun: 0, now: at(60 * minute) })).toEqual(
-      refuse("chain_time"),
-    );
+    expect(
+      checkDelegation(limits, { chain: { ...chain, turns: 19 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(allow);
+    expect(
+      checkDelegation(limits, { chain: { ...chain, turns: 20 }, tasksInRun: 0, now, tree: null }),
+    ).toEqual(refuse("chain_turns"));
+    expect(
+      checkDelegation(limits, { chain, tasksInRun: 0, now: at(60 * minute - 1), tree: null }),
+    ).toEqual(allow);
+    expect(
+      checkDelegation(limits, { chain, tasksInRun: 0, now: at(60 * minute), tree: null }),
+    ).toEqual(refuse("chain_time"));
   });
 });
 
@@ -206,7 +208,7 @@ describe("tree budgets", () => {
   });
 
   it("checkDelegation refuses progress_budget at 24 requests since progress", () => {
-    const input = { chain, tasksInRun: 0, now };
+    const input = { chain, tasksInRun: 0, now, tree: null };
     expect(
       checkDelegation(limits, { ...input, tree: { ...tree, requestsSinceProgress: 23 } }),
     ).toEqual(allow);

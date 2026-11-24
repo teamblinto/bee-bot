@@ -1027,6 +1027,8 @@ describe("progress budgets", () => {
       waitUntil(),
       delegate(),
       call(owner, "schedule_wakeup", { in_minutes: 5, note: "Again" }),
+      call(owner, "handoff", { to: "Cy", note: "Yours" }),
+      call(owner, "follow_up", { task_id, kind: "ask", message: "Which year?" }),
     ]) {
       expect(result).toMatchObject({ status: "refused", reason: "tree_budget" });
     }
@@ -1034,6 +1036,25 @@ describe("progress budgets", () => {
     seed("UPDATE tasks SET origin = 'human' WHERE id = ?", [[task_id]]);
     expect(waitUntil()).toMatchObject({ status: "waiting" });
     expect(delegate()).toMatchObject({ status: "delegated" });
+  });
+
+  it("refuses rework in an unattended tree past its turns", () => {
+    openStore();
+    const { ben, cy, task_id } = delegated();
+    const owner = start(ben.id);
+    const grandchild = String(call(owner, "delegate", { to: "Cy", goal: "Check it" }).task_id);
+    finish(start(cy.id).id, "Checked.");
+    seed(
+      copyRun(false),
+      Array.from({ length: 300 }, (_, i) => [`seed-${i}`, owner.id, new Date().toISOString()]),
+    );
+    const rework = () =>
+      call(owner, "follow_up", { task_id: grandchild, kind: "rework", message: "Again" });
+
+    seed("UPDATE tasks SET origin = 'routine' WHERE id = ?", [[task_id]]);
+    expect(rework()).toMatchObject({ status: "refused", reason: "tree_budget" });
+    seed("UPDATE tasks SET origin = 'human' WHERE id = ?", [[task_id]]);
+    expect(rework()).toMatchObject({ status: "sent" });
   });
 
   it("renews chain turns from progress, so a long productive tree keeps delegating", () => {
