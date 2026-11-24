@@ -456,9 +456,23 @@ describe("timer-held tasks", () => {
     expect(pendingKeys(second.ada.bot)).toContain(`result:${second.task.id}`);
   });
 
-  it("resumes a wakeup-held task when the wakeup starts on its own", () => {
-    const { ben, task, fireAt } = heldByWakeup();
-    store.fireDueRoutines(new Date(Date.parse(fireAt) + 1000).toISOString(), () => true);
+  // A box bot's firing is a card until its box is up, which comes after boot or a restart.
+  function boxHeldCard() {
+    const held = heldByWakeup();
+    query(`UPDATE bots SET boundary = 'box' WHERE id = '${held.ben.id}'`);
+    const due = new Date(Date.parse(held.fireAt) + 1000).toISOString();
+    store.fireDueRoutines(due, () => false);
+    const firing = store.state().firings.at(-1);
+    if (firing?.status !== "ready") {
+      throw new Error("no card");
+    }
+    return { ...held, due, firing };
+  }
+
+  it("resumes a box bot's wakeup-held task once its box is up", () => {
+    const { ben, task, due } = boxHeldCard();
+    expect(store.tasks.getTask(task.id)?.status).toBe("waiting");
+    store.fireDueRoutines(due, () => true);
     expect(store.tasks.getTask(task.id)?.status).toBe("open");
     expect(store.state().firings.at(-1)?.status).toBe("ran");
     expect(runTask(runOn(ben))).toBe(task.id);
@@ -478,4 +492,18 @@ describe("timer-held tasks", () => {
       expect(pendingKeys(ada.bot)).toContain(`result:${task.id}`);
     },
   );
+
+  it("releases a held task when the owner skips its wakeup's card", () => {
+    const { ada, task, firing } = boxHeldCard();
+    expect(store.skipFiring(firing.id)).toBe("skipped");
+    expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(pendingKeys(ada.bot)).toContain(`result:${task.id}`);
+  });
+
+  it("ends a wakeup-held task when its bot is stopped", () => {
+    const { ada, ben, task } = heldByWakeup();
+    store.stopBot(ben.id);
+    expect(store.tasks.getTask(task.id)?.status).toBe("cancelled");
+    expect(pendingKeys(ada.bot)).toContain(`result:${task.id}`);
+  });
 });

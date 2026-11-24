@@ -2396,8 +2396,9 @@ export function openEventStore(dataDir: string) {
   }
 
   // Slots are walked on the cron's own clock, which runs `staggerMs` behind the wall clock.
-  // A wakeup that won't start on its own releases the task it held.
-  function fireRoutine(row: unknown, now: string, runsItself: (botId: string) => boolean) {
+  // A wakeup that will never start releases the task it held. A box bot's card waits for its box,
+  // which comes up after boot.
+  function fireRoutine(row: unknown, now: string) {
     const routine = RoutineRow.parse(row);
     const nextFireAt = z.string().parse(routine.nextFireAt);
     const cronNow = new Date(Date.parse(now) - routine.staggerMs).toISOString();
@@ -2413,7 +2414,7 @@ export function openEventStore(dataDir: string) {
         disableRoutine.run(null, routine.id);
         emit({ type: "routine.changed", routine: RoutineRow.parse(selectRoutine.get(routine.id)) });
         const taskId = wakeupTask(routine.id);
-        if (taskId && !(firing?.status === "ready" && runsItself(routine.botId))) {
+        if (taskId && !(firing?.status === "ready" && getBot(routine.botId)?.boundary === "box")) {
           tasks.releaseIfUnheld(taskId);
         }
       });
@@ -3121,7 +3122,7 @@ export function openEventStore(dataDir: string) {
     fireDueRoutines: (now: string, runsItself: (botId: string) => boolean = () => false) => {
       for (const row of selectDueRoutines.all(now)) {
         try {
-          fireRoutine(row, now, runsItself);
+          fireRoutine(row, now);
         } catch (error) {
           console.error(`beebotd: routine ${IdRow.safeParse(row).data?.id} failed`, error);
         }
@@ -3161,6 +3162,10 @@ export function openEventStore(dataDir: string) {
           return "firing_closed";
         }
         endOpenFiring(firing.routineId, "skipped", null);
+        const taskId = wakeupTask(firing.routineId);
+        if (taskId) {
+          tasks.releaseIfUnheld(taskId);
+        }
         return "skipped";
       }),
 
@@ -3541,6 +3546,7 @@ export function openEventStore(dataDir: string) {
     // unacked, so the next message still carries it. Returns a Running run for the caller to abort.
     stopBot: (botId: string) =>
       transaction(() => {
+        tasks.cancelWaiting(botId);
         cancelPendingWakes.run(botId);
         waits.cancelWaits(botId).forEach(tasks.releaseIfUnheld);
         tasks.refuseQueued(botId);

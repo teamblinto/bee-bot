@@ -146,6 +146,9 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectQueued = db.prepare(
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'queued' ORDER BY rowid`,
   );
+  const selectWaiting = db.prepare(
+    `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'waiting' ORDER BY rowid`,
+  );
   const selectUnstarted = db.prepare(
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'open'
        AND id NOT IN (SELECT task_id FROM runs WHERE task_id IS NOT NULL
@@ -648,6 +651,17 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     refuseQueued: (botId: string) => {
       for (const task of z.array(TaskRow).parse(selectQueued.all(botId))) {
         endWithResult(task, "refused", noResult("refused"), parentAttended(task));
+      }
+    },
+
+    // Inside the store's transaction that stops the bot, before its wakes are cancelled, since a
+    // cancelled task can wake its requester and resume a waiting parent.
+    cancelWaiting: (botId: string) => {
+      for (const { id } of z.array(TaskRow).parse(selectWaiting.all(botId))) {
+        const task = getTask(id);
+        if (task?.status === "waiting") {
+          endWithResult(task, "cancelled", noResult("cancelled"), parentAttended(task));
+        }
       }
     },
 

@@ -850,6 +850,17 @@ describe("task queue", () => {
       expect(pendingKeys(ben.id)).toEqual([expect.stringMatching(/^children_completed:/)]);
     });
 
+    it("ends a task waiting on children when its bot is stopped", () => {
+      store = openEventStore(dataDir);
+      const ben = bot("Ben");
+      const cy = bot("Cy");
+      const parent = delegate(requester("Ada"), ben.id);
+      child(working(ben, parent), cy.id, parent);
+      finish(ben.id);
+      open().stopBot(ben.id);
+      expect(store.tasks.getTask(parent.id)?.status).toBe("cancelled");
+    });
+
     it("lets a bot waiting only on children take a queued task meanwhile", () => {
       store = openEventStore(dataDir);
       const ben = bot("Ben");
