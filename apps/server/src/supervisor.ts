@@ -14,6 +14,7 @@ import { continueCap, recoveryVerdict } from "./recovery.ts";
 import type { ClaimedRun, EventStore, FinishedRun, Wake } from "./store.ts";
 import type { InboxFile } from "./attachments.ts";
 import type { WindowUpdate } from "./usage.ts";
+import { createWaitEvaluator, type WaitProbes } from "./waits.ts";
 import { type AwakeClock, createAwakeClock, createWatchdog } from "./watchdog.ts";
 
 const defaultTurnTimeoutMs = 10 * 60_000;
@@ -53,6 +54,7 @@ type Options = {
   prepareBox?: ((botId: string) => Promise<void>) | undefined;
   // Server mode: refuses API-key runs once this calendar month's spend reaches it.
   monthlyBudgetUsd?: number | null | undefined;
+  waitProbes?: WaitProbes | undefined;
 };
 
 // A limit or auth failure is a fact about the account, so it holds even if the turn was aborted.
@@ -149,9 +151,11 @@ export function createSupervisor({
   copyInbox = async () => {},
   prepareBox,
   monthlyBudgetUsd = null,
+  waitProbes = { url: async () => null, file: async () => null },
 }: Options) {
   const bootId = NodeCrypto.randomUUID();
   const outbox = createOutboxWorker(store.effects, outboxHandlers);
+  const waits = createWaitEvaluator(store, waitProbes, () => queueMicrotask(pump));
   const turns = new Map<
     string,
     {
@@ -508,6 +512,7 @@ export function createSupervisor({
         now,
         (botId) => boxesReady() && store.getBot(botId)?.boundary === "box",
       );
+      waits.tick(now);
       store.continuations.expireContinuations();
       deliverOutcomes();
       for (const wake of store.dueWakes(now)) {
@@ -586,6 +591,7 @@ export function createSupervisor({
       for (const task of store.tasks.activeTasks()) {
         store.tasks.finishTask(task.id, "cancelled");
       }
+      store.waits.cancelWaits(null);
       for (const botId of store.botIds()) {
         stopBot(botId);
       }
@@ -625,7 +631,7 @@ export function createSupervisor({
       for (const { controller } of ending) {
         controller.abort("shutdown");
       }
-      await Promise.all([...ending.map(({ ended }) => ended), outbox.idle()]);
+      await Promise.all([...ending.map(({ ended }) => ended), outbox.idle(), waits.idle()]);
     },
   };
 }

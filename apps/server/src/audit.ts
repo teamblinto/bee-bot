@@ -58,9 +58,9 @@ export function chainAudit(db: DatabaseSync) {
 }
 
 // Who set the run going, read from the wake that queued it. A recovery wake continues a turn the
-// server cut off, so the system started that one, whoever started the first.
+// server cut off, so the system started that one, whoever started the first. So did a wait.
 export function initiatorOf(source: string, idempotencyKey: string): AuditInitiator {
-  if (idempotencyKey.startsWith("recover:")) {
+  if (idempotencyKey.startsWith("recover:") || source === "wait") {
     return "system";
   }
   if (source === "routine") {

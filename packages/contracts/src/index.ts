@@ -844,7 +844,15 @@ export const RoutineFiring = z.object({
 export type RoutineFiring = z.infer<typeof RoutineFiring>;
 
 // `mention` is a bot's room message naming another bot.
-export const WakeSource = z.enum(["human", "routine", "task", "approval", "continue", "mention"]);
+export const WakeSource = z.enum([
+  "human",
+  "routine",
+  "task",
+  "approval",
+  "continue",
+  "mention",
+  "wait",
+]);
 export type WakeSource = z.infer<typeof WakeSource>;
 
 export const LimitRefusal = z.enum([

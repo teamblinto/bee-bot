@@ -51,6 +51,7 @@ import { openSkills, skillsDir } from "./skills.ts";
 import { openConnectors, reservedSlug, slugFrom } from "./connectors.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
 import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
+import { openWaits } from "./waits.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
 import { mergeWindows, type UsageProbe, type WindowUpdate } from "./usage.ts";
@@ -920,6 +921,45 @@ export const migrations: Array<{
     ALTER TABLE routines_new RENAME TO routines;
     CREATE INDEX routines_due ON routines (next_fire_at) WHERE enabled = 1;`,
   },
+  {
+    name: "waits",
+    sql: `CREATE TABLE waits (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      task_id TEXT REFERENCES tasks (id),
+      condition_json TEXT NOT NULL,
+      note TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'met', 'expired', 'cancelled')),
+      next_check_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_by_run_id TEXT REFERENCES runs (id),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX waits_due ON waits (next_check_at) WHERE status = 'pending';
+    CREATE INDEX waits_by_task ON waits (task_id) WHERE status = 'pending';
+    CREATE TABLE wakes_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots (id),
+      scope_id TEXT NOT NULL REFERENCES scopes (id),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      attended INTEGER NOT NULL,
+      not_before TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'done')),
+      created_at TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'human'
+        CHECK (source IN ('human', 'routine', 'task', 'approval', 'continue', 'mention', 'wait', 'meeting')),
+      chain_id TEXT,
+      hop INTEGER NOT NULL DEFAULT 0,
+      depth INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO wakes_new (rowid, id, bot_id, scope_id, idempotency_key, attended, not_before, status,
+        created_at, source, chain_id, hop, depth)
+      SELECT rowid, id, bot_id, scope_id, idempotency_key, attended, not_before, status, created_at,
+        source, chain_id, hop, depth FROM wakes;
+    DROP TABLE wakes;
+    ALTER TABLE wakes_new RENAME TO wakes;
+    CREATE INDEX wakes_pending ON wakes (scope_id) WHERE status = 'pending';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1291,6 +1331,8 @@ export function openEventStore(dataDir: string) {
     `DELETE FROM routine_firings WHERE routine_id IN
        (SELECT id FROM routines WHERE bot_id = $bot OR created_by_run_id IN ${botRuns})`,
     `DELETE FROM routines WHERE bot_id = $bot OR created_by_run_id IN ${botRuns}`,
+    `DELETE FROM waits WHERE bot_id = $bot OR created_by_run_id IN ${botRuns}
+       OR task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
     `UPDATE runs SET task_id = NULL WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
     `UPDATE tasks SET result_message_id = NULL
        WHERE result_message_id IN (SELECT id FROM messages WHERE room_id = $dm)`,
@@ -1459,6 +1501,9 @@ export function openEventStore(dataDir: string) {
   const releaseWake = db.prepare("UPDATE wakes SET not_before = NULL WHERE id = ?");
   const cancelPendingWakes = db.prepare(
     "UPDATE wakes SET status = 'done' WHERE bot_id = ? AND status = 'pending'",
+  );
+  const selectBotPendingWake = db.prepare(
+    "SELECT 1 FROM wakes WHERE bot_id = ? AND status = 'pending' LIMIT 1",
   );
   const selectAnyPendingWake = db.prepare(
     "SELECT id FROM wakes WHERE scope_id = ? AND status = 'pending'",
@@ -1849,6 +1894,8 @@ export function openEventStore(dataDir: string) {
   const isArchived = (botId: string) => selectArchived.get(botId) !== undefined;
   const unackedInput = (scope: Scope) =>
     z.array(Input).parse(selectInput.all(scope.roomId, scope.ackedEventSeq, scope.botId));
+  // A wait's notice is stored as a human line so its bot reads it, but nobody wrote it.
+  const fromOwner = ({ id, author }: Input) => author === "human" && !id.startsWith("wait:");
   // Read only when a room needs them, so a DM never depends on them.
   const limits = () => clampLimits(readLimits());
 
@@ -2192,14 +2239,17 @@ export function openEventStore(dataDir: string) {
       if (isArchived(scope.botId)) {
         return "bot_archived";
       }
-      // Only this DM's bot wakes: the bots it names are told of in its turn input.
+      // Only this DM's bot wakes: the bots it names are told of in its turn input. A wait's
+      // notice is no sign the owner is back, and it waits out the no-progress backoff.
       addMessage(message, mentions);
       attachmentStore.claim(message.id, room.id, attachmentIds);
-      resumeRoutines();
+      if (source !== "wait") {
+        resumeRoutines();
+      }
       const pending = selectPendingWake.get(scope.id, input.attended ? 1 : 0);
       if (!pending) {
         addWake(scope, `message:${input.id}`, input.attended, source, chain);
-      } else {
+      } else if (source !== "wait") {
         releaseWake.run(IdRow.parse(pending).id);
       }
       return "sent";
@@ -2521,8 +2571,20 @@ export function openEventStore(dataDir: string) {
       }),
     wake: (scopeId, key, attended, chain) =>
       addWake(getScope(scopeId), key, attended, "task", chain),
-    unanswered: (scopeId) =>
-      unackedInput(getScope(scopeId)).some(({ author }) => author === "human"),
+    unanswered: (scopeId) => unackedInput(getScope(scopeId)).some(fromOwner),
+  });
+  const waits = openWaits(db, tx, {
+    notice: (botId, id, body) => {
+      const bot = getBot(botId);
+      if (!bot || bot.archivedAt) {
+        return "gone";
+      }
+      const posted = postMessage(
+        { id: `wait:${id}`, roomId: bot.roomId, body, attended: false },
+        "wait",
+      );
+      return posted === "sent" || posted === "duplicate" ? "sent" : "gone";
+    },
   });
   const ingest = openIngest(db, tx, dataDir, (fields) => saveMemory(newMemory(fields)));
   const boxes = openBoxes(db, tx);
@@ -2606,6 +2668,7 @@ export function openEventStore(dataDir: string) {
   return {
     rooms,
     tasks,
+    waits,
     boxes,
     connectors,
     continuations,
@@ -2796,6 +2859,7 @@ export function openEventStore(dataDir: string) {
       transaction(() => {
         if (archiveRow.run(new Date().toISOString(), id).changes > 0) {
           cancelPendingWakes.run(id);
+          waits.cancelWaits(id);
           const bot = BotRow.parse(selectBot.get(id));
           emit({ type: "bot.archived", bot });
         }
@@ -2833,6 +2897,8 @@ export function openEventStore(dataDir: string) {
       }),
     botAccess: (id: string) => getBot(id)?.access,
     botBusy: (id: string) => selectActiveRun.get(id) !== undefined,
+    botIdle: (id: string) =>
+      selectActiveRun.get(id) === undefined && selectBotPendingWake.get(id) === undefined,
     setBotPause: (id: string, reason: Bot["pauseReason"]) =>
       transaction(() => setPause(id, reason)),
     // An owner's pause is left alone: its reason says what the owner has to undo.
@@ -3099,7 +3165,7 @@ export function openEventStore(dataDir: string) {
         spentThisMonthUsd: spentSince(monthStart(now)),
         ...progress,
         // A wake an unanswered human message joined counts as theirs, so it is never held.
-        source: input.some((m) => m.author === "human") ? "human" : progress.source,
+        source: input.some(fromOwner) ? "human" : progress.source,
       };
     },
     recordSpend: (runId: string, costUsd: number) => {
@@ -3415,6 +3481,7 @@ export function openEventStore(dataDir: string) {
     stopBot: (botId: string) =>
       transaction(() => {
         cancelPendingWakes.run(botId);
+        waits.cancelWaits(botId);
         tasks.refuseQueued(botId);
         for (const row of cancelParked.all(new Date().toISOString(), botId)) {
           const parked = RunRow.parse(row);
