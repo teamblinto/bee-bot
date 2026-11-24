@@ -62,6 +62,25 @@ export function outbox(
   return runtime.execAttach(botId, { argv: ["sh", "-c", script, "sh", workdir, path], env });
 }
 
+// Like `outbox`, the box resolves links, so a link out of the workspace is `outside`.
+export async function probeFile(
+  runtime: BoxRuntime,
+  { env, workdir }: Pick<BoxLayout, "env" | "workdir">,
+  botId: string,
+  path: string,
+) {
+  const script =
+    'real=$(realpath -e -- "$1/$2") || exit 2; case "$real" in "$1"/*) exit 0;; *) exit 3;; esac';
+  const { stream, exited } = await runtime.execAttach(botId, {
+    argv: ["sh", "-c", script, "sh", workdir, path],
+    env,
+  });
+  stream.end();
+  stream.resume();
+  const code = await exited;
+  return code === 0 ? "present" : code === 3 ? "outside" : "absent";
+}
+
 // For tests: no container, the command runs on this machine as if it were in the box.
 export function createFakeBoxRuntime(): BoxRuntime {
   const states = new Map<string, BoxState>();

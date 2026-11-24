@@ -1,13 +1,27 @@
+import * as NodeCrypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import * as NodeFS from "node:fs";
+import type * as NodeHttp from "node:http";
+import * as NodeHttps from "node:https";
+import type * as NodeHttpsModule from "node:https";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type { Bot } from "@beebot/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { Readable } from "node:stream";
 
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+import { callBotTool } from "./botTools.ts";
 import { type EventStore, openEventStore } from "./store.ts";
-import { createWaitEvaluator, type WaitCondition, type WaitProbes } from "./waits.ts";
+import { createWaitEvaluator, probeUrl, type WaitCondition, type WaitProbes } from "./waits.ts";
+
+vi.mock("node:https", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeHttpsModule>();
+  const get = vi.fn(actual.get);
+  return { ...actual, default: { ...actual, get }, get };
+});
 
 let dataDir: string;
 let store: EventStore;
@@ -273,5 +287,67 @@ describe("waits", () => {
 
     expect(store.wakeContext(wake, at(0)).source).toBe("wait");
     expect(delegate(ada, ben.id).status).toBe("open");
+  });
+
+  it("refuses a URL outside the bot's allowlist or on a private address, and never follows a redirect", async () => {
+    const ada = requester("Ada");
+    store.claimRun(ada.runId, "boot", at(0));
+    query(`UPDATE bots SET egress_any_site = 0 WHERE id = '${ada.bot.id}'`);
+    query(
+      `INSERT INTO bot_egress_hosts (bot_id, host, created_at)
+       VALUES ('${ada.bot.id}', 'docs.example.com', '${at(0)}') RETURNING host`,
+    );
+    const waitFor = (url: string) =>
+      JSON.parse(
+        callBotTool(store, { id: ada.runId, botId: ada.bot.id }, "wait_until", {
+          condition: { kind: "url_status", url, status: 200 },
+          note: "Check it",
+          timeout_minutes: 5,
+        }),
+      ) as Record<string, unknown>;
+    for (const url of [
+      "https://evil.example/",
+      "https://127.0.0.1/",
+      "https://[::1]/",
+      "https://localhost/",
+      "https://docs.example.com:8443/",
+    ]) {
+      expect(waitFor(url)).toMatchObject({ status: "refused", reason: "egress_not_allowed" });
+    }
+    expect(waitFor("http://docs.example.com/")).toMatchObject({ reason: "url_not_https" });
+    expect(waitFor("https://docs.example.com/ready")).toMatchObject({ status: "waiting" });
+    expect(store.waits.dueWaits(at(0))).toHaveLength(1);
+
+    const get = vi.mocked(NodeHttps.get);
+    get.mockClear();
+    for (const addresses of [["10.0.0.1"], ["127.0.0.1"], ["93.184.216.34", "169.254.169.254"]]) {
+      expect(await probeUrl("https://docs.example.com/", async () => addresses)).toBeNull();
+    }
+    expect(await probeUrl("http://docs.example.com/", async () => ["93.184.216.34"])).toBeNull();
+    expect(get).not.toHaveBeenCalled();
+
+    const moved = ((_options: NodeHttps.RequestOptions, respond: (r: unknown) => void) => {
+      respond(
+        Object.assign(Readable.from([Buffer.from("moved")]), {
+          statusCode: 302,
+          headers: { location: "https://elsewhere.example/" },
+        }),
+      );
+      return new EventEmitter() as NodeHttp.ClientRequest;
+    }) as unknown as typeof NodeHttps.get;
+    get.mockImplementationOnce(moved);
+    expect(
+      await probeUrl("https://docs.example.com/ready?x=1", async () => ["93.184.216.34"]),
+    ).toEqual({
+      status: 302,
+      sha256: NodeCrypto.createHash("sha256").update("moved").digest("hex"),
+    });
+    expect(get).toHaveBeenCalledOnce();
+    expect(get.mock.calls[0]?.[0]).toMatchObject({
+      host: "93.184.216.34",
+      servername: "docs.example.com",
+      path: "/ready?x=1",
+      headers: { host: "docs.example.com" },
+    });
   });
 });

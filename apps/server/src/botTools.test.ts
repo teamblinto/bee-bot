@@ -825,3 +825,71 @@ describe("schedule_wakeup", () => {
     });
   });
 });
+
+describe("wait_until", () => {
+  const waitFor = (
+    run: { id: string; launch: { botId: string } },
+    condition: Record<string, unknown>,
+  ) => call(run, "wait_until", { condition, note: "Carry on", timeout_minutes: 30 });
+
+  it("answers already_met for a finished task and refuses a task that isn't the caller's", () => {
+    openStore();
+    const { cy, ben, task_id } = delegated();
+    const owner = start(ben.id);
+    expect(waitFor(owner, { kind: "task_done", task_id })).toMatchObject({ status: "waiting" });
+    store.tasks.finishTask(String(task_id), "done");
+    expect(waitFor(owner, { kind: "task_done", task_id })).toEqual({
+      status: "already_met",
+      task_status: "done",
+    });
+    expect(store.waits.dueWaits(new Date(Date.now() + 60_000).toISOString())).toHaveLength(1);
+
+    say(cy.roomId, "go");
+    const stranger = start(cy.id);
+    for (const condition of [
+      { kind: "task_done", task_id },
+      { kind: "task_done", task_id: "missing" },
+    ]) {
+      expect(waitFor(stranger, condition)).toMatchObject({
+        status: "refused",
+        reason: "not_your_task",
+      });
+    }
+    expect(waitFor(stranger, { kind: "bot_idle", bot_id: "Cy" })).toMatchObject({
+      reason: "not_allowed",
+    });
+  });
+
+  it("refuses file_exists for a host bot and for a path that leaves the workspace", () => {
+    openStore();
+    const [ada] = team("Ada");
+    if (!ada) {
+      throw new Error("no team");
+    }
+    say(ada.roomId, "go");
+    const run = start(ada.id);
+    expect(waitFor(run, { kind: "file_exists", path: "out/report.pdf" })).toMatchObject({
+      reason: "box_only",
+    });
+    expect(waitFor(run, { kind: "url_changes", url: "https://example.com/" })).toMatchObject({
+      status: "waiting",
+      note: expect.stringContaining("You don't run in a box"),
+    });
+
+    const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+    db.prepare("UPDATE bots SET boundary = 'box' WHERE id = ?").run(ada.id);
+    db.close();
+    for (const path of ["../secret", "/etc/passwd", "out/../../secret", ".."]) {
+      expect(waitFor(run, { kind: "file_exists", path })).toMatchObject({
+        reason: "outside_workspace",
+      });
+    }
+    const made = waitFor(run, { kind: "file_exists", path: "./out//report.pdf" });
+    expect(made).toMatchObject({ status: "waiting" });
+    expect(String(made.note)).not.toContain("box");
+    const [created] = store.waits
+      .dueWaits(new Date(Date.now() + 60_000).toISOString())
+      .filter(({ id }) => id === made.wait_id);
+    expect(created?.condition).toEqual({ kind: "file_exists", path: "out/report.pdf" });
+  });
+});

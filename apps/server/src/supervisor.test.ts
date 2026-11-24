@@ -533,6 +533,40 @@ describe("outcomes", () => {
     expect(engine.turns).toHaveLength(1);
   });
 
+  it("cancels every pending wait on stop-all", async () => {
+    const engine = scriptedEngine();
+    const { store, command, createBot, send } = await boot(engine.runTurn);
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    await send(ada, "one");
+    await expectTurns(engine, 1);
+    const runId = run(store, ada)?.id ?? "";
+    for (const [bot, other] of [
+      [ada, ben],
+      [ben, ada],
+    ] as const) {
+      store.waits.createWait(
+        {
+          botId: bot.id,
+          taskId: null,
+          condition: { kind: "url_changes", url: `https://example.com/${other.name}` },
+          note: "n",
+          timeoutMinutes: 60,
+          createdByRunId: runId,
+        },
+        10,
+      );
+    }
+    expect(query("SELECT status FROM waits")).toEqual([
+      { status: "pending" },
+      { status: "pending" },
+    ]);
+    await command({ type: "stop-all" });
+    expect(query("SELECT status FROM waits")).toEqual([
+      { status: "cancelled" },
+      { status: "cancelled" },
+    ]);
+  });
+
   it("refuses a Queued run whose bot was paused before it started", async () => {
     const engine = scriptedEngine();
     const { store, command, createBot, send } = await boot(engine.runTurn);

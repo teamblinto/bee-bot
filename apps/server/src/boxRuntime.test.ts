@@ -1,8 +1,11 @@
 import { once } from "node:events";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { createFakeBoxRuntime } from "./boxRuntime.ts";
+import { createFakeBoxRuntime, probeFile } from "./boxRuntime.ts";
 
 const node = (script: string) => ({
   argv: [process.execPath, "-e", script],
@@ -41,4 +44,29 @@ describe("fake box runtime", () => {
     stream.destroy();
     expect(await exited).not.toBe(0);
   });
+});
+
+describe("probeFile", () => {
+  it.runIf(process.platform === "linux")(
+    "finds a file in the workspace and refuses a link that leads out of it",
+    async () => {
+      const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-probe-"));
+      try {
+        const workdir = NodePath.join(root, "work");
+        NodeFS.mkdirSync(NodePath.join(workdir, "out"), { recursive: true });
+        NodeFS.writeFileSync(NodePath.join(workdir, "out", "report.pdf"), "pdf");
+        NodeFS.writeFileSync(NodePath.join(root, "secret"), "s");
+        NodeFS.symlinkSync(NodePath.join(root, "secret"), NodePath.join(workdir, "leak"));
+        const boxes = createFakeBoxRuntime();
+        await boxes.create("b");
+        await boxes.start("b");
+        const layout = { workdir, env: { PATH: process.env.PATH ?? "" } };
+        expect(await probeFile(boxes, layout, "b", "out/report.pdf")).toBe("present");
+        expect(await probeFile(boxes, layout, "b", "out/missing.pdf")).toBe("absent");
+        expect(await probeFile(boxes, layout, "b", "leak")).toBe("outside");
+      } finally {
+        NodeFS.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

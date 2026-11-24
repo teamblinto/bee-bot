@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import { mentionKey, Routine } from "@beebot/contracts";
+import { hostAllowed } from "@beebot/egress/policy";
 import { z } from "zod";
 
 import { attachmentName, attachmentPath, receiveAttachment, refusedName } from "./attachments.ts";
@@ -14,12 +15,14 @@ import {
   checkWakeCreate,
   clampLimits,
   maxPendingWakeups,
+  maxPendingWaits,
 } from "./limits.ts";
 import { oneLine } from "./memory.ts";
 import { scheduleProblem } from "./routines.ts";
 import type { EventStore } from "./store.ts";
 import { inboundText } from "./tasks.ts";
 import { routineCreated, trackUsage } from "./usageEvents.ts";
+import { terminalTask, type WaitCondition } from "./waits.ts";
 
 const text = { type: "string" };
 const activityRows = 10;
@@ -27,6 +30,8 @@ const followUpKinds = ["ask", "answer", "rework", "cancel"] as const;
 const activityChars = 8000;
 const activityLineChars = 500;
 const maxWakeMinutes = 30 * 24 * 60;
+const maxWaitMinutes = 24 * 60;
+const waitKinds = ["task_done", "bot_idle", "url_status", "url_changes", "file_exists"] as const;
 const schema = (properties: Record<string, object>, required = Object.keys(properties)) => ({
   type: "object",
   properties,
@@ -114,6 +119,32 @@ export const botTools = [
     ),
   },
   {
+    name: "wait_until",
+    description:
+      "Wakes you when a condition holds, or at the timeout. No model runs while you wait. End " +
+      "your turn after.",
+    inputSchema: schema({
+      condition: {
+        type: "object",
+        description:
+          "One of {kind: task_done, task_id}, {kind: bot_idle, bot_id}, {kind: url_status, url, " +
+          "status}, {kind: url_changes, url}, {kind: file_exists, path}. A URL is https and on " +
+          "your allowlist; a path is relative to your workspace.",
+        properties: {
+          kind: { type: "string", enum: waitKinds },
+          task_id: text,
+          bot_id: { type: "string", description: "Bot name or id" },
+          url: text,
+          status: { type: "integer", minimum: 100, maximum: 599 },
+          path: text,
+        },
+        required: ["kind"],
+      },
+      note: text,
+      timeout_minutes: { type: "integer", minimum: 1, maximum: maxWaitMinutes },
+    }),
+  },
+  {
     name: "share_file",
     description:
       "Attaches a file from your workspace to your reply, for the owner to download. Up to 50 MB.",
@@ -161,6 +192,23 @@ const ScheduleWakeup = z
   })
   .refine(({ at, in_minutes }) => (at === undefined) !== (in_minutes === undefined));
 
+const WaitUrl = z.string().trim().min(1).max(2048);
+const WaitUntil = z.object({
+  condition: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("task_done"), task_id: z.string().trim().min(1) }),
+    z.object({ kind: z.literal("bot_idle"), bot_id: z.string().trim().min(1) }),
+    z.object({
+      kind: z.literal("url_status"),
+      url: WaitUrl,
+      status: z.number().int().min(100).max(599),
+    }),
+    z.object({ kind: z.literal("url_changes"), url: WaitUrl }),
+    z.object({ kind: z.literal("file_exists"), path: z.string().trim().min(1).max(4096) }),
+  ]),
+  note: z.string().trim().min(1).max(2000),
+  timeout_minutes: z.number().int().min(1).max(maxWaitMinutes),
+});
+
 const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
 const refused = (reason: string) =>
   answer({ status: "refused", reason, note: "This is an answer, not an error. Tell the user." });
@@ -180,6 +228,53 @@ function reachableBot(grant: Grant, to: string) {
   return [...grant.roommates, ...grant.mentioned].find(
     (bot) => bot.id !== grant.botId && named(to)(bot),
   );
+}
+
+// The condition as stored, or why it can't be waited on. A finished task is met already.
+function waitCondition(
+  store: EventStore,
+  grant: Grant,
+  condition: z.infer<typeof WaitUntil>["condition"],
+): WaitCondition | { refused: string } | { alreadyMet: string } {
+  const bot = store.getBot(grant.botId);
+  if (!bot) {
+    return { refused: "run_ended" };
+  }
+  switch (condition.kind) {
+    case "task_done": {
+      const task = store.tasks.getTask(condition.task_id);
+      if (!task || (task.requesterBotId !== bot.id && task.ownerBotId !== bot.id)) {
+        return { refused: "not_your_task" };
+      }
+      return terminalTask.has(task.status) ? { alreadyMet: task.status } : condition;
+    }
+    case "bot_idle": {
+      const target = reachableBot(grant, condition.bot_id);
+      return target ? { ...condition, bot_id: target.id } : { refused: "not_allowed" };
+    }
+    case "url_status":
+    case "url_changes": {
+      const url = URL.parse(condition.url);
+      if (url?.protocol !== "https:") {
+        return { refused: "url_not_https" };
+      }
+      // The egress proxy only opens port 443, and hostAllowed refuses IP literals and local names.
+      if (url.port !== "" || !hostAllowed(bot.egressHosts, url.hostname, bot.egressAnySite)) {
+        return { refused: "egress_not_allowed" };
+      }
+      return { ...condition, url: url.href };
+    }
+    case "file_exists": {
+      if (bot.boundary !== "box") {
+        return { refused: "box_only" };
+      }
+      const path = NodePath.posix.normalize(condition.path);
+      if (NodePath.posix.isAbsolute(path) || path === ".." || path.startsWith("../")) {
+        return { refused: "outside_workspace" };
+      }
+      return { ...condition, path };
+    }
+  }
 }
 
 // Ancestors first: a name can match both, and an ancestor never takes work from its chain. A
@@ -550,6 +645,47 @@ export function callBotTool(
         routine_id: routine.id,
         fire_at: routine.fireAt,
         note: endTurn,
+      });
+    }
+    case "wait_until": {
+      const { data } = WaitUntil.safeParse(args);
+      if (!data) {
+        return malformed(name);
+      }
+      const condition = waitCondition(store, grant, data.condition);
+      if ("refused" in condition) {
+        return refused(condition.refused);
+      }
+      if ("alreadyMet" in condition) {
+        return answer({ status: "already_met", task_status: condition.alreadyMet });
+      }
+      const verdict = checkWakeCreate(grant);
+      if (verdict.verdict === "refuse") {
+        return refused(verdict.reason);
+      }
+      const wait = store.waits.createWait(
+        {
+          botId: grant.botId,
+          taskId: grant.taskId,
+          condition,
+          note: data.note,
+          timeoutMinutes: data.timeout_minutes,
+          createdByRunId: run.id,
+        },
+        maxPendingWaits,
+      );
+      if ("refused" in wait) {
+        return refused(wait.refused);
+      }
+      const hostOnly =
+        store.getBot(grant.botId)?.boundary === "box"
+          ? ""
+          : " You don't run in a box, so this only reaches you when the owner is here.";
+      return answer({
+        status: "waiting",
+        wait_id: wait.id,
+        expires_at: wait.expiresAt,
+        note: `End your turn now. You'll be woken when it holds or at the timeout.${hostOnly}`,
       });
     }
     default:

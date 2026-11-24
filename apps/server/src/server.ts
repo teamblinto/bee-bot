@@ -27,6 +27,7 @@ import {
   usageDays,
   type UsageRefreshResult,
 } from "@beebot/contracts";
+import { hostAllowed } from "@beebot/egress/policy";
 import { type WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 
@@ -59,7 +60,7 @@ import { preToolUsePath, staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
 import { callBotTool, shareFile } from "./botTools.ts";
-import { outbox } from "./boxRuntime.ts";
+import { outbox, probeFile } from "./boxRuntime.ts";
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { boxExecutors } from "./boxExecutors.ts";
 import type { BoxService } from "./boxSetup.ts";
@@ -120,6 +121,7 @@ import { fallbackSummary, type Summarize } from "./summary.ts";
 import type { Vault } from "./vault.ts";
 import { deleteApiKey, openVault, storeApiKey, VaultError } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
+import { probeUrl } from "./waits.ts";
 import { createTerminals } from "./terminal.ts";
 import {
   createLimitRefresher,
@@ -624,6 +626,25 @@ export async function startServer({
     clock,
     boxesReady,
     onStopBot: (botId) => void browser.stop(botId),
+    // The owner may have narrowed the allowlist since the wait began: then it just times out.
+    waitProbes: {
+      url: async (botId, url) => {
+        const bot = store.getBot(botId);
+        return bot && hostAllowed(bot.egressHosts, new URL(url).hostname, bot.egressAnySite)
+          ? probeUrl(url)
+          : null;
+      },
+      // shortcut: a stopped box is never started for a wait, so a long file wait can time out;
+      // check through boxd without a running box if owners need it
+      file: async (botId, path) => {
+        const running = store.boxes
+          .listBoxes()
+          .some((row) => row.botId === botId && row.state === "running");
+        return box && store.getBot(botId)?.boundary === "box" && running
+          ? probeFile(box.runtime, box.layout, botId, path)
+          : null;
+      },
+    },
     copyInbox: async (botId, files) => {
       const bot = store.getBot(botId);
       const folder = bot && NodePath.join(workingFolder(dataDir, botId, bot.projectPath), "inbox");

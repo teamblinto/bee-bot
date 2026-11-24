@@ -155,8 +155,8 @@ export function urlProblem(raw: string) {
   return undefined;
 }
 
-type Lookup = (host: string) => Promise<string[]>;
-const systemLookup: Lookup = async (host) =>
+export type Lookup = (host: string) => Promise<string[]>;
+export const systemLookup: Lookup = async (host) =>
   (await NodeDns.lookup(host, { all: true, verbatim: true })).map(({ address }) => address);
 
 // A loopback URL must stay on this computer. Any other must resolve only to public addresses, or

@@ -1,8 +1,12 @@
 import * as NodeCrypto from "node:crypto";
+import type { IncomingMessage } from "node:http";
+import * as NodeHttps from "node:https";
 import type { DatabaseSync } from "node:sqlite";
 
+import { isDeniedAddress } from "@beebot/egress/policy";
 import { z } from "zod";
 
+import { type Lookup, systemLookup } from "./connectors.ts";
 import type { EventStore, StoreTx } from "./store.ts";
 
 export const WaitCondition = z.discriminatedUnion("kind", [
@@ -149,7 +153,50 @@ export function openWaits(
   };
 }
 
-const terminal = new Set(["done", "refused", "failed", "cancelled"]);
+const maxProbeBytes = 2 * 1024 * 1024;
+
+// Connects to the address it checked, so a name that answers differently the second time (DNS
+// rebinding) can't reach a private one. Nothing is followed: a redirect is just its status.
+export async function probeUrl(url: string, lookup: Lookup = systemLookup) {
+  try {
+    const target = new URL(url);
+    if (target.protocol !== "https:" || target.port !== "") {
+      return null;
+    }
+    const addresses = await lookup(target.hostname);
+    const [address] = addresses;
+    if (!address || addresses.some(isDeniedAddress)) {
+      return null;
+    }
+    const response = await new Promise<IncomingMessage>((resolve, reject) => {
+      NodeHttps.get(
+        {
+          host: address,
+          servername: target.hostname,
+          path: `${target.pathname}${target.search}`,
+          headers: { host: target.hostname },
+          signal: AbortSignal.timeout(20_000),
+        },
+        resolve,
+      ).on("error", reject);
+    });
+    const hash = NodeCrypto.createHash("sha256");
+    let read = 0;
+    for await (const chunk of response) {
+      const part = Buffer.from(chunk).subarray(0, maxProbeBytes - read);
+      hash.update(part);
+      read += part.length;
+      if (read >= maxProbeBytes) {
+        break;
+      }
+    }
+    return { status: response.statusCode ?? 0, sha256: hash.digest("hex") };
+  } catch {
+    return null;
+  }
+}
+
+export const terminalTask = new Set(["done", "refused", "failed", "cancelled"]);
 const probeGapMs = 30_000;
 
 export function createWaitEvaluator(store: EventStore, probes: WaitProbes, onSettled: () => void) {
@@ -215,7 +262,7 @@ export function createWaitEvaluator(store: EventStore, probes: WaitProbes, onSet
       const task = store.tasks.getTask(condition.task_id);
       if (!task) {
         settle(wait, "gone", `task ${condition.task_id}`);
-      } else if (terminal.has(task.status)) {
+      } else if (terminalTask.has(task.status)) {
         settle(wait, "met", `task ${task.id} finished (${task.status})`);
       }
       return;

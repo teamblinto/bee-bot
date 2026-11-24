@@ -56,6 +56,7 @@ const beeTools = [
   "ask_user",
   "create_routine",
   "schedule_wakeup",
+  "wait_until",
   "share_file",
   "follow_up",
   "task_status",
