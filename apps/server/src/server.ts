@@ -1188,7 +1188,12 @@ export async function startServer({
     return room ? { status: 200, body: room } : notFound;
   }
 
-  const team = createTeam({ store, apply: { createBot, addRoomMember }, boxesReady, modelsOf });
+  const team = createTeam({
+    store,
+    apply: { createBot, updateBot, archiveBot, createRoom, addRoomMember },
+    boxesReady,
+    modelsOf,
+  });
 
   function runCommand(command: Command) {
     const ok = { status: 200, body: { ok: true } };

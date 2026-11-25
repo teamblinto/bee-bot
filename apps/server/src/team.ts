@@ -8,10 +8,11 @@ import {
   type EngineModel,
   SkillName,
   type TeamRequest,
+  TeamRequestKind,
 } from "@beebot/contracts";
 import { z } from "zod";
 
-import { answer, refused } from "./botTools.ts";
+import { answer, named, refused } from "./botTools.ts";
 import { checkDelegation, clampLimits } from "./limits.ts";
 import { canonical } from "./policy.ts";
 import type { EventStore } from "./store.ts";
@@ -92,6 +93,29 @@ const CreateBot = z.strictObject({
   first_task: z.string().trim().min(1).max(32_000).optional(),
 });
 type CreateBot = z.infer<typeof CreateBot>;
+const ref = z.string().trim().min(1).max(200);
+const UpdateBot = z
+  .strictObject({
+    bot_id: ref,
+    expected_version: z.number().int().min(1),
+    name: CreateBot.shape.name.optional(),
+    personality: CreateBot.shape.personality.optional(),
+  })
+  .refine(({ name, personality }) => name !== undefined || personality !== undefined);
+const ArchiveBot = z.strictObject({ bot_id: ref });
+const CreateRoom = z.strictObject({
+  name: z.string().trim().min(1).max(80),
+  members: z.array(ref).min(1).max(11),
+  default_bot: ref.optional(),
+});
+const InviteToRoom = z.strictObject({ room_id: ref, bot: ref });
+const schemas = {
+  create_bot: CreateBot,
+  update_bot: UpdateBot,
+  archive_bot: ArchiveBot,
+  create_room: CreateRoom,
+  invite_to_room: InviteToRoom,
+} satisfies Record<TeamRequestKind, z.ZodType<Record<string, unknown>>>;
 
 export const leadCaps = { createsPerTurn: 3, spawnedInWorkspace: 20, pendingPerLead: 10 };
 
@@ -133,6 +157,18 @@ export function createTeam(deps: {
       spawnKey: string;
       forceBox: true;
     }) => CommandResult;
+    updateBot: (input: {
+      botId: string;
+      name: string;
+      personality: string;
+      expectedVersion: number;
+    }) => CommandResult;
+    archiveBot: (botId: string) => CommandResult;
+    createRoom: (input: {
+      name: string;
+      memberIds: string[];
+      defaultBotId: string | null;
+    }) => CommandResult;
     addRoomMember: (roomId: string, botId: string) => CommandResult;
   };
   boxesReady: () => boolean;
@@ -140,7 +176,6 @@ export function createTeam(deps: {
 }) {
   const { store, apply } = deps;
 
-  // Checked when asked and again when applied, since the world can move in between.
   function checkCreate(lead: Bot, args: CreateBot) {
     if (!deps.boxesReady()) {
       return "boxes_unavailable";
@@ -183,18 +218,89 @@ export function createTeam(deps: {
     return "refused" in task ? { refused: task.refused } : { taskId: task.id };
   }
 
+  const child = (lead: Bot, bot: string) => {
+    const found = store.childrenOf(lead.id).find(named(bot));
+    return found && store.getBot(found.id);
+  };
+  const reachable = (runId: string, lead: Bot, bot: string) => {
+    const grant = store.tasks.runGrant(runId);
+    return (
+      grant &&
+      [...grant.children, ...grant.roommates].find(
+        (candidate) => candidate.id !== lead.id && named(bot)(candidate),
+      )
+    );
+  };
+
+  // The request as it would be applied now, with bots by id, or why it can't be. Run when asked and
+  // again when applied, since the world can move in between.
+  function resolve(
+    kind: TeamRequestKind,
+    runId: string,
+    lead: Bot,
+    args: unknown,
+  ): string | Record<string, unknown> {
+    switch (kind) {
+      case "create_bot": {
+        const create = CreateBot.parse(args);
+        return checkCreate(lead, create) ?? create;
+      }
+      case "update_bot": {
+        const update = UpdateBot.parse(args);
+        const bot = child(lead, update.bot_id);
+        if (!bot) {
+          return "not_your_bot";
+        }
+        return bot.version === update.expected_version
+          ? { ...update, bot_id: bot.id }
+          : "version_conflict";
+      }
+      case "archive_bot": {
+        const bot = child(lead, ArchiveBot.parse(args).bot_id);
+        return bot ? { bot_id: bot.id } : "not_your_bot";
+      }
+      case "create_room": {
+        const room = CreateRoom.parse(args);
+        const members = room.members.flatMap((bot) => reachable(runId, lead, bot) ?? []);
+        if (members.length < room.members.length) {
+          return "not_allowed";
+        }
+        const pick = room.default_bot;
+        const defaultBot = pick && [lead, ...members].find(named(pick));
+        if (pick && !defaultBot) {
+          return "not_member";
+        }
+        return {
+          name: room.name,
+          members: members.map(({ id }) => id),
+          ...(defaultBot && { default_bot: defaultBot.id }),
+        };
+      }
+      case "invite_to_room": {
+        const invite = InviteToRoom.parse(args);
+        const room = store.rooms.getRoom(invite.room_id);
+        if (room?.kind !== "group" || !room.members.includes(lead.id)) {
+          return "not_in_room";
+        }
+        const bot = reachable(runId, lead, invite.bot);
+        return bot ? { room_id: room.id, bot: bot.id } : "not_allowed";
+      }
+    }
+  }
+
+  const outcome = (done: CommandResult, key: "botId" | "roomId"): Outcome =>
+    done.status === 200
+      ? { status: "applied", result: { [key]: Made.parse(done.body).id } }
+      : failed(Code.safeParse(done.body).data?.code ?? "apply_failed");
+
   // Once the bot exists the request counts as applied: a join, skill or task that is refused is
   // recorded in the result rather than undoing the bot.
-  function applyCreate(request: TeamRequest, made: { botId?: string }): Outcome {
-    const lead = store.getBot(request.requestedByBotId);
-    if (!lead) {
-      return failed("lead_gone");
-    }
-    const args = CreateBot.parse(request.payload);
-    const problem = checkCreate(lead, args);
-    if (problem) {
-      return failed(problem);
-    }
+  function applyCreate(
+    request: TeamRequest,
+    lead: Bot,
+    args: CreateBot,
+    made: { botId?: string },
+  ): Outcome {
     const engine = EngineAccountId.safeParse(lead.engineAccountId).data;
     if (!engine) {
       return failed("unknown_engine");
@@ -209,7 +315,7 @@ export function createTeam(deps: {
       forceBox: true,
     });
     if (created.status !== 200) {
-      return failed(Code.safeParse(created.body).data?.code ?? "apply_failed");
+      return outcome(created, "botId");
     }
     const botId = Made.parse(created.body).id;
     made.botId = botId;
@@ -231,24 +337,69 @@ export function createTeam(deps: {
     };
   }
 
+  function applyKind(request: TeamRequest, made: { botId?: string }): Outcome {
+    const lead = store.getBot(request.requestedByBotId);
+    if (!lead || lead.archivedAt) {
+      return failed("lead_gone");
+    }
+    const payload = resolve(request.kind, request.runId, lead, request.payload);
+    if (typeof payload === "string") {
+      return failed(payload);
+    }
+    switch (request.kind) {
+      case "create_bot":
+        return applyCreate(request, lead, CreateBot.parse(payload), made);
+      case "update_bot": {
+        const update = UpdateBot.parse(payload);
+        const bot = child(lead, update.bot_id);
+        if (!bot) {
+          return failed("not_your_bot");
+        }
+        const done = apply.updateBot({
+          botId: bot.id,
+          name: update.name ?? bot.name,
+          personality: update.personality ?? bot.personality,
+          expectedVersion: update.expected_version,
+        });
+        return outcome(done, "botId");
+      }
+      case "archive_bot":
+        return outcome(apply.archiveBot(ArchiveBot.parse(payload).bot_id), "botId");
+      case "create_room": {
+        const room = CreateRoom.parse(payload);
+        const done = apply.createRoom({
+          name: room.name,
+          memberIds: [lead.id, ...room.members],
+          defaultBotId: room.default_bot ?? null,
+        });
+        return outcome(done, "roomId");
+      }
+      case "invite_to_room": {
+        const invite = InviteToRoom.parse(payload);
+        return outcome(apply.addRoomMember(invite.room_id, invite.bot), "roomId");
+      }
+    }
+  }
+
   // Undefined when the request was no longer pending.
   function applyRequest(request: TeamRequest) {
     const made: { botId?: string } = {};
-    let outcome: Outcome;
+    let result: Outcome;
     try {
-      outcome = applyCreate(request, made);
+      result = applyKind(request, made);
     } catch (error) {
       console.error(`beebotd: team request ${request.id} failed`, error);
-      outcome = made.botId
+      result = made.botId
         ? { status: "applied", result: { botId: made.botId, code: "apply_incomplete" } }
         : failed("apply_failed");
     }
-    return store.team.finish(request.id, outcome.status, outcome.result);
+    return store.team.finish(request.id, result.status, result.result);
   }
 
   return {
     call: (run: { id: string; botId: string; attended: boolean }, name: string, args: unknown) => {
-      if (name !== "create_bot") {
+      const kind = TeamRequestKind.safeParse(name).data;
+      if (!kind) {
         return refused("unknown_tool");
       }
       const grant = store.tasks.runGrant(run.id);
@@ -256,24 +407,23 @@ export function createTeam(deps: {
       if (!grant || !lead) {
         return refused("run_ended");
       }
-      const parsed = CreateBot.safeParse(args);
+      const parsed = schemas[kind].safeParse(args);
       if (!parsed.success) {
         return refused("invalid_arguments");
       }
-      const payload = parsed.data;
       const digest = NodeCrypto.createHash("sha256")
-        .update(JSON.stringify(canonical({ kind: name, args: payload })))
+        .update(JSON.stringify(canonical({ kind, args: parsed.data })))
         .digest("hex");
       const spawnKey = `${run.id}:${digest}`;
       const replayed = store.team.byKey(spawnKey);
       if (replayed) {
         return answerFor(replayed);
       }
-      const problem = checkCreate(lead, payload);
-      if (problem) {
-        return refused(problem);
+      const payload = resolve(kind, run.id, lead, parsed.data);
+      if (typeof payload === "string") {
+        return refused(payload);
       }
-      if (payload.first_task) {
+      if (kind === "create_bot" && payload.first_task !== undefined) {
         const { hop, depth, turns, startedAt, tasksInRun, tree } = grant;
         const verdict = checkDelegation(clampLimits(store.readLimits()), {
           chain: { hop, depth, turns, startedAt },
@@ -285,17 +435,19 @@ export function createTeam(deps: {
           return refused(verdict.reason);
         }
       }
-      if (store.team.countForRun(run.id, name) >= leadCaps.createsPerTurn) {
-        return refused("spawn_cap_turn");
-      }
-      if (store.spawnedBotCount() + store.team.pendingCreates() >= leadCaps.spawnedInWorkspace) {
-        return refused("spawn_cap_workspace");
+      if (kind === "create_bot") {
+        if (store.team.countForRun(run.id, kind) >= leadCaps.createsPerTurn) {
+          return refused("spawn_cap_turn");
+        }
+        if (store.spawnedBotCount() + store.team.pendingCreates() >= leadCaps.spawnedInWorkspace) {
+          return refused("spawn_cap_workspace");
+        }
       }
       if (store.team.pendingFor(lead.id) >= leadCaps.pendingPerLead) {
         return refused("too_many_pending");
       }
       const { request, created } = store.team.insert({
-        kind: name,
+        kind,
         payload,
         requestedByBotId: lead.id,
         runId: run.id,

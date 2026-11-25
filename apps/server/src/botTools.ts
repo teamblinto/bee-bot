@@ -252,7 +252,7 @@ const endTurn = "End your turn now. Don't wait or poll: the answer arrives as a 
 
 type Grant = NonNullable<ReturnType<EventStore["tasks"]["runGrant"]>>;
 
-const named =
+export const named =
   (to: string) =>
   ({ id, name }: { id: string; name: string }) =>
     id === to || name.toLowerCase() === to.toLowerCase() || mentionKey(name) === to.toLowerCase();

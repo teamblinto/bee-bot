@@ -444,11 +444,15 @@ describe("team requests", () => {
     const { s } = await leadTurn(
       async (call, runId) => {
         const lead = store?.botIds()[0] ?? "";
+        const mustNot = () => ({ status: 500, body: { code: "must_not_apply" } });
         const team = createTeam({
           store: store ?? openEventStore(dataDir),
           apply: {
-            createBot: () => ({ status: 500, body: { code: "must_not_apply" } }),
-            addRoomMember: () => ({ status: 500, body: { code: "must_not_apply" } }),
+            createBot: mustNot,
+            updateBot: mustNot,
+            archiveBot: mustNot,
+            createRoom: mustNot,
+            addRoomMember: mustNot,
           },
           boxesReady: () => true,
           modelsOf: () => staticClaudeModels,
@@ -583,5 +587,228 @@ describe("team requests", () => {
       body: { code: "team_request_closed" },
     });
     expect(botCount()).toBe(1);
+  });
+
+  const kid = (s: EventStore, parentBotId: string, name = "Kid") =>
+    s.createBot({ name, personality: "", engineAccountId: "fake", parentBotId });
+  const stranger = (s: EventStore, name: string) =>
+    s.createBot({ name, personality: "", engineAccountId: "fake" });
+
+  it("refuses an 11th pending request from one lead", async () => {
+    let answer: Record<string, unknown> = {};
+    await leadTurn(
+      async (call) => {
+        answer = await call("archive_bot", { bot_id: "Kid" });
+      },
+      {
+        before: (s, leadId) => {
+          kid(s, leadId);
+          for (let i = 0; i < 10; i += 1) {
+            s.team.insert({
+              kind: "archive_bot",
+              payload: {},
+              requestedByBotId: leadId,
+              runId: "earlier",
+              spawnKey: `k${i}`,
+            });
+          }
+        },
+      },
+    );
+    expect(answer).toMatchObject({ status: "refused", reason: "too_many_pending" });
+    expect(rows("SELECT COUNT(*) AS n FROM team_requests")).toEqual([{ n: 10 }]);
+  });
+
+  it("lets a lead edit its own child with the current version", async () => {
+    let childId = "";
+    let answer: Record<string, unknown> = {};
+    const { s, decide } = await leadTurn(
+      async (call) => {
+        answer = await call("update_bot", { bot_id: "Kid", expected_version: 1, name: "Kiddo" });
+      },
+      { before: (s, leadId) => void (childId = kid(s, leadId).id) },
+    );
+    expect(answer).toMatchObject({ status: "awaiting_approval" });
+    expect(await decide(answer.request_id, "apply")).toMatchObject({
+      status: 200,
+      body: { status: "applied", result: { botId: childId } },
+    });
+    expect(s.getBot(childId)).toMatchObject({ name: "Kiddo", personality: "", version: 2 });
+  });
+
+  it("refuses a lead editing or archiving a bot it did not create", async () => {
+    const answers: Array<Record<string, unknown>> = [];
+    await leadTurn(
+      async (call) => {
+        for (const bot of ["Own", "Ada", "Grandkid"]) {
+          answers.push(await call("update_bot", { bot_id: bot, expected_version: 1, name: "X" }));
+          answers.push(await call("archive_bot", { bot_id: bot }));
+        }
+      },
+      {
+        before: (s, leadId) => {
+          stranger(s, "Own");
+          kid(s, kid(s, leadId).id, "Grandkid");
+        },
+      },
+    );
+    expect(answers).toMatchObject(
+      Array.from({ length: 6 }, () => ({ status: "refused", reason: "not_your_bot" })),
+    );
+    expect(rows("SELECT COUNT(*) AS n FROM team_requests")).toEqual([{ n: 0 }]);
+  });
+
+  it("refuses manifest or engine fields on an edit", async () => {
+    let answer: Record<string, unknown> = {};
+    await leadTurn(
+      async (call) => {
+        answer = await call("update_bot", {
+          bot_id: "Kid",
+          expected_version: 1,
+          name: "X",
+          manifest: ["team.manage"],
+        });
+      },
+      { before: (s, leadId) => void kid(s, leadId) },
+    );
+    expect(answer).toMatchObject({ status: "refused", reason: "invalid_arguments" });
+  });
+
+  it("refuses a stale expected_version, when asked and when applied", async () => {
+    let child: ReturnType<EventStore["createBot"]> | undefined;
+    const answers: Array<Record<string, unknown>> = [];
+    const { s, decide } = await leadTurn(
+      async (call) => {
+        answers.push(await call("update_bot", { bot_id: "Kid", expected_version: 2, name: "A" }));
+        answers.push(await call("update_bot", { bot_id: "Kid", expected_version: 1, name: "B" }));
+      },
+      { before: (s, leadId) => void (child = kid(s, leadId)) },
+    );
+    expect(answers).toMatchObject([
+      { status: "refused", reason: "version_conflict" },
+      { status: "awaiting_approval" },
+    ]);
+    const childId = child?.id ?? "";
+    expect(child && s.updateBot(childId, { ...child, name: "Owner's" })).toMatchObject({
+      version: 2,
+    });
+    expect(await decide(answers[1]?.request_id, "apply")).toMatchObject({
+      body: { status: "failed", result: { code: "version_conflict" } },
+    });
+    expect(s.getBot(childId)?.name).toBe("Owner's");
+  });
+
+  it("archives a child and stops it, but not the child's own bots", async () => {
+    let childId = "";
+    let grandId = "";
+    let answer: Record<string, unknown> = {};
+    const { s } = await leadTurn(
+      async (call) => {
+        answer = await call("archive_bot", { bot_id: "Kid" });
+      },
+      {
+        before: (s, leadId) => {
+          s.setLeadsActWithoutAsking(true);
+          childId = kid(s, leadId).id;
+          grandId = kid(s, childId, "Grandkid").id;
+        },
+      },
+    );
+    expect(answer).toMatchObject({ status: "applied", botId: childId });
+    expect(s.getBot(childId)?.archivedAt).not.toBeNull();
+    expect(s.getBot(grandId)?.archivedAt).toBeNull();
+  });
+
+  it("apply re-checks the lead and the child's parent", async () => {
+    let childId = "";
+    const answers: Array<Record<string, unknown>> = [];
+    const { s, lead, decide } = await leadTurn(
+      async (call) => {
+        answers.push(await call("archive_bot", { bot_id: "Kid" }));
+        answers.push(await call("update_bot", { bot_id: "Kid", expected_version: 1, name: "X" }));
+        answers.push(await call("create_bot", createArgs));
+      },
+      { before: (s, leadId) => void (childId = kid(s, leadId).id) },
+    );
+    db.prepare("UPDATE bots SET parent_bot_id = NULL WHERE id = ?").run(childId);
+    expect(await decide(answers[0]?.request_id, "apply")).toMatchObject({
+      body: { status: "failed", result: { code: "not_your_bot" } },
+    });
+    expect(s.getBot(childId)?.archivedAt).toBeNull();
+    s.archiveBot(lead.id);
+    for (const { request_id } of answers.slice(1)) {
+      expect(await decide(request_id, "apply")).toMatchObject({
+        body: { status: "failed", result: { code: "lead_gone" } },
+      });
+    }
+    expect(s.getBot(childId)?.name).toBe("Kid");
+    expect(botCount()).toBe(2);
+  });
+
+  it("creates a room with the lead in it, from children and roommates only", async () => {
+    const ids = { kid: "", rae: "" };
+    const answers: Array<Record<string, unknown>> = [];
+    const { s, lead } = await leadTurn(
+      async (call) => {
+        answers.push(await call("create_room", { name: "Crew", members: ["Kid", "Zed"] }));
+        answers.push(
+          await call("create_room", { name: "Crew", members: ["Kid"], default_bot: "Rae" }),
+        );
+        answers.push(
+          await call("create_room", { name: "Crew", members: ["Kid", "Rae"], default_bot: "Kid" }),
+        );
+      },
+      {
+        before: (s, leadId) => {
+          s.setLeadsActWithoutAsking(true);
+          ids.kid = kid(s, leadId).id;
+          stranger(s, "Zed");
+          ids.rae = stranger(s, "Rae").id;
+          s.rooms.createGroupRoom({ name: "Old", memberIds: [leadId, ids.rae] });
+        },
+      },
+    );
+    expect(answers).toMatchObject([
+      { status: "refused", reason: "not_allowed" },
+      { status: "refused", reason: "not_member" },
+      { status: "applied" },
+    ]);
+    expect(s.rooms.getRoom(String(answers[2]?.roomId))).toMatchObject({
+      name: "Crew",
+      members: [lead.id, ids.kid, ids.rae],
+      defaultBotId: ids.kid,
+    });
+  });
+
+  it("invites only into a room the lead is in, and only its children or roommates", async () => {
+    const rooms = { in: "", out: "", dm: "" };
+    let kidId = "";
+    const answers: Array<Record<string, unknown>> = [];
+    const { s } = await leadTurn(
+      async (call) => {
+        answers.push(await call("invite_to_room", { room_id: rooms.out, bot: "Kid" }));
+        answers.push(await call("invite_to_room", { room_id: rooms.dm, bot: "Kid" }));
+        answers.push(await call("invite_to_room", { room_id: rooms.in, bot: "Zed" }));
+        answers.push(await call("invite_to_room", { room_id: rooms.in, bot: "Kid" }));
+      },
+      {
+        before: (s, leadId) => {
+          s.setLeadsActWithoutAsking(true);
+          kidId = kid(s, leadId).id;
+          rooms.dm = s.getBot(leadId)?.roomId ?? "";
+          const zed = stranger(s, "Zed");
+          rooms.in = s.rooms.createGroupRoom({ name: "In", memberIds: [leadId] })?.id ?? "";
+          rooms.out = s.rooms.createGroupRoom({ name: "Out", memberIds: [zed.id] })?.id ?? "";
+        },
+      },
+    );
+    expect(answers).toMatchObject([
+      { status: "refused", reason: "not_in_room" },
+      { status: "refused", reason: "not_in_room" },
+      { status: "refused", reason: "not_allowed" },
+      { status: "applied", roomId: rooms.in },
+    ]);
+    expect(s.rooms.getRoom(rooms.in)?.members).toContain(kidId);
+    expect(s.rooms.getRoom(rooms.out)?.members).not.toContain(kidId);
   });
 });
