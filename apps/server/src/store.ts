@@ -22,6 +22,7 @@ import {
   MemoryItem,
   memoryRequest,
   type PauseReason,
+  type Room,
   Routine,
   RoutineFiring,
   Run,
@@ -2108,6 +2109,8 @@ export function openEventStore(dataDir: string) {
   const RecentPost = z.object({ botId: z.string(), body: z.string(), at: z.string() });
   const heldByEscalation = (roomId: string) =>
     checkEscalation(limitsFor(roomId), rooms.round(roomId)).verdict === "refuse";
+  // A running meeting's turn cap replaces the room's post budget, escalation and ring breakers.
+  const meetingRuns = (roomId: string) => meetings.live(roomId)?.status === "running";
 
   // Loop breakers for a group post. A reply the owner asked for (hop 0) always posts. Runs inside
   // the caller's transaction.
@@ -2122,6 +2125,17 @@ export function openEventStore(dataDir: string) {
       return { verdict: "allow" };
     }
     const limits = limitsFor(roomId);
+    const since = new Date(
+      Date.parse(now) - Math.max(limits.ringWindowMs, limits.dedupeWindowMs),
+    ).toISOString();
+    const recent = z.array(RecentPost).parse(selectRecentBotPosts.all({ room: roomId, since }));
+    const trimmed = body.trim();
+    const lastSameAt =
+      recent.findLast((post) => post.botId === botId && post.body.trim() === trimmed)?.at ?? null;
+    const duplicate = checkDuplicate(limits, { lastSameAt, now });
+    if (meetingRuns(roomId)) {
+      return duplicate;
+    }
     const round = rooms.round(roomId);
     const escalated = checkEscalation(limits, round);
     if (escalated.verdict === "refuse") {
@@ -2132,14 +2146,6 @@ export function openEventStore(dataDir: string) {
       return { verdict: "refuse", reason: "ring" };
     }
     const verdict = ((): Verdict => {
-      const since = new Date(
-        Date.parse(now) - Math.max(limits.ringWindowMs, limits.dedupeWindowMs),
-      ).toISOString();
-      const recent = z.array(RecentPost).parse(selectRecentBotPosts.all({ room: roomId, since }));
-      const trimmed = body.trim();
-      const lastSameAt =
-        recent.findLast((post) => post.botId === botId && post.body.trim() === trimmed)?.at ?? null;
-      const duplicate = checkDuplicate(limits, { lastSameAt, now });
       if (duplicate.verdict === "refuse") {
         return duplicate;
       }
@@ -2557,11 +2563,29 @@ export function openEventStore(dataDir: string) {
       }
       return "sent";
     }
+    const addressed = ownerAddresses(room, input.body, replyTo?.botId ?? null, now);
+    if (typeof addressed === "string") {
+      return addressed;
+    }
+    addMessage(message, mentions);
+    attachmentStore.claim(message.id, room.id, attachmentIds);
+    resumeRoutines();
+    rooms.startRound(room.id, fresh.chainId, now);
+    wakeMembers(room.id, addressed, `message:${input.id}`, input.attended, source, fresh);
+    return "sent";
+  }
+
+  // While a meeting runs, the owner steers its facilitator and nobody else.
+  function ownerAddresses(room: Room, body: string, replyToBotId: string | null, now: string) {
+    const meeting = meetings.live(room.id);
+    if (meeting?.status === "running") {
+      return [meeting.facilitatorBotId];
+    }
     const routed = route({
-      body: input.body,
+      body,
       members: rooms.namedMembers(room.id),
       defaultBotId: room.defaultBotId,
-      replyToBotId: replyTo?.botId ?? null,
+      replyToBotId,
       authorBotId: null,
       mode: room.responderMode,
       leadBotId: room.leadBotId,
@@ -2579,15 +2603,7 @@ export function openEventStore(dataDir: string) {
           checkMentionWake(roomLimits, { chain: null, mentions: index + 1, now }).verdict ===
           "refuse",
       );
-    if (refused) {
-      return "mention_limit";
-    }
-    addMessage(message, mentions);
-    attachmentStore.claim(message.id, room.id, attachmentIds);
-    resumeRoutines();
-    rooms.startRound(room.id, fresh.chainId, now);
-    wakeMembers(room.id, routed.botIds, `message:${input.id}`, input.attended, source, fresh);
-    return "sent";
+    return refused ? "mention_limit" : routed.botIds;
   }
 
   // The owner is back, so routines paused while they were away run again.
@@ -2600,7 +2616,7 @@ export function openEventStore(dataDir: string) {
   // A bot's group reply wakes only the bots it names, one hop further along its chain. A run with
   // no chain starts one under its own ID, as delegation does.
   function routeBotReply(message: ChatMessage, run: RunRow) {
-    if (message.botId === null || heldByEscalation(message.roomId)) {
+    if (message.botId === null || meetingRuns(message.roomId) || heldByEscalation(message.roomId)) {
       return;
     }
     const routed = route({
@@ -3845,7 +3861,7 @@ export function openEventStore(dataDir: string) {
               attachments.map(({ id }) => id),
             );
             if (group && replied) {
-              if (run.hop > 0) {
+              if (run.hop > 0 && !meetingRuns(roomId)) {
                 rooms.countBotPost(roomId, now);
               }
               routeBotReply(message, run);
@@ -3921,7 +3937,7 @@ export function openEventStore(dataDir: string) {
           };
           addMessage(message);
           if (group) {
-            if (run.hop > 0) {
+            if (run.hop > 0 && !meetingRuns(roomId)) {
               rooms.countBotPost(roomId, now);
             }
             routeBotReply(message, run);

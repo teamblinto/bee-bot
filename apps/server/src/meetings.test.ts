@@ -627,3 +627,71 @@ describe("the meeting frame", () => {
     expect(meetingFrame(meeting, "someone-else", names, now)).toBe("");
   });
 });
+
+describe("the room during a meeting", () => {
+  function passing() {
+    const team = booked();
+    store.meetings.tick(team.scheduledAt, true);
+    const ava1 = start(team.ava.id);
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id, "Starting item 1.");
+    return team;
+  }
+  const dueBots = () => store.dueWakes(new Date().toISOString()).map(({ botId }) => botId);
+  const repliesIn = (roomId: string) =>
+    db
+      .prepare("SELECT bot_id FROM messages WHERE room_id = ? AND author = 'bot' AND hop = 1")
+      .all(roomId);
+
+  it("posts every participant reply past the room post budget, and still drops a duplicate", () => {
+    const { bo, cy, dee, room } = passing();
+    const boRun = start(bo.id);
+    expect(store.sendBotMessage(boRun.id, room.id, "Checkout shipped.")).toHaveProperty(
+      "messageId",
+    );
+    expect(store.sendBotMessage(boRun.id, room.id, "Checkout shipped.")).toEqual({
+      refused: "duplicate",
+    });
+    finish(boRun.id, "Nothing else.");
+    finish(start(cy.id).id, "Designs slipped.");
+    finish(start(dee.id).id, "Infra is fine.");
+    expect(repliesIn(room.id)).toHaveLength(4);
+    expect(store.rooms.round(room.id)).toMatchObject({ botPosts: 0, escalations: 0 });
+  });
+
+  it("wakes nobody when a participant's reply mentions another bot", () => {
+    const { bo, cy, dee, room } = passing();
+    const boRun = start(bo.id);
+    store.sendBotMessage(boRun.id, room.id, "@Ava look at this");
+    finish(boRun.id, "@Ava what do you think?");
+    expect(dueBots()).toEqual([cy.id, dee.id]);
+  });
+
+  it("wakes the facilitator next when the owner posts mid-pass, without spending the cap", () => {
+    const { ava, bo, cy, dee, room, id } = passing();
+    const used = store.meetings.get(id)?.turnsUsed;
+    expect(say(room.id, "@Bo please be brief")).toBe("sent");
+    const now = new Date().toISOString();
+    const wakes = store.dueWakes(now);
+    expect(wakes.map(({ botId }) => botId)).toEqual([bo.id, cy.id, dee.id, ava.id]);
+    const facilitatorWake = wakes.find(({ botId }) => botId === ava.id);
+    expect(facilitatorWake && store.wakeContext(facilitatorWake, now).hasActiveRun).toBe(false);
+    expect(store.runWake(start(ava.id).id)?.source).toBe("human");
+    expect(store.meetings.get(id)?.turnsUsed).toBe(used);
+    finish(start(bo.id).id, "Brief.");
+    expect(dueBots()).toEqual([cy.id, dee.id]);
+  });
+
+  it("routes and counts posts normally again once the meeting leaves running", () => {
+    const { ava, bo, cy, room, id, scheduledAt } = booked();
+    store.meetings.tick(scheduledAt, true);
+    finish(start(ava.id).id, "Let's begin.");
+    store.meetings.transition(id, "cancelled", new Date().toISOString());
+    say(room.id, "@Bo hi");
+    expect(dueBots()).toEqual([bo.id]);
+    finish(start(bo.id).id, "@Cy thoughts?");
+    expect(dueBots()).toEqual([cy.id]);
+    finish(start(cy.id).id, "Fine.");
+    expect(store.rooms.round(room.id).botPosts).toBe(1);
+  });
+});
