@@ -1827,6 +1827,11 @@ describe("in Box mode a tool call", () => {
         rows(`SELECT id FROM wakes WHERE bot_id = '${ada.id}' AND status = 'pending'`),
       ).toEqual([]);
       expect(ran).toEqual([]);
+
+      // An answer that can't reach the bot ends the reopened task rather than holding it busy.
+      const reopened = store.tasks.reopenHandedBack(card?.id as string);
+      store.tasks.failReopened(reopened?.id as string);
+      expect(store.tasks.getTask(id)?.status).toBe("failed");
     });
 
     it("does the same for an attended run from a tainted session", async () => {
@@ -1888,9 +1893,9 @@ describe("in Box mode a tool call", () => {
       await waiting();
       await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
       const reply = { taskId: id, botId: ada.id, message: "Go ahead", attended: true };
-      expect(store.tasks.followUp({ ...reply, kind: "answer" })).toEqual({
-        refused: "awaiting_owner",
-      });
+      for (const kind of ["answer", "cancel", "ask"] as const) {
+        expect(store.tasks.followUp({ ...reply, kind })).toEqual({ refused: "awaiting_owner" });
+      }
       expect(task(id)?.status).toBe("needs_input");
       await post({ type: "stop-bot", botId: bot.id });
       await vi.waitFor(() => expect(task(id)?.status).toBe("cancelled"));

@@ -570,6 +570,10 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         if (!asOwner && botId !== task.requesterBotId) {
           return { refused: "not_party" };
         }
+        // Only the owner's decision moves a handed-back task.
+        if (task.needsApproval) {
+          return { refused: "awaiting_owner" };
+        }
         const allowed = {
           ask: ["open"],
           answer: ["needs_input"],
@@ -578,9 +582,6 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         }[kind];
         if (!allowed.includes(task.status)) {
           return { refused: "wrong_state" };
-        }
-        if (kind === "answer" && task.needsApproval) {
-          return { refused: "awaiting_owner" };
         }
         const { chainId, hop, depth } = task;
         const now = new Date().toISOString();
@@ -720,6 +721,18 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       transaction(() => {
         const row = reopenOne.get(new Date().toISOString(), continuationId);
         return row ? changed(row) : undefined;
+      }),
+
+    // The owner's answer never reached the bot, so no run will settle the reopened task.
+    failReopened: (taskId: string) =>
+      transaction(() => {
+        const task = getTask(taskId);
+        if (task?.status !== "open") {
+          return;
+        }
+        endWithResult(task, "failed", noResult("failed"), parentAttended(task));
+        promoteNextTask(task.ownerBotId);
+        releaseDependents(task.id);
       }),
 
     roommatesOf: (botId: string) => z.array(BotRef).parse(selectRoommates.all(botId)),

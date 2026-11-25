@@ -211,6 +211,9 @@ export function createSupervisor({
           );
         if (sent !== "sent" && sent !== "duplicate") {
           console.error(`beebotd: outcome of ${row.id} was not delivered: ${sent}`);
+          if (reopened) {
+            store.tasks.failReopened(reopened.id);
+          }
         }
         store.continuations.markResumed(row.id);
       } catch (error) {
