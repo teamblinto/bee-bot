@@ -2065,10 +2065,11 @@ export function openEventStore(dataDir: string) {
     if (escalated.verdict === "refuse") {
       return escalated;
     }
+    // A post refused by a break already running is no new refusal, so it doesn't escalate.
+    if (round.ringUntil !== null && round.ringUntil > now) {
+      return { verdict: "refuse", reason: "ring" };
+    }
     const verdict = ((): Verdict => {
-      if (round.ringUntil !== null && round.ringUntil > now) {
-        return { verdict: "refuse", reason: "ring" };
-      }
       const since = new Date(
         Date.parse(now) - Math.max(limits.ringWindowMs, limits.dedupeWindowMs),
       ).toISOString();

@@ -636,6 +636,37 @@ describe("loop breakers", () => {
     expect(engine.turns).toHaveLength(3);
   });
 
+  it("doesn't escalate a ring break when a reply already in flight is refused by it", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns, roomMessages, store } =
+      await boot();
+    const bots = [
+      await createBot("Ada"),
+      await createBot("Ben"),
+      await createBot("Cy"),
+      await createBot("Dan"),
+    ];
+    const room = await createRoom(bots);
+    await command({ type: "set-account-concurrency", accountId: "claude", maxConcurrentRuns: 2 });
+    await send(room.id, "@ada think it over");
+    await expectTurns(1);
+    await send(room.id, "@ben start");
+    await expectTurns(2);
+    engine.turns[1]?.finish(done("@cy your go"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@dan your go"));
+    await expectTurns(4);
+    engine.turns[3]?.finish(done("@ben your go"));
+    await expectTurns(5);
+    engine.turns[4]?.finish(done("@cy again"));
+    await vi.waitFor(() => expect(roomNow(store, room)?.held).toBe("ring"));
+    engine.turns[0]?.finish(done("@cy have a look"));
+    await expectTurns(6);
+    engine.turns[5]?.finish(done("Looked."));
+    await settle(store);
+    expect(roomMessages(room).at(-1)?.body).toBe("@cy have a look");
+    expect(roomNow(store, room)?.held).toBe("ring");
+  });
+
   it("drops a bot's duplicate post in the same room", async () => {
     const { createBot, createRoom, send, engine, expectTurns, roomMessages, store } = await boot();
     const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
