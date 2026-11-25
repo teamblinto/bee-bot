@@ -30,8 +30,11 @@ export const isOpenItem = (item: TranscriptItem) =>
   item.kind === "continuation" ||
   (item.kind === "approval" && item.pending !== undefined);
 
-// The server posts a Box action's outcome under this ID, as the answer to the bot's waiting reply.
-export const isOutcomeMessage = (message: ChatMessage) => message.id.startsWith("continuation:");
+// Lines from Bee itself, not a bot or the owner: a Box action's outcome, posted as the answer to the
+// bot's waiting reply, or a notice with no bot behind it, such as a meeting starting.
+export const isBeeLine = (message: ChatMessage) =>
+  message.id.startsWith("continuation:") ||
+  (message.id.startsWith("notice:") && message.botId === null);
 
 // A pending approval without its in-memory detail has nothing to show yet.
 export function buildTranscript(

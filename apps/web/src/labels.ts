@@ -276,6 +276,11 @@ export function formatElapsed(ms: number) {
     : `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+export const remainingLine = (endsAt: string, timesUpAt: string | null, now: number) =>
+  timesUpAt !== null || Date.parse(endsAt) <= now
+    ? "Time's up"
+    : `${formatElapsed(Date.parse(endsAt) - now)} left`;
+
 export function workedLine(workedMs: number | null, count: number) {
   const worked = workedMs === null ? "Worked" : `Worked for ${formatElapsed(workedMs)}`;
   return count === 0 ? worked : `${worked} · ${count} ${count === 1 ? "tool" : "tools"}`;

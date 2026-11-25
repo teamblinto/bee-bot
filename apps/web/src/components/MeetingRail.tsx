@@ -126,11 +126,7 @@ function RunningMeeting({ meeting, chat }: { meeting: Meeting; chat: ChatState }
           <span>
             Turns {meeting.turnsUsed}/{meeting.turnCap ?? "–"}
           </span>
-          {meeting.endsAt && (
-            <span>
-              <span ref={tickRemaining(meeting.endsAt)} /> left
-            </span>
-          )}
+          {meeting.endsAt && <span ref={tickRemaining(meeting.endsAt, meeting.timesUpAt)} />}
         </p>
       </div>
       <ol className="flex flex-col gap-0.5">

@@ -22,7 +22,7 @@ import {
 import { answeredLine, liveStatusLine, shortTime, workedLine } from "../labels";
 import { getConnectionState, type LiveTool, subscribeToConnection } from "../serverConnection";
 import { deriveMinimapItems } from "../timelineMinimap";
-import { isOpenItem, isOutcomeMessage, itemKey, type TranscriptItem } from "../transcript";
+import { isOpenItem, isBeeLine, itemKey, type TranscriptItem } from "../transcript";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { MessageAttachments } from "./Attachments";
 import { Avatar } from "./Avatar";
@@ -68,10 +68,10 @@ function Byline({ face, name, at }: { face: ReactNode; name: string; at?: string
 // A sender's first message carries their name; the rest of a run of messages sits under it.
 const startsRun = (item: TranscriptItem, previous: TranscriptItem | undefined) =>
   item.kind === "message" &&
-  !isOutcomeMessage(item.message) &&
+  !isBeeLine(item.message) &&
   !(
     previous?.kind === "message" &&
-    !isOutcomeMessage(previous.message) &&
+    !isBeeLine(previous.message) &&
     previous.message.author === item.message.author &&
     previous.message.botId === item.message.botId
   );
@@ -121,8 +121,8 @@ function Item({
     return <RoutineCard routine={item.routine} firing={item.firing} connected={connected} />;
   }
   const { message } = item;
-  // Bee's record of the outcome, not words the owner typed.
-  if (isOutcomeMessage(message)) {
+  // Bee's own line, not words the owner typed or a bot wrote.
+  if (isBeeLine(message)) {
     return (
       <p className="pl-8 wrap-anywhere whitespace-pre-wrap text-ink-secondary">{message.body}</p>
     );
@@ -228,7 +228,7 @@ export function Transcript({
   const continuesBot =
     lastSettled?.kind === "message" &&
     lastSettled.message.author === "bot" &&
-    !isOutcomeMessage(lastSettled.message);
+    !isBeeLine(lastSettled.message);
 
   function follow(on: boolean) {
     following.current = on;

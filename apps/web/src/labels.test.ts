@@ -12,6 +12,7 @@ import {
   memoryReview,
   pauseLine,
   projectPathValue,
+  remainingLine,
   runLine,
   toolRowLabel,
   visibleDetail,
@@ -56,6 +57,16 @@ it("formats a turn's time the way the timer reads", () => {
   expect(formatElapsed(3_720_000)).toBe("1h 02m");
   expect(workedLine(62_000, 1)).toBe("Worked for 1m 02s · 1 tool");
   expect(workedLine(null, 2)).toBe("Worked · 2 tools");
+});
+
+it("says time's up once the timebox ends or the server calls it", () => {
+  const endsAt = "2026-11-25T10:00:00.000Z";
+  const at = (seconds: number) => Date.parse(endsAt) + seconds * 1000;
+  expect(remainingLine(endsAt, null, at(-62))).toBe("1m 02s left");
+  expect(remainingLine(endsAt, null, at(-0.5))).toBe("0s left");
+  expect(remainingLine(endsAt, null, at(0))).toBe("Time's up");
+  expect(remainingLine(endsAt, null, at(30))).toBe("Time's up");
+  expect(remainingLine(endsAt, endsAt, at(-62))).toBe("Time's up");
 });
 
 it("labels tool rows by state, and by name alone after a reload", () => {

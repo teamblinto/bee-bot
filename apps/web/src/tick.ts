@@ -1,4 +1,4 @@
-import { formatElapsed } from "./labels";
+import { formatElapsed, remainingLine } from "./labels";
 
 const subscribers = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -32,5 +32,5 @@ function tickText(text: () => string) {
 export const tickElapsed = (startedAt: string) =>
   tickText(() => formatElapsed(Date.now() - Date.parse(startedAt)));
 
-export const tickRemaining = (endsAt: string) =>
-  tickText(() => formatElapsed(Date.parse(endsAt) - Date.now()));
+export const tickRemaining = (endsAt: string, timesUpAt: string | null) =>
+  tickText(() => remainingLine(endsAt, timesUpAt, Date.now()));
