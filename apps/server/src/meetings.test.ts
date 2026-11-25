@@ -323,6 +323,19 @@ describe("scheduling", () => {
       members: [bo.id, ava.id],
     });
   });
+
+  it("refuses a new room to a facilitator at the live limit without creating it", () => {
+    const { ava, bo } = product();
+    for (const id of ["m1", "m2", "m3"]) {
+      const room = store.rooms.createGroupRoom({ name: id, memberIds: [ava.id, bo.id] });
+      insertMeeting({ id, roomId: room?.id ?? "", botId: ava.id, status: "scheduled" });
+    }
+    const roomCount = store.rooms.listRooms().length;
+    say(ava.roomId, "Set up a meeting");
+    const args = { ...sprint, room: undefined, participants: ["Bo"] };
+    expect(call(start(ava.id), "schedule_meeting", args).reason).toBe("too_many");
+    expect(store.rooms.listRooms()).toHaveLength(roomCount);
+  });
 });
 
 describe("meeting tools during a meeting", () => {

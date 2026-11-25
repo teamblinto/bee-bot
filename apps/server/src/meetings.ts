@@ -160,6 +160,8 @@ export function openMeetings(
   };
 
   const liveIn = (roomId: string) => withRecords(selectLive.get(roomId));
+  const atLiveLimit = (botId: string) =>
+    z.object({ count: z.number() }).parse(countLive.get(botId)).count >= maxLivePerFacilitator;
 
   const transitionIn = (id: string, to: MeetingStatus, now: string) => {
     const from = MeetingStatus.options.filter((status) => canTransition(status, to));
@@ -232,6 +234,7 @@ export function openMeetings(
   return {
     get,
     live: liveIn,
+    atLiveLimit,
     takesPart,
 
     tick: (now: string, attended: boolean) => {
@@ -341,8 +344,7 @@ The meeting has started. Call start_item for item 1.`
         if (liveIn(roomId)) {
           return { refused: "room_busy" };
         }
-        const { count } = z.object({ count: z.number() }).parse(countLive.get(facilitatorBotId));
-        if (count >= maxLivePerFacilitator) {
+        if (atLiveLimit(facilitatorBotId)) {
           return { refused: "too_many" };
         }
         const agenda: AgendaItem[] = input.agenda.map((itemTitle, index) => ({

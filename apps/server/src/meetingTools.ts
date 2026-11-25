@@ -183,7 +183,7 @@ function schedule(store: EventStore, grant: Grant, args: unknown) {
     return refused("not_in_room");
   }
   const ids = [...new Set(picked.flatMap((bot) => (bot ? [bot.id] : [])))];
-  if (ids.length > 8) {
+  if (ids.length > 8 || store.meetings.atLiveLimit(grant.botId)) {
     return refused("too_many");
   }
   let roomId = room?.id;

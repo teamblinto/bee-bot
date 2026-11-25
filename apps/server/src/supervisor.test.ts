@@ -247,6 +247,36 @@ describe("sending", () => {
     expect(store.state().messages).toHaveLength(1);
   });
 
+  it("cancels a meeting whose host facilitator's opening wake is refused as unattended", async () => {
+    const engine = scriptedEngine();
+    const { store, createBot } = await boot(engine.runTurn, { attended: false });
+    const [ava, bo] = [await createBot("Ava"), await createBot("Bo")];
+    const room = store.rooms.createGroupRoom({ name: "Team", memberIds: [ava.id, bo.id] });
+    const meeting = store.meetings.schedule({
+      facilitatorBotId: ava.id,
+      roomId: room?.id ?? "",
+      title: "Sprint",
+      participants: [bo.id],
+      agenda: ["Review"],
+      scheduledAt: new Date().toISOString(),
+      timeboxMin: 30,
+      maxRoundsPerItem: 2,
+      createdByRunId: "run",
+      chain: { chainId: null, hop: 0, depth: 0 },
+    });
+    if ("refused" in meeting) {
+      throw new Error(meeting.refused);
+    }
+    await vi.waitFor(() => expect(store.meetings.get(meeting.id)?.status).toBe("cancelled"), {
+      timeout: 3000,
+    });
+    expect(run(store, ava)?.reason).toBe("unattended");
+    expect(store.state().messages.at(-1)?.body).toBe(
+      "Ava couldn't start the meeting (unattended).",
+    );
+    expect(engine.turns).toEqual([]);
+  });
+
   it("runs an unattended wake for a box bot, once R7 allows it a lane", async () => {
     const engine = scriptedEngine();
     const { store, createBot, send } = await boot(engine.runTurn, { attended: false, boxes: true });
