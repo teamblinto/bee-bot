@@ -7,6 +7,7 @@ import type {
   MemoryItem,
   Routine,
   RoutineFiring,
+  TeamRequest,
 } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
@@ -26,6 +27,7 @@ const chat = (parts: Partial<ChatState>) =>
     firings: [],
     memories: [],
     runs: [],
+    teamRequests: [],
     ...parts,
   }) as unknown as ChatState;
 
@@ -81,4 +83,23 @@ it("lists a bot paused for budget, and drops an archived one", () => {
   expect(items).toEqual([
     { kind: "budget", id: "budget:ada", botId: "ada", createdAt: "2026-01-01T00:05:00Z", bot: ada },
   ]);
+});
+
+it("lists pending team requests with the other waiting items, oldest first, and leaves out an archived lead's", () => {
+  const request = (id: string, requestedByBotId: string, createdAt: string) =>
+    ({ id, kind: "create_bot", requestedByBotId, createdAt }) as TeamRequest;
+  const items = waitingItems(
+    chat({
+      bots: [bot("ada"), bot("max", "2026-01-01T00:00:00Z")],
+      approvals: [approval("a1", "ada", "pending", "2026-01-01T00:02:00Z")],
+      teamRequests: [
+        request("t1", "ada", "2026-01-01T00:03:00Z"),
+        request("t2", "ada", "2026-01-01T00:01:00Z"),
+        request("t3", "max", "2026-01-01T00:00:00Z"),
+      ],
+    }),
+  );
+  expect(items.map(({ id }) => id)).toEqual(["t2", "a1", "t1"]);
+  expect(items.map(({ botId }) => botId)).toEqual(["ada", "ada", "ada"]);
+  expect(items.map(waitingKind)).toEqual(["New bot", "Command", "New bot"]);
 });

@@ -8,6 +8,7 @@ import { type ConnectionState, postCommand } from "../serverConnection";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { Avatar } from "./Avatar";
 import { RoutineCard } from "./RoutineCard";
+import { TeamRequestCard } from "./TeamRequestCard";
 import { iconProps } from "./ui";
 
 function Item({
@@ -123,6 +124,39 @@ function BudgetCard({ bot, connected }: { bot: Bot; connected: boolean }) {
   );
 }
 
+function LeadsSetting({ on, connected }: { on: boolean; connected: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function toggle(leadsActWithoutAsking: boolean) {
+    setBusy(true);
+    setError(undefined);
+    const result = await postCommand({ type: "set-team-settings", leadsActWithoutAsking });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+  }
+
+  return (
+    <div className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-3 md:px-6">
+      <label className="flex items-center gap-2 text-body-s">
+        <input
+          type="checkbox"
+          className="size-4 accent-brand-fill"
+          checked={on}
+          disabled={busy || !connected}
+          onChange={(event) => void toggle(event.target.checked)}
+        />
+        Let team leads act without asking
+      </label>
+      <p className="pl-6 text-caption text-ink-secondary">
+        Changes from a lead that read another bot's words, or that run while you're away, still wait
+        for you.
+      </p>
+      {error && <p className="pl-6 text-caption text-ink-secondary">{error}</p>}
+    </div>
+  );
+}
+
 function WaitingCard({
   item,
   bot,
@@ -133,6 +167,16 @@ function WaitingCard({
   connection: ConnectionState;
 }) {
   const connected = connection.status === "connected";
+  if (item.kind === "team_request") {
+    return (
+      <TeamRequestCard
+        request={item.request}
+        bots={connection.chat.bots}
+        rooms={connection.chat.rooms}
+        connected={connected}
+      />
+    );
+  }
   if (item.kind === "continuation") {
     return (
       <ContinuationCard name={bot.name} continuation={item.continuation} connected={connected} />
@@ -185,6 +229,7 @@ export function NeedsYouPage({
         </button>
         <h2 className="text-title-s font-semibold">Needs you</h2>
       </header>
+      <LeadsSetting on={chat.leadsActWithoutAsking} connected={connection.status === "connected"} />
       <div className="scroller min-h-0 flex-1 overflow-y-auto">
         {waiting.length === 0 && memories.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center p-6">

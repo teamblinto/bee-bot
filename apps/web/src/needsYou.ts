@@ -6,6 +6,7 @@ import type {
   MemoryItem,
   Routine,
   RoutineFiring,
+  TeamRequest,
 } from "@beebot/contracts";
 
 import { openCards } from "./serverConnection";
@@ -15,6 +16,7 @@ export type WaitingItem = { id: string; botId: string; createdAt: string } & (
   | { kind: "continuation"; continuation: Continuation }
   | { kind: "routine"; routine: Routine; firing: RoutineFiring }
   | { kind: "budget"; bot: Bot }
+  | { kind: "team_request"; request: TeamRequest }
 );
 
 // Everything a bot is blocked on until the owner answers, oldest first. Archived bots can't be
@@ -58,11 +60,26 @@ export function waitingItems(chat: ChatState): WaitingItem[] {
         createdAt: chat.runs.find(({ botId }) => botId === bot.id)?.endedAt ?? "",
         bot,
       })),
+    ...chat.teamRequests.map((request) => ({
+      kind: "team_request" as const,
+      id: request.id,
+      botId: request.requestedByBotId,
+      createdAt: request.createdAt,
+      request,
+    })),
   ];
   return items
     .filter(({ botId }) => active.has(botId))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
+
+const teamRequestKinds = {
+  create_bot: "New bot",
+  update_bot: "Edit bot",
+  archive_bot: "Archive bot",
+  create_room: "New room",
+  invite_to_room: "Room invite",
+} satisfies Record<TeamRequest["kind"], string>;
 
 export function waitingKind(item: WaitingItem) {
   if (item.kind === "approval") {
@@ -77,6 +94,9 @@ export function waitingKind(item: WaitingItem) {
   }
   if (item.kind === "budget") {
     return "Daily limit";
+  }
+  if (item.kind === "team_request") {
+    return teamRequestKinds[item.request.kind];
   }
   return "Routine";
 }
