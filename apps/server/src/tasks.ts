@@ -68,6 +68,7 @@ const viaNames = [
   "question",
   "follow_up",
   "progress",
+  "meeting_action",
 ] as const;
 export type Via = (typeof viaNames)[number];
 const vias = new Set<string>(viaNames);
@@ -311,11 +312,11 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
 
   const messageId = (via: Via) => `${via}:${NodeCrypto.randomUUID()}`;
 
-  // A delegate goes to the owner's DM, so the child starts from the task alone. A handoff stays in
-  // its room, where the new owner answers.
+  // A delegate or meeting action goes to the owner's DM, so the child starts from the task alone.
+  // A handoff stays in its room, where the new owner answers.
   const ownerScope = (task: Pick<Task, "kind" | "ownerBotId" | "roomId">) =>
     ScopeRow.safeParse(
-      task.kind === "delegate"
+      task.kind === "delegate" || task.kind === "meeting_action"
         ? selectDmScope.get(task.ownerBotId)
         : selectRoomScope.get(task.roomId, task.ownerBotId),
     ).data;
@@ -445,7 +446,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       changed(setStatus.get("waiting", null, new Date().toISOString(), task.id));
       return;
     }
-    if (task.kind !== "delegate") {
+    if (task.kind !== "delegate" && task.kind !== "meeting_action") {
       changed(endTask.get(status, null, new Date().toISOString(), task.id));
       return;
     }
@@ -457,59 +458,62 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     endWithResult(task, status, status === "done" ? text : noResult(status), attended);
   }
 
+  // The count and the insert share one write lock, so parallel calls can't pass the cap
+  // together. A repeated delivery key returns its task and spends nothing. A busy owner gets the
+  // task queued. Inside the caller's transaction.
+  function createTaskIn(input: TaskInput, maxFanOut: number): Task | Refused {
+    const existing = selectByKey.get(input.deliveryKey);
+    if (existing) {
+      return TaskRow.parse(existing);
+    }
+    if (Count.parse(countForRun.get(input.parentRunId)).count >= maxFanOut) {
+      return { refused: "fan_out" };
+    }
+    const now = new Date().toISOString();
+    const { kind, chainId, hop, depth, parentRunId, requesterBotId, ownerBotId } = input;
+    if (!ownerScope(input)) {
+      throw new Error(`${ownerBotId} has nowhere to receive the task`);
+    }
+    const doneWhen = input.doneWhen ?? null;
+    const body = doneWhen ? `${input.goal}\n\nDone when: ${doneWhen}` : input.goal;
+    const pending = { from: requesterBotId, via: kind, body };
+    const id = NodeCrypto.randomUUID();
+    const parent = input.parentTaskId ? getTask(input.parentTaskId) : undefined;
+    const task = changed(
+      insertTask.get(
+        id,
+        kind,
+        chainId,
+        hop,
+        depth,
+        parentRunId,
+        requesterBotId,
+        ownerBotId,
+        input.roomId,
+        input.goal,
+        input.deliveryKey,
+        JSON.stringify(pending),
+        parent?.id ?? null,
+        parent?.rootTaskId ?? id,
+        parent?.origin ?? input.origin ?? "human",
+        doneWhen,
+        JSON.stringify(input.blockedBy ?? []),
+        now,
+        now,
+      ),
+    );
+    promoteNextTask(ownerBotId);
+    return getTask(task.id) ?? task;
+  }
+
   return {
     getTask,
     activeTasks: () => z.array(TaskRow).parse(selectActive.all()),
     promoteNextTask,
 
-    // The count and the insert share one write lock, so parallel calls can't pass the cap
-    // together. A repeated delivery key returns its task and spends nothing. A busy owner gets the
-    // task queued.
     createTask: (input: TaskInput, maxFanOut: number) =>
-      transaction((): Task | Refused => {
-        const existing = selectByKey.get(input.deliveryKey);
-        if (existing) {
-          return TaskRow.parse(existing);
-        }
-        if (Count.parse(countForRun.get(input.parentRunId)).count >= maxFanOut) {
-          return { refused: "fan_out" };
-        }
-        const now = new Date().toISOString();
-        const { kind, chainId, hop, depth, parentRunId, requesterBotId, ownerBotId } = input;
-        if (!ownerScope(input)) {
-          throw new Error(`${ownerBotId} has nowhere to receive the task`);
-        }
-        const doneWhen = input.doneWhen ?? null;
-        const body = doneWhen ? `${input.goal}\n\nDone when: ${doneWhen}` : input.goal;
-        const pending = { from: requesterBotId, via: kind, body };
-        const id = NodeCrypto.randomUUID();
-        const parent = input.parentTaskId ? getTask(input.parentTaskId) : undefined;
-        const task = changed(
-          insertTask.get(
-            id,
-            kind,
-            chainId,
-            hop,
-            depth,
-            parentRunId,
-            requesterBotId,
-            ownerBotId,
-            input.roomId,
-            input.goal,
-            input.deliveryKey,
-            JSON.stringify(pending),
-            parent?.id ?? null,
-            parent?.rootTaskId ?? id,
-            parent?.origin ?? input.origin ?? "human",
-            doneWhen,
-            JSON.stringify(input.blockedBy ?? []),
-            now,
-            now,
-          ),
-        );
-        promoteNextTask(ownerBotId);
-        return getTask(task.id) ?? task;
-      }),
+      transaction(() => createTaskIn(input, maxFanOut)),
+    createTaskIn,
 
     finishTask: (
       id: string,
@@ -743,7 +747,10 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     postFrom: (
       from: { botId: string } & ChainPoint,
       roomId: string,
-      via: Exclude<Via, "delegate" | "handoff" | "result" | "message" | "follow_up">,
+      via: Exclude<
+        Via,
+        "delegate" | "handoff" | "result" | "message" | "follow_up" | "meeting_action"
+      >,
       body: string,
     ) =>
       transaction(() => {

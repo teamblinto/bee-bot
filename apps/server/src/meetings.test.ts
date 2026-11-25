@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { callBotTool } from "./botTools.ts";
-import { canTransition, meetingFrame, turnCap } from "./meetings.ts";
+import { canTransition, matchOption, meetingFrame, turnCap } from "./meetings.ts";
 import { callMeetingTool, meetingToolsFor } from "./meetingTools.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
@@ -693,5 +693,164 @@ describe("the room during a meeting", () => {
     expect(dueBots()).toEqual([cy.id]);
     finish(start(cy.id).id, "Fine.");
     expect(store.rooms.round(room.id).botPosts).toBe(1);
+  });
+});
+
+describe("records and decisions", () => {
+  function running() {
+    const team = booked();
+    store.meetings.tick(team.scheduledAt, true);
+    return { ...team, ava1: start(team.ava.id) };
+  }
+  const positions = (id: string, proposalId: string) =>
+    (store.meetings.get(id)?.records ?? [])
+      .filter(({ kind, proposalId: of }) => kind === "position" && of === proposalId)
+      .map(({ ownerBotId, text }) => ({ ownerBotId, text }));
+  const two = ["A: ship checkout only", "B: checkout + onboarding"];
+
+  it("turns a bot-owned action into a meeting_action task that reaches Dee's DM and reports back to the room", () => {
+    const { ava, dee, room, ava1 } = running();
+    const res = call(ava1, "record", {
+      kind: "action",
+      text: "Mock payments",
+      owner: "Dee",
+      due: "tomorrow",
+    });
+    expect(res.status).toBe("recorded");
+    const task = store.tasks.getTask(res.task_id ?? "");
+    expect(task).toMatchObject({
+      kind: "meeting_action",
+      origin: "meeting",
+      ownerBotId: dee.id,
+      requesterBotId: ava.id,
+      roomId: room.id,
+    });
+    expect(messagesIn(dee.roomId).at(-1)?.body).toBe(
+      'Mock payments\n\nFrom meeting "Sprint" (due tomorrow)',
+    );
+    finish(ava1.id);
+    finish(start(dee.id).id, "Mocked.");
+    expect(messagesIn(room.id).at(-1)?.body).toBe("Mocked.");
+    expect(store.tasks.getTask(task?.id ?? "")?.status).toBe("done");
+    expect(store.dueWakes(new Date().toISOString()).some((w) => w.botId === ava.id)).toBe(true);
+  });
+
+  it("carries a tainted facilitator's taint to the action task", () => {
+    const { dee, ava1 } = running();
+    store.markUntrusted(ava1.id);
+    call(ava1, "record", { kind: "action", text: "Mock payments", owner: "Dee" });
+    expect(
+      db
+        .prepare("SELECT tainted FROM messages WHERE room_id = ? ORDER BY rowid")
+        .all(dee.roomId)
+        .at(-1),
+    ).toEqual({ tainted: 1 });
+    finish(ava1.id);
+    expect(store.tasks.runGrant(start(dee.id).id)?.tainted).toBe(true);
+  });
+
+  it("records an owner action without a task, and the owner can mark it done", () => {
+    const { id, ava1 } = running();
+    const res = call(ava1, "record", {
+      kind: "action",
+      text: "Get Stripe test keys",
+      owner: "owner",
+    });
+    expect(store.meetings.get(id)?.records.at(-1)).toMatchObject({
+      ownerIsHuman: true,
+      taskId: null,
+      doneAt: null,
+    });
+    expect(store.meetings.finishOwnerAction(res.record_id ?? "")?.doneAt).not.toBeNull();
+  });
+
+  it("refuses an action without an owner, or owned by a bot outside the meeting", () => {
+    const { ava1 } = running();
+    expect(call(ava1, "record", { kind: "action", text: "x" }).reason).toBe("owner_required");
+    store.createBot({ name: "Zed", personality: "", engineAccountId: "fake" });
+    expect(call(ava1, "record", { kind: "action", text: "x", owner: "Zed" }).reason).toBe(
+      "not_participant",
+    );
+  });
+
+  it("refuses the 21st action and the 201st record", () => {
+    const { id, ava1 } = running();
+    for (let i = 0; i < 20; i++) {
+      expect(call(ava1, "record", { kind: "action", text: `a${i}`, owner: "owner" }).status).toBe(
+        "recorded",
+      );
+    }
+    expect(call(ava1, "record", { kind: "action", text: "x", owner: "owner" }).reason).toBe(
+      "record_cap",
+    );
+    for (let i = 0; i < 180; i++) {
+      insertRecord({ meetingId: id, kind: "note" });
+    }
+    expect(call(ava1, "record", { kind: "note", text: "x" }).reason).toBe("record_cap");
+  });
+
+  it("matches a position by label or full text, one per bot, replacing an earlier one", () => {
+    expect(matchOption(two, " a ")).toBe("A: ship checkout only");
+    expect(matchOption(two, "b: CHECKOUT + onboarding")).toBe("B: checkout + onboarding");
+    expect(matchOption(["A: x", "B: y"], "C")).toBeUndefined();
+    const { bo, id, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    const { proposal_id = "" } = call(ava1, "propose", { options: two, text: "Scope?" });
+    finish(ava1.id);
+    const boRun = start(bo.id);
+    expect(boRun.prompt).toContain(`Proposal ${proposal_id.slice(0, 8)}: Scope?`);
+    expect(call(boRun, "position", { proposal_id, option: "C", reason: "x" }).reason).toBe(
+      "option_not_found",
+    );
+    call(boRun, "position", { proposal_id, option: "B", reason: "x" });
+    call(boRun, "position", { proposal_id, option: "A", reason: "capacity" });
+    expect(positions(id, proposal_id)).toEqual([
+      { ownerBotId: bo.id, text: "A: ship checkout only — capacity" },
+    ]);
+  });
+
+  it("starts a positions pass after the round cap without counting a round, two per item", () => {
+    const { ava, bo, cy, dee, id, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    call(ava1, "next_round", { prompt: "More?" });
+    const used = store.meetings.get(id)?.turnsUsed ?? 0;
+    expect(call(ava1, "propose", { options: two }).status).toBe("proposed");
+    expect(store.meetings.get(id)).toMatchObject({ round: 2, turnsUsed: used + 4 });
+    expect(call(ava1, "propose", { options: two }).status).toBe("proposed");
+    expect(call(ava1, "propose", { options: two }).reason).toBe("too_many");
+    expect(call(ava1, "position", { proposal_id: "x", option: "A", reason: "r" }).reason).toBe(
+      "not_participant",
+    );
+    finish(ava1.id);
+    expect(store.dueWakes(new Date().toISOString()).map(({ botId }) => botId)).toEqual(
+      expect.arrayContaining([bo.id, cy.id, dee.id]),
+    );
+    expect(store.dueWakes(new Date().toISOString()).map(({ botId }) => botId)).not.toContain(
+      ava.id,
+    );
+  });
+
+  it("closes and defers items, and refuses a position on a proposal whose item was closed", () => {
+    const { bo, id, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    const { proposal_id = "" } = call(ava1, "propose", { options: two });
+    expect(call(ava1, "close_item", { item_id: "2", summary: "x" }).reason).toBe("item_not_active");
+    expect(call(ava1, "close_item", { item_id: "1", summary: "Ship A" }).status).toBe("closed");
+    expect(call(ava1, "defer_item", { item_id: "3" }).status).toBe("deferred");
+    expect(call(ava1, "defer_item", { item_id: "1" }).reason).toBe("item_not_found");
+    expect(store.meetings.get(id)).toMatchObject({
+      currentItem: null,
+      round: 0,
+      agenda: [
+        { status: "done", summary: "Ship A" },
+        { status: "pending" },
+        { status: "deferred" },
+      ],
+    });
+    finish(ava1.id);
+    const boRun = start(bo.id);
+    expect(call(boRun, "position", { proposal_id, option: "A", reason: "r" }).reason).toBe(
+      "proposal_closed",
+    );
   });
 });

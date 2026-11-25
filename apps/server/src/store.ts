@@ -2944,6 +2944,7 @@ export function openEventStore(dataDir: string) {
       postMessage({ id, roomId, body, attended: false, taskId: task.id, timer }, source);
     },
   });
+  const maxActionFanOut = 20;
   const meetings = openMeetings(db, tx, {
     post: postAsBot,
     wake: (roomId, botId, key, attended, chain) => {
@@ -2954,6 +2955,26 @@ export function openEventStore(dataDir: string) {
       addWake(Scope.parse(row), key, attended, "meeting", chain);
       return true;
     },
+    createActionTask: (input) =>
+      tasks.createTaskIn(
+        {
+          kind: "meeting_action",
+          origin: "meeting",
+          chainId: input.meetingId,
+          hop: 1,
+          depth: 1,
+          parentRunId: input.parentRunId,
+          requesterBotId: input.facilitatorBotId,
+          ownerBotId: input.ownerBotId,
+          roomId: input.roomId,
+          goal:
+            `${input.text}\n\nFrom meeting "${input.title}"` +
+            (input.due ? ` (due ${input.due})` : ""),
+          deliveryKey: `meeting:${input.meetingId}:action:${input.recordId}`,
+          attended: input.attended,
+        },
+        maxActionFanOut,
+      ),
   });
   // A delegation is done once the child exists, whether or not it has finished.
   const actedOnce = (runId: string) =>

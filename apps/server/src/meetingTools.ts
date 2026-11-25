@@ -135,6 +135,26 @@ const Prompt = z.string().trim().min(1).max(2000);
 const StartItem = z.object({ item_id: z.string(), prompt: Prompt });
 const NextRound = z.object({ prompt: Prompt });
 const Ask = z.object({ bot: z.string().trim().min(1), question: Prompt });
+const Ref = z.string().trim().min(1).max(200);
+const RecordArgs = z.object({
+  kind: z.enum(["decision", "action", "note", "risk"]),
+  text: Prompt,
+  item_id: Ref.optional(),
+  owner: Ref.optional(),
+  due: Ref.optional(),
+});
+const CloseItem = z.object({ item_id: Ref, summary: Prompt });
+const DeferItem = z.object({ item_id: Ref, reason: Prompt.optional() });
+const Propose = z.object({
+  options: z.array(Line).min(2).max(6),
+  text: Prompt.optional(),
+  item_id: Ref.optional(),
+});
+const Position = z.object({
+  proposal_id: Ref,
+  option: Ref,
+  reason: z.string().trim().min(1).max(1000),
+});
 
 type Grant = NonNullable<ReturnType<EventStore["tasks"]["runGrant"]>>;
 
@@ -279,6 +299,63 @@ export function callMeetingTool(
           "asked",
         )
       : refused("invalid_arguments for ask_participant");
+  }
+  if (name === "record") {
+    const { data } = RecordArgs.safeParse(args);
+    if (!data) {
+      return refused("invalid_arguments for record");
+    }
+    const { item_id: itemId, ...input } = data;
+    const record = store.meetings.record(
+      meetingId,
+      botId,
+      { ...input, itemId },
+      { id: grant.runId, attended },
+    );
+    if ("refused" in record) {
+      return refused(record.refused);
+    }
+    const task = record.taskId ? { task_id: record.taskId } : {};
+    return answer({ status: "recorded", record_id: record.id, ...task, note: "Recorded." });
+  }
+  if (name === "close_item" || name === "defer_item") {
+    const close = CloseItem.safeParse(args).data;
+    const defer = DeferItem.safeParse(args).data;
+    const result =
+      name === "close_item"
+        ? close && store.meetings.closeItem(meetingId, botId, close.item_id, close.summary)
+        : defer && store.meetings.deferItem(meetingId, botId, defer.item_id, defer.reason);
+    if (!result) {
+      return refused(`invalid_arguments for ${name}`);
+    }
+    return "refused" in result
+      ? refused(result.refused)
+      : answer({
+          status: name === "close_item" ? "closed" : "deferred",
+          note: "Start the next item, or close_meeting when the agenda is done.",
+        });
+  }
+  if (name === "propose") {
+    const { data } = Propose.safeParse(args);
+    if (!data) {
+      return refused("invalid_arguments for propose");
+    }
+    const input = { options: data.options, text: data.text, itemId: data.item_id };
+    const result = store.meetings.propose(meetingId, botId, input, attended);
+    return "refused" in result
+      ? refused(result.refused)
+      : answer({ status: "proposed", proposal_id: result.proposal_id, note: endTurn.trim() });
+  }
+  if (name === "position") {
+    const { data } = Position.safeParse(args);
+    if (!data) {
+      return refused("invalid_arguments for position");
+    }
+    const input = { proposalId: data.proposal_id, option: data.option, reason: data.reason };
+    const result = store.meetings.position(meetingId, botId, input);
+    return "refused" in result
+      ? refused(result.refused)
+      : answer({ status: "recorded", position: result.text, note: "End your turn." });
   }
   return refused("unknown_tool");
 }

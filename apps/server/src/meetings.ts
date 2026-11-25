@@ -8,6 +8,7 @@ import {
   MeetingRecord,
   MeetingStatus,
   type Run,
+  type Task,
 } from "@beebot/contracts";
 import { z } from "zod";
 
@@ -35,10 +36,25 @@ export type MeetingRefusal =
   | "illegal_transition"
   | "record_cap";
 
+export type ActionTaskInput = {
+  meetingId: string;
+  recordId: string;
+  title: string;
+  facilitatorBotId: string;
+  ownerBotId: string;
+  roomId: string;
+  text: string;
+  due: string | null;
+  parentRunId: string;
+  attended: boolean;
+};
+
 export type MeetingDelivery = {
   post(m: { id: string; roomId: string; botId: string | null; body: string } & ChainPoint): void;
   // False when the bot has no live scope in the room or is archived.
   wake(roomId: string, botId: string, key: string, attended: boolean, chain: ChainPoint): boolean;
+  // Inside the caller's transaction.
+  createActionTask(input: ActionTaskInput): Task | { refused: string };
 };
 
 export const maxDaysAhead = 7;
@@ -62,6 +78,19 @@ export const turnCap = (participants: number, items: number, maxRounds: number) 
   participants * items * maxRounds + items * 3 + 4;
 
 export const canTransition = (from: MeetingStatus, to: MeetingStatus) => legal[from].includes(to);
+
+const maxRecords = 200;
+const maxActions = 20;
+const maxProposalsPerItem = 2;
+
+// An option's label is the text before its first colon, so "A" matches "A: ship checkout only".
+export function matchOption(options: string[], option: string) {
+  const wanted = option.trim().toLowerCase();
+  return options.find(
+    (each) =>
+      each.trim().toLowerCase() === wanted || each.split(":")[0]?.trim().toLowerCase() === wanted,
+  );
+}
 
 const minutesChars = 4000;
 const minutesKinds = new Set(["decision", "action", "risk", "note"]);
@@ -259,6 +288,22 @@ export function openMeetings(
     `SELECT id, chain_id AS chainId FROM wakes
      WHERE bot_id = ? AND source = 'meeting' AND status = 'pending' AND chain_id IS NOT NULL`,
   );
+  const insertRecord = db.prepare(
+    `INSERT INTO meeting_records (id, meeting_id, kind, item_id, text, owner_bot_id, owner_is_human,
+       task_id, due, proposal_id, options_json, created_by_bot_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (proposal_id, owner_bot_id) WHERE kind = 'position'
+       DO UPDATE SET text = excluded.text, created_at = excluded.created_at`,
+  );
+  const setAgenda = db.prepare(
+    `UPDATE meetings SET agenda_json = ?, current_item = ?, round = ?, updated_at = ?
+     WHERE id = ? AND status = 'running' RETURNING id`,
+  );
+  const finishAction = db.prepare(
+    `UPDATE meeting_records SET done_at = ?
+     WHERE id = ? AND kind = 'action' AND owner_is_human = 1 AND done_at IS NULL
+     RETURNING meeting_id AS meetingId`,
+  );
   const selectOpening = db.prepare(
     "SELECT body FROM messages WHERE chain_id = ? AND hop = 0 AND author = 'human' LIMIT 1",
   );
@@ -387,15 +432,74 @@ export function openMeetings(
   };
 
   // The engine may have cached its tool list, so this is checked again on every call.
-  const control = (meetingId: string, byBotId: string): Meeting | { refused: MeetingRefusal } => {
+  const facilitating = (
+    meetingId: string,
+    byBotId: string,
+  ): Meeting | { refused: MeetingRefusal } => {
     const meeting = get(meetingId);
     if (meeting?.status !== "running") {
       return { refused: "not_running" };
     }
-    if (meeting.facilitatorBotId !== byBotId) {
-      return { refused: "not_facilitator" };
+    return meeting.facilitatorBotId === byBotId ? meeting : { refused: "not_facilitator" };
+  };
+  // A new pass also needs time left; records and closing an item don't.
+  const control = (meetingId: string, byBotId: string): Meeting | { refused: MeetingRefusal } => {
+    const meeting = facilitating(meetingId, byBotId);
+    return "refused" in meeting || meeting.timesUpAt === null ? meeting : { refused: "times_up" };
+  };
+
+  // A bot's second position on a proposal replaces its first.
+  const addRecord = (
+    meeting: Meeting,
+    byBotId: string,
+    record: Pick<MeetingRecord, "kind" | "itemId" | "text"> &
+      Partial<Omit<MeetingRecord, "kind" | "itemId" | "text">>,
+  ) => {
+    const id = record.id ?? NodeCrypto.randomUUID();
+    insertRecord.run(
+      id,
+      meeting.id,
+      record.kind,
+      record.itemId,
+      record.text,
+      record.ownerBotId ?? null,
+      record.ownerIsHuman ? 1 : 0,
+      record.taskId ?? null,
+      record.due ?? null,
+      record.proposalId ?? null,
+      JSON.stringify(record.options ?? []),
+      byBotId,
+      new Date().toISOString(),
+    );
+    return changed(meeting.id)?.records.find(
+      (each) =>
+        each.id === id ||
+        (record.kind === "position" &&
+          each.proposalId === record.proposalId &&
+          each.ownerBotId === record.ownerBotId),
+    );
+  };
+
+  const updateAgenda = (
+    meeting: Meeting,
+    itemId: string,
+    item: Pick<AgendaItem, "status" | "summary">,
+  ) => {
+    const agenda = meeting.agenda.map((each) => (each.id === itemId ? { ...each, ...item } : each));
+    const current = meeting.currentItem === itemId ? null : meeting.currentItem;
+    const round = current === null ? 0 : meeting.round;
+    const now = new Date().toISOString();
+    if (!setAgenda.get(JSON.stringify(agenda), current, round, now, meeting.id)) {
+      throw new Error(`meeting ${meeting.id} agenda did not change`);
     }
-    return meeting.timesUpAt === null ? meeting : { refused: "times_up" };
+    return changed(meeting.id) ?? meeting;
+  };
+
+  const saved = (record: MeetingRecord | undefined) => {
+    if (!record) {
+      throw new Error("meeting record was not saved");
+    }
+    return record;
   };
 
   const nameIn = (botId: string) => Named.safeParse(selectBotName.get(botId)).data?.name;
@@ -570,6 +674,189 @@ export function openMeetings(
         }
         return pass(meeting, `@${nameOf(botId)}\n${question}`, [botId], attended);
       }),
+    record: (
+      meetingId: string,
+      byBotId: string,
+      input: {
+        kind: "decision" | "action" | "note" | "risk";
+        text: string;
+        itemId?: string | undefined;
+        owner?: string | undefined;
+        due?: string | undefined;
+      },
+      run: { id: string; attended: boolean },
+    ) =>
+      transaction((): MeetingRecord | { refused: MeetingRefusal } => {
+        const meeting = facilitating(meetingId, byBotId);
+        if ("refused" in meeting) {
+          return meeting;
+        }
+        const itemId = input.itemId ?? meeting.currentItem;
+        if (itemId !== null && !meeting.agenda.some(({ id }) => id === itemId)) {
+          return { refused: "item_not_found" };
+        }
+        const actions = meeting.records.filter(({ kind }) => kind === "action").length;
+        if (
+          meeting.records.length >= maxRecords ||
+          (input.kind === "action" && actions >= maxActions)
+        ) {
+          return { refused: "record_cap" };
+        }
+        const record = { kind: input.kind, itemId, text: input.text, due: input.due ?? null };
+        if (input.kind !== "action") {
+          return saved(addRecord(meeting, byBotId, record));
+        }
+        const owner = input.owner?.trim().toLowerCase();
+        if (!owner) {
+          return { refused: "owner_required" };
+        }
+        if (owner === "owner") {
+          return saved(addRecord(meeting, byBotId, { ...record, ownerIsHuman: true }));
+        }
+        const ownerBotId = [meeting.facilitatorBotId, ...meeting.participants].find(
+          (botId) => botId === input.owner?.trim() || nameIn(botId)?.toLowerCase() === owner,
+        );
+        if (!ownerBotId) {
+          return { refused: "not_participant" };
+        }
+        const id = NodeCrypto.randomUUID();
+        const task = deliver.createActionTask({
+          meetingId: meeting.id,
+          recordId: id,
+          title: meeting.title,
+          facilitatorBotId: meeting.facilitatorBotId,
+          ownerBotId,
+          roomId: meeting.roomId,
+          text: input.text,
+          due: record.due,
+          parentRunId: run.id,
+          attended: run.attended,
+        });
+        if ("refused" in task) {
+          return { refused: "too_many" };
+        }
+        return saved(addRecord(meeting, byBotId, { ...record, id, ownerBotId, taskId: task.id }));
+      }),
+
+    closeItem: (meetingId: string, byBotId: string, itemId: string, summary: string) =>
+      transaction((): Meeting | { refused: MeetingRefusal } => {
+        const meeting = facilitating(meetingId, byBotId);
+        if ("refused" in meeting) {
+          return meeting;
+        }
+        if (meeting.currentItem !== itemId) {
+          return { refused: "item_not_active" };
+        }
+        return updateAgenda(meeting, itemId, { status: "done", summary });
+      }),
+
+    deferItem: (meetingId: string, byBotId: string, itemId: string, reason?: string) =>
+      transaction((): Meeting | { refused: MeetingRefusal } => {
+        const meeting = facilitating(meetingId, byBotId);
+        if ("refused" in meeting) {
+          return meeting;
+        }
+        const open = meeting.agenda.some(
+          ({ id, status }) => id === itemId && (status === "pending" || status === "active"),
+        );
+        if (!open) {
+          return { refused: "item_not_found" };
+        }
+        return updateAgenda(meeting, itemId, { status: "deferred", summary: reason ?? null });
+      }),
+
+    // A positions pass is reserved like a round but doesn't count as one.
+    propose: (
+      meetingId: string,
+      byBotId: string,
+      input: { options: string[]; text?: string | undefined; itemId?: string | undefined },
+      attended: boolean,
+    ) =>
+      transaction((): { proposal_id: string } | { refused: MeetingRefusal } => {
+        const meeting = control(meetingId, byBotId);
+        if ("refused" in meeting) {
+          return meeting;
+        }
+        const itemId = input.itemId ?? meeting.currentItem;
+        if (itemId === null || itemId !== meeting.currentItem) {
+          return { refused: "item_not_active" };
+        }
+        const proposals = meeting.records.filter(
+          (each) => each.kind === "proposal" && each.itemId === itemId,
+        );
+        if (proposals.length >= maxProposalsPerItem) {
+          return { refused: "too_many" };
+        }
+        if (meeting.records.length >= maxRecords) {
+          return { refused: "record_cap" };
+        }
+        if (!reserveIn(meeting.id, meeting.participants.length + 1)) {
+          return { refused: "turn_cap" };
+        }
+        const text = input.text ?? "Which option?";
+        const { options } = input;
+        const { id } = saved(
+          addRecord(meeting, byBotId, { kind: "proposal", itemId, text, options }),
+        );
+        pass(
+          meeting,
+          [`Proposal ${id.slice(0, 8)}: ${text}`, ...options].join("\n"),
+          meeting.participants,
+          attended,
+        );
+        return { proposal_id: id };
+      }),
+
+    position: (
+      meetingId: string,
+      byBotId: string,
+      input: { proposalId: string; option: string; reason: string },
+    ) =>
+      transaction((): MeetingRecord | { refused: MeetingRefusal } => {
+        const meeting = get(meetingId);
+        if (meeting?.status !== "running") {
+          return { refused: "not_running" };
+        }
+        if (!meeting.participants.includes(byBotId)) {
+          return { refused: "not_participant" };
+        }
+        const proposal = meeting.records.find(
+          ({ id, kind, itemId }) =>
+            id === input.proposalId && kind === "proposal" && itemId === meeting.currentItem,
+        );
+        if (!proposal) {
+          return { refused: "proposal_closed" };
+        }
+        const option = matchOption(proposal.options, input.option);
+        if (!option) {
+          return { refused: "option_not_found" };
+        }
+        const replaces = meeting.records.some(
+          (each) => each.proposalId === proposal.id && each.ownerBotId === byBotId,
+        );
+        if (!replaces && meeting.records.length >= maxRecords) {
+          return { refused: "record_cap" };
+        }
+        return saved(
+          addRecord(meeting, byBotId, {
+            kind: "position",
+            itemId: proposal.itemId,
+            text: `${option} — ${input.reason}`,
+            ownerBotId: byBotId,
+            proposalId: proposal.id,
+          }),
+        );
+      }),
+
+    finishOwnerAction: (recordId: string) =>
+      transaction(() => {
+        const row = z
+          .object({ meetingId: z.string() })
+          .optional()
+          .parse(finishAction.get(new Date().toISOString(), recordId));
+        return row && changed(row.meetingId)?.records.find(({ id }) => id === recordId);
+      }),
+
     visible: () =>
       selectVisible
         .all()
