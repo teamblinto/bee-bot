@@ -724,6 +724,45 @@ describe("memory commands", () => {
   });
 });
 
+describe("meeting commands", () => {
+  const uuid = "00000000-0000-4000-8000-000000000001";
+
+  it("cancel-meeting frees the room for a new meeting; finish-meeting-action marks it done once", async () => {
+    const { base, store } = await start();
+    const [ava, bo] = ["Ava", "Bo"].map((name) =>
+      store.createBot({ name, personality: "", engineAccountId: "fake" }),
+    );
+    const room = store.rooms.createGroupRoom({
+      name: "Team",
+      memberIds: [ava?.id ?? "", bo?.id ?? ""],
+    });
+    const schedule = () =>
+      store.meetings.schedule({
+        facilitatorBotId: ava?.id ?? "",
+        roomId: room?.id ?? "",
+        title: "Sprint",
+        participants: [bo?.id ?? ""],
+        agenda: ["Review"],
+        scheduledAt: new Date(Date.now() + 60_000).toISOString(),
+        timeboxMin: 30,
+        maxRoundsPerItem: 2,
+        createdByRunId: "run",
+        chain: { chainId: null, hop: 0, depth: 0 },
+      });
+    const first = schedule();
+    const meetingId = "id" in first ? first.id : "";
+    const cancel = { type: "cancel-meeting", meetingId };
+    expect((await command(base, cancel)).status).toBe(200);
+    const again = await command(base, cancel);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ code: "illegal_transition" });
+    expect((await command(base, { ...cancel, meetingId: uuid })).status).toBe(404);
+    expect(schedule()).toMatchObject({ status: "scheduled" });
+    const finish = { type: "finish-meeting-action", recordId: uuid };
+    expect((await command(base, finish)).status).toBe(404);
+  });
+});
+
 describe("routine commands", () => {
   it("refuses to edit a once routine", async () => {
     const { base, store } = await start();

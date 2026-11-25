@@ -1685,6 +1685,9 @@ export function openEventStore(dataDir: string) {
   const cancelPendingWakes = db.prepare(
     "UPDATE wakes SET status = 'done' WHERE bot_id = ? AND status = 'pending'",
   );
+  const cancelWakesByKey = db.prepare(
+    "UPDATE wakes SET status = 'done' WHERE status = 'pending' AND idempotency_key LIKE ? || '%'",
+  );
   const selectBotPendingWake = db.prepare(
     "SELECT 1 FROM wakes WHERE bot_id = ? AND status = 'pending' LIMIT 1",
   );
@@ -2975,6 +2978,19 @@ export function openEventStore(dataDir: string) {
         },
         maxActionFanOut,
       ),
+    proposeTeamMemory: (botId, meetingId, text) =>
+      saveMemory(
+        newMemory({
+          botId,
+          type: "project",
+          source: "agent",
+          sourceRef: `meeting:${meetingId}`,
+          status: "pending",
+          scope: "team",
+          text,
+        }),
+      ),
+    cancelWakesByKey: (prefix) => cancelWakesByKey.run(prefix),
   });
   // A delegation is done once the child exists, whether or not it has finished.
   const actedOnce = (runId: string) =>
@@ -4208,6 +4224,8 @@ export function openEventStore(dataDir: string) {
           if (verdict === "continue") {
             const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
             addWake(getScope(run.scopeId), `recover:${run.id}`, attended, "continue");
+            // The re-run is off the meeting's pass chain, so the pass must not wait for it.
+            meetings.settleRun(run, "failed");
             continue;
           }
           if (verdict !== "wait") {
@@ -4219,6 +4237,7 @@ export function openEventStore(dataDir: string) {
           }
           if (verdict === "hold") {
             tasks.promoteNextTask(run.botId);
+            meetings.settleRun(run, "failed");
           } else if (verdict === "wait") {
             tasks.settleRun(run, "done", "");
             meetings.settleRun(run, "done");

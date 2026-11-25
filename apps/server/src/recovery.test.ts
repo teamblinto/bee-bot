@@ -12,6 +12,7 @@ import { toolRules } from "./broker.ts";
 import { BoxLimitReached } from "./boxRuntime.ts";
 import { callBotTool } from "./botTools.ts";
 import type { RunTurn, TurnOutcome } from "./engine.ts";
+import { meetingToolNames } from "./meetingTools.ts";
 import { createOutboxWorker, type Deliver } from "./outbox.ts";
 import { continueWindowMs, outwardTool, recoveryVerdict } from "./recovery.ts";
 import { type EventStore, openEventStore } from "./store.ts";
@@ -184,6 +185,9 @@ describe("recovery policy", () => {
       "mcp__connectors__github_create_issue",
     ]) {
       expect(outwardTool(tool), tool).toBe(true);
+    }
+    for (const name of meetingToolNames) {
+      expect(outwardTool(`mcp__bee__${name}`), name).toBe(true);
     }
     for (const tool of ["Bash", "Write", "Patch"]) {
       expect(outwardTool(tool), tool).toBe(false);

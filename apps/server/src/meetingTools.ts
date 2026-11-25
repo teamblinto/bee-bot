@@ -335,6 +335,12 @@ export function callMeetingTool(
           note: "Start the next item, or close_meeting when the agenda is done.",
         });
   }
+  if (name === "close_meeting") {
+    const result = store.meetings.close(meetingId, "facilitator");
+    return "refused" in result
+      ? refused(result.refused)
+      : answer({ status: "closed", note: "The minutes are posted. End your turn." });
+  }
   if (name === "propose") {
     const { data } = Propose.safeParse(args);
     if (!data) {

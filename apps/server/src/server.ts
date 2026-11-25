@@ -1329,10 +1329,17 @@ export async function startServer({
         store.setAccountConcurrency(command.accountId, command.maxConcurrentRuns);
         supervisor.pump();
         return ok;
-      // shortcut: no meeting exists until bots can schedule one; the real handlers come with them.
-      case "cancel-meeting":
+      case "cancel-meeting": {
+        const result = store.meetings.cancel(command.meetingId);
+        if (!("refused" in result)) {
+          return ok;
+        }
+        return result.refused === "not_found"
+          ? notFound
+          : { status: 409, body: { code: result.refused } };
+      }
       case "finish-meeting-action":
-        return { status: 404, body: { code: "not_found" } };
+        return store.meetings.finishOwnerAction(command.recordId) ? ok : notFound;
       case "continue-run": {
         const result = store.continueRun(command.runId, attended);
         if (result === "not_found") {
