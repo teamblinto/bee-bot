@@ -672,14 +672,19 @@ export function openMeetings(
       depth: 0,
     });
     setMinutes.run(minutesId, id);
-    const memory = teamMemoryText(closing, names);
-    if (memory) {
-      deliver.proposeTeamMemory(meeting.facilitatorBotId, id, memory);
-    }
     deliver.cancelWakesByKey(`meeting:${id}:`);
     const closed = transitionIn(id, "closed", now);
     if ("refused" in closed) {
       throw new Error(`meeting ${id} did not close`);
+    }
+    // Best effort: a failing memory write must not keep the meeting running.
+    const memory = teamMemoryText(closing, names);
+    try {
+      if (memory) {
+        deliver.proposeTeamMemory(meeting.facilitatorBotId, id, memory);
+      }
+    } catch (error) {
+      console.error(`beebotd: meeting ${id} team memory failed`, error);
     }
     return closed;
   };

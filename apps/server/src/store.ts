@@ -1614,12 +1614,14 @@ export function openEventStore(dataDir: string) {
     `SELECT 1 FROM messages
      WHERE room_id = ? AND author = 'bot' AND bot_id = ? AND created_at >= ? LIMIT 1`,
   );
-  // Since the room's last human message, which starts the bots over.
+  // Since the room's last human message, which starts the bots over, and its last meeting.
   const selectRecentBotPosts = db.prepare(
     `SELECT bot_id AS botId, body, created_at AS at FROM messages
      WHERE room_id = $room AND author = 'bot' AND bot_id IS NOT NULL AND created_at >= $since
        AND created_at > COALESCE(
          (SELECT MAX(created_at) FROM messages WHERE room_id = $room AND author = 'human'), '')
+       AND created_at > COALESCE((SELECT MAX(ended_at) FROM meetings
+         WHERE room_id = $room AND started_at IS NOT NULL), '')
      ORDER BY created_at, rowid`,
   );
   const selectHistory = db.prepare(

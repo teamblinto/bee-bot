@@ -729,6 +729,18 @@ describe("the room during a meeting", () => {
     expect(dueBots()).toEqual([cy.id, dee.id]);
   });
 
+  it("counts no meeting post toward a ring once it closes", () => {
+    const { bo, cy, dee, room, id } = passing();
+    finish(start(bo.id).id, "Checkout shipped.");
+    finish(start(cy.id).id, "Designs slipped.");
+    const deeRun = start(dee.id);
+    store.meetings.close(id, "facilitator");
+    finish(deeRun.id, "@Bo thoughts?");
+    finish(start(bo.id).id, "@Cy agree?");
+    expect(store.rooms.round(room.id).ringUntil).toBeNull();
+    expect(messagesIn(room.id).at(-1)?.body).toBe("@Cy agree?");
+  });
+
   it("routes and counts posts normally again once the meeting leaves running", () => {
     const { ava, bo, cy, room, id, scheduledAt } = booked();
     store.meetings.tick(scheduledAt, true);
@@ -1032,6 +1044,20 @@ describe("closing", () => {
     expect(meetingWakes()).toEqual([]);
     expect(names(meetingToolsFor(store, ava1.id))).not.toContain("start_item");
     expect(call(ava1, "close_meeting", {}).reason).toBe("not_running");
+  });
+
+  it("closes with minutes posted even when the team memory proposal fails", () => {
+    const { ava, room, id, ava1 } = running();
+    call(ava1, "record", { kind: "decision", text: "Ship Friday" });
+    const folder = NodePath.join(dataDir, "bots", ava.id, "memory");
+    NodeFS.mkdirSync(NodePath.dirname(folder), { recursive: true });
+    NodeFS.rmSync(folder, { recursive: true, force: true });
+    NodeFS.writeFileSync(folder, "");
+    expect(call(ava1, "close_meeting", {}).status).toBe("closed");
+    const m = store.meetings.get(id);
+    expect(m?.status).toBe("closed");
+    expect(messagesIn(room.id).at(-1)?.id).toBe(m?.minutesMessageId);
+    expect(teamProposals()).toEqual([]);
   });
 
   it("proposes no team memory when nothing was decided or assigned", () => {
