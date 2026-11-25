@@ -771,7 +771,7 @@ export function callBotTool(
         return refused("not_your_task");
       }
       if (task.status === "open" && task.ownerBotId === grant.botId) {
-        store.rooms.resetHold(task.roomId);
+        store.rooms.resetEscalations(task.roomId);
       }
       return answer({ status: "recorded", task_id: task.id });
     }

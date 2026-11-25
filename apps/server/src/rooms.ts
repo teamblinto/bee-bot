@@ -92,8 +92,8 @@ export function openRooms(
      ON CONFLICT (room_id) DO UPDATE SET ring_until = excluded.ring_until,
        updated_at = excluded.updated_at`,
   );
-  const clearHold = db.prepare(
-    "UPDATE room_rounds SET escalations = 0, ring_until = NULL, updated_at = ? WHERE room_id = ?",
+  const clearEscalations = db.prepare(
+    "UPDATE room_rounds SET escalations = 0, updated_at = ? WHERE room_id = ?",
   );
   const addBotPost = db.prepare(
     `INSERT INTO room_rounds (room_id, chain_id, bot_posts, window_started_at, updated_at)
@@ -172,8 +172,10 @@ export function openRooms(
       holding(roomId, () => addRefusal.run(roomId, new Date().toISOString())),
     tripRing: (roomId: string, until: string) =>
       holding(roomId, () => setRingUntil.run(roomId, until, new Date().toISOString())),
-    resetHold: (roomId: string) =>
-      transaction(() => holding(roomId, () => clearHold.run(new Date().toISOString(), roomId))),
+    resetEscalations: (roomId: string) =>
+      transaction(() =>
+        holding(roomId, () => clearEscalations.run(new Date().toISOString(), roomId)),
+      ),
     countBotPost: (roomId: string, now: string) => {
       addBotPost.run(roomId, now, now);
     },

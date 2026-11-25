@@ -1005,33 +1005,35 @@ describe("progress budgets", () => {
     });
   });
 
-  it("lifts the room hold only for the owner's progress on an open task", () => {
+  it("clears escalations only for the owner's progress on an open task, and never a ring break", () => {
     openStore();
     const { ada, ben, task_id } = delegated();
     const id = String(task_id);
     const roomId = String(store.tasks.getTask(id)?.roomId);
-    const ringUntil = () => store.rooms.round(roomId).ringUntil;
-    const trip = () => store.rooms.tripRing(roomId, new Date(Date.now() + 300_000).toISOString());
+    const round = () => store.rooms.round(roomId);
+    const refuse = () => store.rooms.noteRefusal(roomId);
     const owner = start(ben.id);
     say(ada.roomId, "again");
     const requester = start(ada.id);
+    store.rooms.tripRing(roomId, new Date(Date.now() + 300_000).toISOString());
 
-    trip();
+    refuse();
     expect(call(requester, "report_progress", { task_id: id, note: "Mine" })).toMatchObject({
       status: "recorded",
     });
-    expect(ringUntil()).not.toBeNull();
+    expect(round().escalations).toBe(1);
     expect(call(owner, "report_progress", { task_id: id, note: "Half done." })).toMatchObject({
       status: "recorded",
     });
-    expect(ringUntil()).toBeNull();
+    expect(round().escalations).toBe(0);
+    expect(round().ringUntil).not.toBeNull();
 
-    trip();
+    refuse();
     seed("UPDATE tasks SET status = 'done' WHERE id = ?", [[id]]);
     expect(call(owner, "report_progress", { task_id: id, note: "Done." })).toMatchObject({
       status: "recorded",
     });
-    expect(ringUntil()).not.toBeNull();
+    expect(round().escalations).toBe(1);
   });
 
   it("caps an unattended tree's total turns, but never a human one", () => {
