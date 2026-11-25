@@ -86,7 +86,6 @@ export const waitingOnOwner = (chat: ChatState, botId: string) =>
   chat.continuations.some((continuation) => continuation.botId === botId) ||
   openCards(chat, botId).length > 0;
 
-// A bot's own browser and computer run in its box.
 export const roomMeeting = (chat: ChatState, roomId: string) =>
   chat.meetings.find(
     (meeting) =>
@@ -94,6 +93,7 @@ export const roomMeeting = (chat: ChatState, roomId: string) =>
       (meeting.status === "scheduled" || meeting.status === "open" || meeting.status === "running"),
   );
 
+// A bot's own browser and computer run in its box.
 export const drivesBox = (bot: Bot) => bot.control === "browser" || bot.control === "computer";
 
 export const hasBoxScreen = (bot: Bot, boxes: BoxAvailability | undefined) =>

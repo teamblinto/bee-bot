@@ -84,6 +84,7 @@ function InviteCard({
         {participants.map((bot) => (
           <Avatar key={bot.id} seed={bot.avatarSeed} className="size-5" />
         ))}
+        <span className="sr-only">{participants.map(({ name }) => name).join(", ")}</span>
       </span>
       <p className="text-caption text-ink-secondary">
         {meeting.agenda.length} {meeting.agenda.length === 1 ? "agenda item" : "agenda items"}
@@ -144,7 +145,10 @@ function RunningMeeting({ meeting, chat }: { meeting: Meeting; chat: ChatState }
             >
               <Icon {...iconProps} className={`mt-0.5 shrink-0 ${tone}`} />
               <span className="flex min-w-0 flex-col">
-                {item.title}
+                <span>
+                  <span className="sr-only">{item.status}: </span>
+                  {item.title}
+                </span>
                 {current && (
                   <span className="text-caption text-ink-secondary">
                     Round {meeting.round} of {meeting.maxRoundsPerItem}
@@ -160,16 +164,24 @@ function RunningMeeting({ meeting, chat }: { meeting: Meeting; chat: ChatState }
           <h4 className={headingClass}>Proposal</h4>
           {proposal.text && <p className="text-body-s">{proposal.text}</p>}
           <ul className="flex flex-col gap-1">
-            {proposal.options.map((option) => (
-              <li key={option} className="flex items-center gap-2 text-body-s">
-                <span className="min-w-0 flex-1">{option}</span>
-                <span className="flex shrink-0 -space-x-1">
-                  {choosers(proposal.id, option).map((bot) => (
-                    <Avatar key={bot.id} seed={bot.avatarSeed} className="size-5" />
-                  ))}
-                </span>
-              </li>
-            ))}
+            {proposal.options.map((option) => {
+              const bots = choosers(proposal.id, option);
+              return (
+                <li key={option} className="flex items-center gap-2 text-body-s">
+                  <span className="min-w-0 flex-1">{option}</span>
+                  <span className="flex shrink-0 -space-x-1">
+                    {bots.map((bot) => (
+                      <Avatar key={bot.id} seed={bot.avatarSeed} className="size-5" />
+                    ))}
+                    {bots.length > 0 && (
+                      <span className="sr-only">
+                        {`Chosen by ${bots.map(({ name }) => name).join(", ")}`}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ))}
