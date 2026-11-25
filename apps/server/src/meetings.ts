@@ -1,9 +1,11 @@
+import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import { AgendaItem, keepsMeeting, Meeting, MeetingRecord, MeetingStatus } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { StoreTx } from "./store.ts";
+import type { ChainPoint } from "./tasks.ts";
 
 export type MeetingRefusal =
   | "not_running"
@@ -25,6 +27,18 @@ export type MeetingRefusal =
   | "proposal_closed"
   | "illegal_transition"
   | "record_cap";
+
+export type MeetingDelivery = {
+  post(m: { id: string; roomId: string; botId: string; body: string } & ChainPoint): void;
+};
+
+export const maxDaysAhead = 7;
+const maxLivePerFacilitator = 3;
+
+// The model's clock can lag a little, so a time up to a minute past still counts as now.
+export const badTime = (at: string, now: string) =>
+  Date.parse(at) < Date.parse(now) - 60_000 ||
+  Date.parse(at) > Date.parse(now) + maxDaysAhead * 86_400_000;
 
 const legal: Record<MeetingStatus, MeetingStatus[]> = {
   scheduled: ["open", "cancelled"],
@@ -50,7 +64,14 @@ const RecordRow = MeetingRecord.extend({
   options: json(z.array(z.string())),
 });
 
-export function openMeetings(db: DatabaseSync, { transaction, emit }: StoreTx) {
+const Named = z.object({ name: z.string() });
+const Invitee = z.object({ name: z.string(), dmRoomId: z.string() });
+
+export function openMeetings(
+  db: DatabaseSync,
+  { transaction, emit }: StoreTx,
+  deliver: MeetingDelivery,
+) {
   const columns = `id, room_id AS roomId, facilitator_bot_id AS facilitatorBotId, title,
     scheduled_at AS scheduledAt, timebox_min AS timeboxMin, status,
     participants_json AS participants, agenda_json AS agenda, current_item AS currentItem, round,
@@ -81,6 +102,25 @@ export function openMeetings(db: DatabaseSync, { transaction, emit }: StoreTx) {
      WHERE id = ? AND status = 'running' AND turns_used + ? <= turn_cap RETURNING id`,
   );
 
+  const countLive = db.prepare(
+    `SELECT COUNT(*) AS count FROM meetings WHERE facilitator_bot_id = ? AND ${live}`,
+  );
+  const insertMeeting = db.prepare(
+    `INSERT INTO meetings (id, room_id, facilitator_bot_id, title, scheduled_at, timebox_min,
+       status, participants_json, agenda_json, max_rounds_per_item, created_by_run_id,
+       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)`,
+  );
+  const selectBotName = db.prepare("SELECT name FROM bots WHERE id = ?");
+  const selectRoomName = db.prepare("SELECT name FROM rooms WHERE id = ?");
+  const selectInvitee = db.prepare(
+    `SELECT b.name, r.id AS dmRoomId FROM bots b
+     JOIN rooms r ON r.kind = 'dm' AND r.default_bot_id = b.id WHERE b.id = ?`,
+  );
+  const selectOpening = db.prepare(
+    "SELECT body FROM messages WHERE chain_id = ? AND hop = 0 AND author = 'human' LIMIT 1",
+  );
+
   const withRecords = (row: unknown): Meeting | undefined => {
     if (row === undefined) {
       return undefined;
@@ -97,28 +137,118 @@ export function openMeetings(db: DatabaseSync, { transaction, emit }: StoreTx) {
     return meeting;
   };
 
+  const liveIn = (roomId: string) => withRecords(selectLive.get(roomId));
+
+  const transitionIn = (id: string, to: MeetingStatus, now: string) => {
+    const from = MeetingStatus.options.filter((status) => canTransition(status, to));
+    const ended = legal[to].length === 0 ? now : null;
+    const moved = updateStatus.get(to, now, ended, id, JSON.stringify(from));
+    return (moved && changed(id)) || { refused: "illegal_transition" as const };
+  };
+
+  const reserveIn = (id: string, turns: number) => {
+    const reserved = reserveTurns.get(turns, new Date().toISOString(), id, turns) !== undefined;
+    if (reserved) {
+      changed(id);
+    }
+    return reserved;
+  };
+
   return {
     get,
-    live: (roomId: string) => withRecords(selectLive.get(roomId)),
+    live: liveIn,
     visible: () =>
       selectVisible
         .all()
         .flatMap((row) => withRecords(row) ?? [])
         .filter(keepsMeeting),
     transition: (id: string, to: MeetingStatus, now: string) =>
+      transaction(() => transitionIn(id, to, now)),
+    reserve: (id: string, turns: number) => transaction(() => reserveIn(id, turns)),
+
+    // Defined only while the room's live meeting is running: that is when meeting tools apply.
+    role: (roomId: string, botId: string) => {
+      const meeting = liveIn(roomId);
+      if (meeting?.status !== "running") {
+        return undefined;
+      }
+      if (meeting.facilitatorBotId === botId) {
+        return "facilitator" as const;
+      }
+      return meeting.participants.includes(botId) ? ("participant" as const) : undefined;
+    },
+
+    // shortcut: keyword match on the owner's opening message, upgrade if owners ask for meetings in other words
+    chainAsksForMeeting: (chainId: string) => {
+      const row = z.object({ body: z.string() }).optional().parse(selectOpening.get(chainId));
+      return row !== undefined && /meeting/i.test(row.body);
+    },
+
+    schedule: (input: {
+      facilitatorBotId: string;
+      roomId: string;
+      title: string;
+      participants: string[];
+      agenda: string[];
+      scheduledAt: string;
+      timeboxMin: number;
+      maxRoundsPerItem: number;
+      createdByRunId: string;
+      chain: ChainPoint;
+    }): Meeting | { refused: MeetingRefusal } =>
       transaction(() => {
-        const from = MeetingStatus.options.filter((status) => canTransition(status, to));
-        const ended = legal[to].length === 0 ? now : null;
-        const moved = updateStatus.get(to, now, ended, id, JSON.stringify(from));
-        return (moved && changed(id)) || { refused: "illegal_transition" as const };
-      }),
-    reserve: (id: string, turns: number) =>
-      transaction(() => {
-        const reserved = reserveTurns.get(turns, new Date().toISOString(), id, turns) !== undefined;
-        if (reserved) {
-          changed(id);
+        const now = new Date().toISOString();
+        const { facilitatorBotId, roomId, title, participants, scheduledAt, chain } = input;
+        if (badTime(scheduledAt, now)) {
+          return { refused: "bad_time" };
         }
-        return reserved;
+        if (liveIn(roomId)) {
+          return { refused: "room_busy" };
+        }
+        const { count } = z.object({ count: z.number() }).parse(countLive.get(facilitatorBotId));
+        if (count >= maxLivePerFacilitator) {
+          return { refused: "too_many" };
+        }
+        const agenda: AgendaItem[] = input.agenda.map((itemTitle, index) => ({
+          id: String(index + 1),
+          title: itemTitle,
+          ownerBotId: null,
+          status: "pending",
+          summary: null,
+        }));
+        const id = NodeCrypto.randomUUID();
+        insertMeeting.run(
+          id,
+          roomId,
+          facilitatorBotId,
+          title,
+          scheduledAt,
+          input.timeboxMin,
+          JSON.stringify(participants),
+          JSON.stringify(agenda),
+          input.maxRoundsPerItem,
+          input.createdByRunId,
+          now,
+          now,
+        );
+        const invitees = participants.map((botId) => Invitee.parse(selectInvitee.get(botId)));
+        const facilitator = Named.parse(selectBotName.get(facilitatorBotId)).name;
+        const body =
+          `Meeting "${title}" at ${scheduledAt}. Facilitator: ${facilitator}. ` +
+          `Participants: ${invitees.map(({ name }) => name).join(", ")}. ` +
+          `Agenda: ${agenda.map((item) => `${item.id}. ${item.title}`).join(" ")}`;
+        const roomName = Named.parse(selectRoomName.get(roomId)).name;
+        const from = { botId: facilitatorBotId, ...chain };
+        deliver.post({ ...from, id: `meeting:${NodeCrypto.randomUUID()}`, roomId, body });
+        for (const { dmRoomId } of invitees) {
+          const notice = `${body} in ${roomName}`;
+          deliver.post({ ...from, id: NodeCrypto.randomUUID(), roomId: dmRoomId, body: notice });
+        }
+        const meeting = changed(id);
+        if (!meeting) {
+          throw new Error(`meeting ${id} was not saved`);
+        }
+        return meeting;
       }),
   };
 }

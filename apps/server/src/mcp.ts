@@ -14,6 +14,7 @@ import {
   type ToolContent,
 } from "./computer.ts";
 import { cuaToolNames, cuaTools } from "./cuaScreen.ts";
+import { meetingToolNames } from "./meetingTools.ts";
 import { memoryTools } from "./memory.ts";
 import { teamToolNames, teamTools } from "./team.ts";
 
@@ -181,7 +182,9 @@ export async function answerMcp(
       }
       if (
         typeof params?.name === "string" &&
-        (botToolNames.has(params.name) || teamToolNames.has(params.name))
+        (botToolNames.has(params.name) ||
+          teamToolNames.has(params.name) ||
+          meetingToolNames.has(params.name))
       ) {
         let text: string;
         try {

@@ -111,6 +111,7 @@ import {
   secretName,
   urlProblem,
 } from "./connectors.ts";
+import { callMeetingTool, meetingToolNames, meetingToolsFor } from "./meetingTools.ts";
 import { callMemoryTool, readTeamMemoryFiles, teamMemoryDir } from "./memory.ts";
 import { checkProjectFolder } from "./pathPolicy.ts";
 import { auditQuery, gateTool } from "./policy.ts";
@@ -1805,19 +1806,21 @@ export async function startServer({
           gateTool(store.policy, run, name, args, () =>
             teamToolNames.has(name)
               ? team.call(run, name, args)
-              : name === "share_file"
-                ? shareFile(store, run, args, {
-                    dataDir,
-                    workdir: box?.layout.workdir ?? "/work",
-                    read:
-                      box && store.getBot(run.botId)?.boundary === "box"
-                        ? (botId, path) => outbox(box.runtime, box.layout, botId, path)
-                        : undefined,
-                    attach: supervisor.shareFile,
-                  })
-                : callBotTool(store, run, name, args, ({ runId }) =>
-                    supervisor.parkWaitingUser(runId),
-                  ),
+              : meetingToolNames.has(name)
+                ? callMeetingTool(store, run, name, args)
+                : name === "share_file"
+                  ? shareFile(store, run, args, {
+                      dataDir,
+                      workdir: box?.layout.workdir ?? "/work",
+                      read:
+                        box && store.getBot(run.botId)?.boundary === "box"
+                          ? (botId, path) => outbox(box.runtime, box.layout, botId, path)
+                          : undefined,
+                      attach: supervisor.shareFile,
+                    })
+                  : callBotTool(store, run, name, args, ({ runId }) =>
+                      supervisor.parkWaitingUser(runId),
+                    ),
           ),
         browser: (name, args) => browser.call(run, name, args),
         computer: (name, args) =>
@@ -1828,17 +1831,18 @@ export async function startServer({
           const bot = store.getBot(run.botId);
           const control = bot?.control ?? "none";
           const lead = bot?.manifest.includes(teamManageGrant) ?? false;
+          const meeting = meetingToolsFor(store, run.id);
           if (control !== "host" || !host || !hostControl().available) {
-            return toolsFor(control, undefined, lead);
+            return [...toolsFor(control, undefined, lead), ...meeting];
           }
           if (await cua?.ready()) {
-            return toolsFor(control, "cua", lead);
+            return [...toolsFor(control, "cua", lead), ...meeting];
           }
           // The bot's coordinates are the display's, fitted, so the size is read before it looks.
           await host.measure().catch((error: unknown) => {
             console.error(`beebotd: host screen unavailable: ${(error as Error)?.message}`);
           });
-          return toolsFor(control, host.screen.size, lead);
+          return [...toolsFor(control, host.screen.size, lead), ...meeting];
         },
       },
       mcpKeepaliveMs,

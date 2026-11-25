@@ -3,10 +3,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { teamManageGrant } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import { callBotTool } from "./botTools.ts";
 import { canTransition, turnCap } from "./meetings.ts";
+import { callMeetingTool, meetingToolsFor } from "./meetingTools.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
 let dataDir: string;
@@ -177,6 +180,18 @@ describe("meeting rules", () => {
     expect(store.state().meetings).toEqual([]);
   });
 
+  it("tells clients when a meeting changes state", () => {
+    const m = seedMeeting({ status: "scheduled" });
+    const seen: string[] = [];
+    store.onEvent((event) => {
+      if (event.type === "meeting.changed") {
+        seen.push(event.meeting.status);
+      }
+    });
+    store.meetings.transition(m.id, "open", now);
+    expect(seen).toEqual(["open"]);
+  });
+
   it("never reserves past the cap", () => {
     const m = seedMeeting({ status: "running", turnCap: 5, turnsUsed: 3 });
     expect(store.meetings.reserve(m.id, 3)).toBe(false);
@@ -192,5 +207,141 @@ describe("meeting rules", () => {
     ).run(crypto.randomUUID(), m.id, now);
     expect(store.state().meetings.map(({ id }) => id)).toEqual([m.id]);
     expect(store.state().meetings[0]?.records[0]).toMatchObject({ ownerIsHuman: true });
+  });
+});
+
+function product() {
+  const { bots, room } = team("Ava", "Bo", "Cy", "Dee");
+  const [ava, bo, cy, dee] = bots;
+  if (!ava || !bo || !cy || !dee) {
+    throw new Error("no team");
+  }
+  store.rooms.updateGroupRoom(room.id, { name: "Product Room" });
+  store.setAccountConcurrency("fake", 8);
+  return { ava, bo, cy, dee, room };
+}
+
+const say = (roomId: string, body: string) =>
+  store.sendMessage({ id: crypto.randomUUID(), roomId, body, attended: true });
+
+const finish = (runId: string) =>
+  store.finishRun(runId, "boot", { status: "Completed", reason: null, reply: "ok", tools: [] });
+
+const names = (tools: Array<{ name: string }>) => tools.map(({ name }) => name);
+
+const call = (run: { id: string }, name: string, args: unknown) =>
+  z
+    .object({ status: z.string() })
+    .catchall(z.string())
+    .parse(JSON.parse(callMeetingTool(store, run, name, args)));
+
+const messagesIn = (roomId: string) =>
+  z
+    .array(z.object({ id: z.string(), body: z.string() }))
+    .parse(
+      db.prepare("SELECT id, body FROM messages WHERE room_id = ? ORDER BY rowid").all(roomId),
+    );
+
+const sprint = {
+  title: "Sprint",
+  agenda: ["Review", "Blockers", "Goals"],
+  participants: ["all"],
+  room: "Product Room",
+  in_minutes: 5,
+};
+
+describe("scheduling", () => {
+  it("lists schedule_meeting only to a team.manage bot or a chain the owner opened about a meeting", () => {
+    const { ava, bo } = product();
+    say(ava.roomId, "hello");
+    const plain = start(ava.id);
+    expect(names(meetingToolsFor(store, plain.id))).not.toContain("schedule_meeting");
+    finish(plain.id);
+    say(ava.roomId, "Organize a sprint meeting in 5 minutes");
+    expect(names(meetingToolsFor(store, start(ava.id).id))).toContain("schedule_meeting");
+    store.policy.setBotManifest(bo.id, [teamManageGrant]);
+    say(bo.roomId, "hello");
+    expect(names(meetingToolsFor(store, start(bo.id).id))).toEqual(["schedule_meeting"]);
+  });
+
+  it("refuses a caller without either right, even if it calls the tool unlisted", () => {
+    const { ava } = product();
+    say(ava.roomId, "hello");
+    expect(call(start(ava.id), "schedule_meeting", sprint)).toMatchObject({
+      status: "refused",
+      reason: "not_allowed",
+    });
+  });
+
+  it("posts one invite in the room and a notice in each participant's DM, waking nobody", () => {
+    const { ava, bo, cy, dee, room } = product();
+    say(ava.roomId, "Set up a meeting");
+    const res = call(start(ava.id), "schedule_meeting", sprint);
+    expect(res).toMatchObject({ status: "scheduled", room_id: room.id });
+    const invites = messagesIn(room.id).filter(({ id }) => id.startsWith("meeting:"));
+    expect(invites).toHaveLength(1);
+    expect(invites[0]?.body).toContain("Agenda: 1. Review 2. Blockers 3. Goals");
+    for (const bot of [bo, cy, dee]) {
+      expect(messagesIn(bot.roomId).at(-1)?.body).toMatch(/"Sprint".* in Product Room$/);
+    }
+    expect(store.dueWakes(new Date().toISOString()).filter((w) => w.botId !== ava.id)).toEqual([]);
+    expect(store.meetings.get(res.meeting_id ?? "")).toMatchObject({
+      status: "scheduled",
+      participants: [bo.id, cy.id, dee.id],
+      agenda: [{ id: "1", status: "pending" }, { id: "2" }, { id: "3" }],
+      timeboxMin: 30,
+      maxRoundsPerItem: 2,
+    });
+  });
+
+  it("refuses a second live meeting in the same room, a past time, and a non-member participant", () => {
+    const { ava } = product();
+    store.createBot({ name: "Zed", personality: "", engineAccountId: "fake" });
+    say(ava.roomId, "Set up a meeting");
+    const run = start(ava.id);
+    const past = { ...sprint, in_minutes: undefined, at: "2000-01-01T00:00:00Z" };
+    expect(call(run, "schedule_meeting", past).reason).toBe("bad_time");
+    const stranger = { ...sprint, participants: ["Zed"] };
+    expect(call(run, "schedule_meeting", stranger).reason).toBe("not_in_room");
+    expect(call(run, "schedule_meeting", sprint).status).toBe("scheduled");
+    expect(call(run, "schedule_meeting", sprint).reason).toBe("room_busy");
+  });
+
+  it("creates a room only for an attended, untainted run", () => {
+    const { ava, bo } = product();
+    const args = { ...sprint, room: undefined, participants: ["Bo"] };
+    say(ava.roomId, "Set up a meeting");
+    const tainted = start(ava.id);
+    store.markUntrusted(tainted.id);
+    expect(call(tainted, "schedule_meeting", args).reason).toBe("room_required");
+    finish(tainted.id);
+    say(bo.roomId, "Set up a meeting");
+    const res = call(start(bo.id), "schedule_meeting", { ...args, participants: ["Ava"] });
+    expect(res.status).toBe("scheduled");
+    expect(store.rooms.getRoom(res.room_id ?? "")).toMatchObject({
+      name: "Sprint",
+      members: [bo.id, ava.id],
+    });
+  });
+});
+
+describe("meeting tools during a meeting", () => {
+  it("lists control to the facilitator and position to a participant only while running", () => {
+    const { ava, bo, cy, room } = product();
+    insertMeeting({ id: "m1", roomId: room.id, botId: ava.id, status: "open" });
+    db.prepare("UPDATE meetings SET participants_json = ? WHERE id = 'm1'").run(
+      JSON.stringify([bo.id]),
+    );
+    say(room.id, "@Ava @Bo @Cy hi");
+    const [avaRun, boRun, cyRun] = [start(ava.id), start(bo.id), start(cy.id)];
+    expect(names(meetingToolsFor(store, avaRun.id))).toEqual([]);
+    expect(call(avaRun, "start_item", {}).reason).toBe("not_running");
+    store.meetings.transition("m1", "running", new Date().toISOString());
+    expect(names(meetingToolsFor(store, avaRun.id))).toContain("close_meeting");
+    expect(names(meetingToolsFor(store, avaRun.id))).not.toContain("position");
+    expect(names(meetingToolsFor(store, boRun.id))).toEqual(["position"]);
+    expect(names(meetingToolsFor(store, cyRun.id))).toEqual([]);
+    expect(call(boRun, "start_item", {}).reason).toBe("not_facilitator");
+    expect(call(cyRun, "position", {}).reason).toBe("not_participant");
   });
 });

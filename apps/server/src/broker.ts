@@ -64,6 +64,18 @@ const beeRules: Record<string, ToolRule> = {
   archive_bot: { labels: noLegs, grant: teamManageGrant },
   create_room: { labels: noLegs, grant: teamManageGrant },
   invite_to_room: { labels: noLegs, grant: teamManageGrant },
+  // A meeting tool only posts in its room and wakes its members, a reply's reach. Each handler
+  // checks the caller's role in the running meeting itself.
+  schedule_meeting: { labels: legs("sideEffect") },
+  start_item: { labels: noLegs },
+  next_round: { labels: noLegs },
+  ask_participant: { labels: noLegs },
+  record: { labels: noLegs },
+  close_item: { labels: noLegs },
+  defer_item: { labels: noLegs },
+  close_meeting: { labels: noLegs },
+  propose: { labels: noLegs },
+  position: { labels: noLegs },
 };
 
 // A write from a session that saw untrusted text waits for the owner's review, which is the draft

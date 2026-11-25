@@ -63,7 +63,7 @@ import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol
 import { openSkills, skillsDir } from "./skills.ts";
 import { openConnectors, reservedSlug, slugFrom } from "./connectors.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
-import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
+import { type ChainPoint, inboundText, openTasks, type TaskDelivery } from "./tasks.ts";
 import { openWaits } from "./waits.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
@@ -2892,22 +2892,23 @@ export function openEventStore(dataDir: string) {
   const tx: StoreTx = { transaction, emit };
   const effects = openEffects(db, tx);
   const rooms = openRooms(db, tx, readLimits);
+  const postAsBot: TaskDelivery["post"] = ({ id, roomId, botId, body, chainId, hop }) =>
+    addMessage({
+      id,
+      roomId,
+      author: "bot",
+      body,
+      tools: [],
+      workedMs: null,
+      botId,
+      replyToId: null,
+      chainId,
+      hop,
+      attachments: [],
+      createdAt: new Date().toISOString(),
+    });
   const tasks = openTasks(db, tx, {
-    post: ({ id, roomId, botId, body, chainId, hop }) =>
-      addMessage({
-        id,
-        roomId,
-        author: "bot",
-        body,
-        tools: [],
-        workedMs: null,
-        botId,
-        replyToId: null,
-        chainId,
-        hop,
-        attachments: [],
-        createdAt: new Date().toISOString(),
-      }),
+    post: postAsBot,
     wake: (scopeId, key, attended, chain) =>
       addWake(getScope(scopeId), key, attended, "task", chain),
     unanswered: (scopeId) => unackedInput(getScope(scopeId)).some(fromOwner),
@@ -2917,7 +2918,7 @@ export function openEventStore(dataDir: string) {
       postMessage({ id, roomId, body, attended: false, taskId: task.id, timer }, source);
     },
   });
-  const meetings = openMeetings(db, tx);
+  const meetings = openMeetings(db, tx, { post: postAsBot });
   // A delegation is done once the child exists, whether or not it has finished.
   const actedOnce = (runId: string) =>
     tasks.createdByRun(runId) > 0 ||
