@@ -1294,6 +1294,18 @@ describe("fake engine", () => {
     expect(await turn("/fail\n\nhi")).toMatchObject({ kind: "completed" });
   });
 
+  it("finds a room post's command above the room footer", async () => {
+    const room = (line: string) =>
+      `[New messages]\nAva: hi\n\n${line}\n[If none of this needs an answer, say so.]`;
+    expect(await turn(room("Owner: /fail"))).toEqual({ kind: "failed" });
+    expect(await turn(room("Ava: @Bo\n/auth"))).toEqual({ kind: "auth_failed" });
+    expect(await turn(room('Ava: @Bo\n/auth\n\nAva: {"status":"asked"}'))).toEqual({
+      kind: "auth_failed",
+    });
+    expect(await turn(room("Owner: hi /fail"))).toMatchObject({ kind: "completed" });
+    expect(await turn(room("Owner: /fail {…"))).toMatchObject({ kind: "completed" });
+  });
+
   // Otherwise a restart mid-turn would send the same input to it again.
   it("takes the prompt like a real engine, except on turns that fail before it", async () => {
     const delivered: string[] = [];

@@ -314,7 +314,17 @@ const fakeSessions = new Map<string, string[]>();
 
 const lastLine = (text: string) => (text.split("\n").at(-1) ?? "").trim();
 
-// The last line of the prompt scripts the turn: /fail, /auth, /limit [seconds], /hang,
+// Prompt lines up to the last that isn't a bracketed frame line such as the room footer, or a
+// bot's /bee tool reply posted after its message, each without a room speaker prefix
+// ("Owner: /bee ...").
+function scriptLines(prompt: string) {
+  const lines = prompt.split("\n").map((each) => each.trim().replace(/^[^:]+: (?=\/)/, ""));
+  const end = lines.findLastIndex((each) => !/^$|^\[.*\]$|^[^:\s]+: \{.*\}$/.test(each));
+  // A room line cut at its length cap ends in "…" and can't script anything.
+  return lines[end]?.endsWith("…") ? [] : lines.slice(0, end + 1);
+}
+
+// The last of those lines scripts the turn: /fail, /auth, /limit [seconds], /hang,
 // /approve <Tool> <detail...>, /remember <text...>, /takeover <reason...>, /bee <tool> [json args]
 // (any of the run's bee tools; consecutive /bee lines all run, in one turn), /work [thought] (a
 // scripted multi-tool turn), /recall (the last line of each earlier turn in the session). Anything
@@ -332,7 +342,8 @@ export const fakeRunTurn: RunTurn = async ({
   onDelivered,
   onSteerable,
 }) => {
-  const line = lastLine(prompt);
+  const lines = scriptLines(prompt);
+  const line = lines.at(-1) ?? "";
   const [directive, argument] = line.split(/\s+/);
   switch (directive) {
     case "/fail":
@@ -389,7 +400,6 @@ export const fakeRunTurn: RunTurn = async ({
       return { kind: "completed", text };
     }
     case "/bee": {
-      const lines = prompt.split("\n").map((each) => each.trim());
       const calls = lines.slice(lines.findLastIndex((each) => !/^\/bee(\s|$)/.test(each)) + 1);
       const texts: string[] = [];
       for (const [index, call] of calls.entries()) {
