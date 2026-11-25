@@ -540,8 +540,10 @@ describe("a pass", () => {
     expect(store.meetings.get(id)?.round).toBe(2);
     expect(call(ava1, "next_round", { prompt: "More?" }).reason).toBe("round_cap");
     db.prepare(
-      "UPDATE meetings SET current_item = NULL, turns_used = turn_cap - 3 WHERE id = ?",
+      `UPDATE meetings SET current_item = NULL, turns_used = turn_cap - 3,
+         agenda_json = json_set(agenda_json, '$[0].status', 'done') WHERE id = ?`,
     ).run(id);
+    expect(call(ava1, "start_item", { item_id: "1", prompt: "x" }).reason).toBe("item_not_found");
     expect(call(ava1, "start_item", { item_id: "2", prompt: "x" }).reason).toBe("turn_cap");
     expect(call(ava1, "start_item", { item_id: "9", prompt: "x" }).reason).toBe("item_not_found");
     db.prepare("UPDATE meetings SET times_up_at = ? WHERE id = ?").run(

@@ -485,7 +485,7 @@ export function openMeetings(
         if ("refused" in meeting) {
           return meeting;
         }
-        const item = meeting.agenda.find(({ id }) => id === itemId);
+        const item = meeting.agenda.find(({ id, status }) => id === itemId && status === "pending");
         if (!item) {
           return { refused: "item_not_found" };
         }
