@@ -11,11 +11,12 @@ import {
   PanelLeft,
   Pencil,
   Plus,
+  Settings,
   Users,
 } from "lucide-react";
 import { type KeyboardEvent, useRef, useState } from "react";
 
-import { connectionLines } from "../labels";
+import { connectionLines, shortTime } from "../labels";
 import {
   type ConnectionState,
   isActive,
@@ -28,7 +29,7 @@ import { buildTranscript } from "../transcript";
 import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { Avatar } from "./Avatar";
 import { useMentionMenu } from "./MentionMenu";
-import { RenameRoomDialog } from "./RoomDialog";
+import { RenameRoomDialog, RoomSettingsDialog } from "./RoomDialog";
 import { Tooltip } from "./Tooltip";
 import { Transcript } from "./Transcript";
 import { columnClass, iconProps } from "./ui";
@@ -281,8 +282,9 @@ function MembersMenu({
   );
 }
 
-function RoomOptions({ room, connected }: { room: Room; connected: boolean }) {
+function RoomOptions({ room, bots, connected }: { room: Room; bots: Bot[]; connected: boolean }) {
   const [renaming, setRenaming] = useState(false);
+  const [editing, setEditing] = useState(false);
   return (
     <>
       <Tooltip label="Room options" side="bottom">
@@ -312,8 +314,21 @@ function RoomOptions({ room, connected }: { room: Room; connected: boolean }) {
           <Pencil {...iconProps} className="text-ink-secondary" />
           Rename
         </button>
+        <button
+          type="button"
+          className={menuItemClass}
+          disabled={!connected}
+          onClick={({ currentTarget }) => {
+            hide(currentTarget);
+            setEditing(true);
+          }}
+        >
+          <Settings {...iconProps} className="text-ink-secondary" />
+          Settings
+        </button>
       </div>
       {renaming && <RenameRoomDialog room={room} onClose={() => setRenaming(false)} />}
+      {editing && <RoomSettingsDialog room={room} bots={bots} onClose={() => setEditing(false)} />}
     </>
   );
 }
@@ -468,6 +483,11 @@ export function RoomView({
   const defaultBot = members.find(({ id }) => id === room.defaultBotId);
   const here = `${nameList.format(members.map(({ name }) => name))} ${members.length === 1 ? "is" : "are"} here.`;
   const noBots = members.length === 0;
+  const held =
+    room.held === "ring"
+      ? `Bots were going in circles, so they're paused until ${room.heldUntil ? shortTime(room.heldUntil) : "later"}.`
+      : room.held === "escalation" &&
+        "The bots are waiting for you. Post a message to let them go on.";
   const emptyState = (title: string, body: string) => (
     <div className="flex flex-col items-center gap-2 py-8 text-center">
       <span className="mb-2 flex size-10 items-center justify-center rounded-full bg-raised text-ink-secondary">
@@ -530,8 +550,19 @@ export function RoomView({
           adding={adding}
           setAdding={setAdding}
         />
-        <RoomOptions room={room} connected={connected} />
+        <RoomOptions room={room} bots={chat.bots} connected={connected} />
       </header>
+      {held && (
+        <div className={columnClass}>
+          <p
+            role="status"
+            className="mt-3 flex items-center gap-2 rounded-row bg-waiting-surface px-3 py-2 text-body-s text-waiting"
+          >
+            <CircleAlert {...iconProps} className="shrink-0 text-waiting-status" />
+            {held}
+          </p>
+        </div>
+      )}
       {items.length === 0 && !systemLine ? (
         <div className={`${columnClass} flex flex-1 flex-col justify-center`}>
           {noBots
