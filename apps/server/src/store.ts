@@ -57,6 +57,7 @@ import {
 import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { outwardTool, type RecoveryVerdict } from "./recovery.ts";
+import { openMeetings } from "./meetings.ts";
 import { openRooms } from "./rooms.ts";
 import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
 import { openSkills, skillsDir } from "./skills.ts";
@@ -2916,6 +2917,7 @@ export function openEventStore(dataDir: string) {
       postMessage({ id, roomId, body, attended: false, taskId: task.id, timer }, source);
     },
   });
+  const meetings = openMeetings(db, tx);
   // A delegation is done once the child exists, whether or not it has finished.
   const actedOnce = (runId: string) =>
     tasks.createdByRun(runId) > 0 ||
@@ -3030,6 +3032,7 @@ export function openEventStore(dataDir: string) {
   return {
     rooms,
     tasks,
+    meetings,
     waits,
     boxes,
     connectors,
@@ -3101,7 +3104,7 @@ export function openEventStore(dataDir: string) {
       limits: limits(),
       teamRequests: team.pending(),
       leadsActWithoutAsking: leadsActWithoutAsking(),
-      meetings: [],
+      meetings: meetings.visible(),
     }),
 
     leadsActWithoutAsking,

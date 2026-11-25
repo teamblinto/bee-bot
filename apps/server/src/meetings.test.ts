@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { callBotTool } from "./botTools.ts";
+import { canTransition, turnCap } from "./meetings.ts";
 import { type EventStore, openEventStore } from "./store.ts";
 
 let dataDir: string;
@@ -122,5 +123,74 @@ describe("the meetings migration", () => {
     const { dee } = actionTask();
     store.deleteBot(dee.id);
     expect(rows("SELECT task_id FROM meeting_records")).toEqual([{ task_id: null }]);
+  });
+});
+
+function seedMeeting(input: { status: string; turnCap?: number; turnsUsed?: number }) {
+  const { bots, room } = team("Ava");
+  const id = crypto.randomUUID();
+  insertMeeting({ id, roomId: room.id, botId: bots[0]?.id ?? "", status: input.status });
+  db.prepare("UPDATE meetings SET turn_cap = ?, turns_used = ? WHERE id = ?").run(
+    input.turnCap ?? null,
+    input.turnsUsed ?? 0,
+    id,
+  );
+  const meeting = store.meetings.get(id);
+  if (!meeting) {
+    throw new Error("no meeting");
+  }
+  return meeting;
+}
+
+describe("meeting rules", () => {
+  const now = new Date().toISOString();
+
+  it("caps turns by the contract formula", () => {
+    expect(turnCap(3, 3, 2)).toBe(18 + 13);
+    expect(turnCap(4, 3, 2)).toBe(24 + 13);
+  });
+
+  it("allows only forward transitions and treats closed and cancelled as terminal", () => {
+    expect(canTransition("scheduled", "open")).toBe(true);
+    expect(canTransition("scheduled", "running")).toBe(false);
+    expect(canTransition("open", "running")).toBe(true);
+    expect(canTransition("running", "closed")).toBe(true);
+    expect(canTransition("closed", "running")).toBe(false);
+    expect(canTransition("cancelled", "open")).toBe(false);
+  });
+
+  it("refuses an illegal transition in the store and leaves the row unchanged", () => {
+    const m = seedMeeting({ status: "scheduled" });
+    expect(store.meetings.transition(m.id, "running", now)).toEqual({
+      refused: "illegal_transition",
+    });
+    expect(store.meetings.get(m.id)?.status).toBe("scheduled");
+  });
+
+  it("ends a meeting on a terminal transition and frees the room", () => {
+    const m = seedMeeting({ status: "running" });
+    expect(store.meetings.transition(m.id, "closed", now)).toMatchObject({
+      status: "closed",
+      endedAt: now,
+    });
+    expect(store.meetings.live(m.roomId)).toBeUndefined();
+    expect(store.state().meetings).toEqual([]);
+  });
+
+  it("never reserves past the cap", () => {
+    const m = seedMeeting({ status: "running", turnCap: 5, turnsUsed: 3 });
+    expect(store.meetings.reserve(m.id, 3)).toBe(false);
+    expect(store.meetings.reserve(m.id, 2)).toBe(true);
+    expect(store.meetings.get(m.id)?.turnsUsed).toBe(5);
+  });
+
+  it("keeps a closed meeting visible while an owner action is open", () => {
+    const m = seedMeeting({ status: "closed" });
+    db.prepare(
+      `INSERT INTO meeting_records (id, meeting_id, kind, text, owner_is_human,
+         created_by_bot_id, created_at) VALUES (?, ?, 'action', 'Get keys', 1, 'bot', ?)`,
+    ).run(crypto.randomUUID(), m.id, now);
+    expect(store.state().meetings.map(({ id }) => id)).toEqual([m.id]);
+    expect(store.state().meetings[0]?.records[0]).toMatchObject({ ownerIsHuman: true });
   });
 });
