@@ -273,7 +273,7 @@ describe("a group room", () => {
     await expectTurns(2);
     engine.turns[1]?.finish(done("@ada your turn"));
     await expectTurns(3);
-    engine.turns[2]?.finish(done("@ben your turn"));
+    engine.turns[2]?.finish(done("@ben your turn again"));
     await vi.waitFor(() => expect(roomMessages(room)).toHaveLength(4));
     await new Promise((resolve) => setTimeout(resolve, 1200));
     expect(engine.turns.map(({ botId }) => botId)).toEqual([ada.id, ben.id, ada.id]);
@@ -541,5 +541,147 @@ describe("room settings", () => {
     expect(roomMessages(strict).map(({ hop }) => hop)).toEqual([0, 0, 1]);
     await exchange(loose, 3);
     expect(roomMessages(loose).map(({ hop }) => hop)).toEqual([0, 0, 1, 2]);
+  });
+});
+
+describe("loop breakers", () => {
+  const settle = (store: ReturnType<typeof openEventStore>) =>
+    vi.waitFor(() =>
+      expect(store.state().runs.filter(({ status }) => status === "Running")).toEqual([]),
+    );
+  const roomNow = (store: ReturnType<typeof openEventStore>, room: Room) =>
+    store.state().rooms.find(({ id }) => id === room.id);
+
+  // Ada answers hop 0 while Ben, Cy and Dan ring around her: Ben's third post trips the breaker.
+  async function ring() {
+    const booted = await boot();
+    const { createBot, createRoom, send, engine, expectTurns } = booted;
+    const bots = [
+      await createBot("Ada"),
+      await createBot("Ben"),
+      await createBot("Cy"),
+      await createBot("Dan"),
+    ];
+    const room = await createRoom(bots);
+    await send(room.id, "@ben start");
+    await expectTurns(1);
+    engine.turns[0]?.finish(done("@cy your go"));
+    await expectTurns(2);
+    engine.turns[1]?.finish(done("@dan your go"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@ben your go"));
+    await expectTurns(4);
+    engine.turns[3]?.finish(done("@cy again"));
+    await settle(booted.store);
+    return { ...booted, bots, room };
+  }
+
+  it("breaks a three-bot ring for 5 minutes and shows the room held", async () => {
+    const { store, room, roomMessages } = await ring();
+    expect(roomMessages(room).map(({ body }) => body)).toEqual([
+      "@ben start",
+      "@cy your go",
+      "@dan your go",
+      "@ben your go",
+    ]);
+    const held = roomNow(store, room);
+    expect(held?.held).toBe("ring");
+    expect(Date.parse(held?.heldUntil ?? "") - Date.now()).toBeGreaterThan(290_000);
+    expect(Date.parse(held?.heldUntil ?? "") - Date.now()).toBeLessThanOrEqual(300_000);
+  });
+
+  it("lets the bots go again once a human speaks", async () => {
+    const { store, room, send, engine, expectTurns, roomMessages } = await ring();
+    const events: string[] = [];
+    store.onEvent((event) => event.type === "room.changed" && events.push(String(event.room.held)));
+    await send(room.id, "@dan carry on");
+    expect(roomNow(store, room)?.held).toBeNull();
+    expect(events).toEqual(["null"]);
+    await expectTurns(5);
+    engine.turns[4]?.finish(done("@ada over to you"));
+    await expectTurns(6);
+    engine.turns[5]?.finish(done("On it."));
+    await settle(store);
+    expect(roomMessages(room).at(-1)).toMatchObject({ body: "On it.", hop: 1 });
+  });
+
+  it("stops bot-to-bot wakes after the escalation cap and shows the room waiting", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns, roomMessages, store } =
+      await boot();
+    const [ada, ben, cy, dan] = [
+      await createBot("Ada"),
+      await createBot("Ben"),
+      await createBot("Cy"),
+      await createBot("Dan"),
+    ];
+    const room = await createRoom([ada, ben, cy, dan]);
+    await command({ type: "update-room", roomId: room.id, limits: { escalationCap: 1 } });
+    await command({ type: "set-account-concurrency", accountId: "claude", maxConcurrentRuns: 2 });
+    await send(room.id, "@ada think it over");
+    await expectTurns(1);
+    await send(room.id, "@ben start");
+    await expectTurns(2);
+    verdicts.botPost = () => ({ verdict: "refuse", reason: "post_budget" });
+    engine.turns[1]?.finish(done("@cy your go"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@dan your go"));
+    await vi.waitFor(() => expect(roomNow(store, room)?.held).toBe("escalation"));
+    expect(roomNow(store, room)?.heldUntil).toBeNull();
+    verdicts.botPost = allow;
+    engine.turns[0]?.finish(done("@cy have a look"));
+    await vi.waitFor(() =>
+      expect(roomMessages(room).at(-1)).toMatchObject({ body: "@cy have a look", hop: 0 }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(engine.turns).toHaveLength(3);
+  });
+
+  it("drops a bot's duplicate post in the same room", async () => {
+    const { createBot, createRoom, send, engine, expectTurns, roomMessages, store } = await boot();
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    const room = await createRoom([ada, ben]);
+    await send(room.id, "@ada start");
+    await expectTurns(1);
+    engine.turns[0]?.finish(done("@ben ok?"));
+    await expectTurns(2);
+    engine.turns[1]?.finish(done("@ada ok"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@ben ok?"));
+    await settle(store);
+    expect(roomMessages(room).map(({ body }) => body)).toEqual([
+      "@ada start",
+      "@ben ok?",
+      "@ada ok",
+    ]);
+    expect(roomNow(store, room)?.held).toBeNull();
+  });
+
+  it("never gates a reply the owner asked for", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns, roomMessages, store } =
+      await boot();
+    const bots = [
+      await createBot("Ada"),
+      await createBot("Ben"),
+      await createBot("Cy"),
+      await createBot("Dan"),
+    ];
+    const room = await createRoom(bots);
+    await command({ type: "set-account-concurrency", accountId: "claude", maxConcurrentRuns: 2 });
+    await send(room.id, "@ada think it over");
+    await expectTurns(1);
+    await send(room.id, "@ben start");
+    await expectTurns(2);
+    engine.turns[1]?.finish(done("@cy your go"));
+    await expectTurns(3);
+    engine.turns[2]?.finish(done("@dan your go"));
+    await expectTurns(4);
+    engine.turns[3]?.finish(done("@ben your go"));
+    await expectTurns(5);
+    engine.turns[4]?.finish(done("@cy again"));
+    await vi.waitFor(() => expect(roomNow(store, room)?.held).toBe("ring"));
+    engine.turns[0]?.finish(done("Here is my answer."));
+    await vi.waitFor(() =>
+      expect(roomMessages(room).at(-1)).toMatchObject({ body: "Here is my answer.", hop: 0 }),
+    );
   });
 });

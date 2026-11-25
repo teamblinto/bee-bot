@@ -4,8 +4,11 @@ import {
   backoffUntil,
   checkBotPost,
   checkDelegation,
+  checkDuplicate,
+  checkEscalation,
   checkFollowUp,
   checkMentionWake,
+  checkRing,
   checkRoutineCreate,
   checkTreeBudget,
   checkWakeCreate,
@@ -122,6 +125,32 @@ describe("checkBotPost", () => {
     expect(
       checkBotPost(limits, { botPosts: 2, windowStartedAt: startedAt, now: at(5 * minute) }),
     ).toEqual(allow);
+  });
+});
+
+describe("room loop breakers", () => {
+  const posts = (...botIds: string[]) => botIds.map((botId, i) => ({ botId, at: at(i * 10_000) }));
+
+  it("trips the ring on A→B→C→A within 2 minutes and not on A→B→A or past the window", () => {
+    const ring = { recent: posts("a", "b", "c"), botId: "a", now: at(30_000) };
+    expect(checkRing(limits, ring)).toEqual(refuse("ring"));
+    expect(
+      checkRing(limits, { recent: posts("a", "b", "b"), botId: "a", now: at(30_000) }),
+    ).toEqual(allow);
+    expect(checkRing(limits, { ...ring, now: at(2 * minute + 1) })).toEqual(allow);
+  });
+
+  it("refuses an identical post within 60 seconds, and allows it after", () => {
+    expect(checkDuplicate(limits, { lastSameAt: startedAt, now: at(59_999) })).toEqual(
+      refuse("duplicate"),
+    );
+    expect(checkDuplicate(limits, { lastSameAt: startedAt, now: at(minute) })).toEqual(allow);
+    expect(checkDuplicate(limits, { lastSameAt: null, now })).toEqual(allow);
+  });
+
+  it("holds after 2 refusals", () => {
+    expect(checkEscalation(limits, { escalations: 1 })).toEqual(allow);
+    expect(checkEscalation(limits, { escalations: 2 })).toEqual(refuse("escalation"));
   });
 });
 

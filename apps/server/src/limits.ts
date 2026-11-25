@@ -105,6 +105,42 @@ export function checkBotPost(
   return input.botPosts >= limits.posts ? refuse("post_budget") : allow;
 }
 
+// `recent` is the room's bot posts, oldest first. A ring is the bot coming back within the window
+// after at least two other bots have posted.
+export function checkRing(
+  limits: Limits,
+  input: { recent: Array<{ botId: string; at: string }>; botId: string; now: string },
+): Verdict {
+  const since = Date.parse(input.now) - limits.ringWindowMs;
+  const first = input.recent.findIndex(
+    ({ botId, at }) => botId === input.botId && Date.parse(at) >= since,
+  );
+  if (first === -1) return allow;
+  const others = new Set(
+    input.recent
+      .slice(first + 1)
+      .map(({ botId }) => botId)
+      .filter((botId) => botId !== input.botId),
+  );
+  return others.size >= 2 ? refuse("ring") : allow;
+}
+
+// Refused posts since the last human message.
+export function checkEscalation(limits: Limits, input: { escalations: number }): Verdict {
+  return input.escalations >= limits.escalationCap ? refuse("escalation") : allow;
+}
+
+// `lastSameAt` is when the bot last posted the same trimmed body in the room.
+export function checkDuplicate(
+  limits: Limits,
+  input: { lastSameAt: string | null; now: string },
+): Verdict {
+  if (input.lastSameAt === null) return allow;
+  return Date.parse(input.now) - Date.parse(input.lastSameAt) < limits.dedupeWindowMs
+    ? refuse("duplicate")
+    : allow;
+}
+
 // Milliseconds to hold the wake, 0 for none. A human's input, an approval among it, never waits.
 export function noProgressDelay(input: { noProgressRuns: number; source: WakeSource }): number {
   if (input.source === "human" || input.source === "approval" || input.noProgressRuns < 2) return 0;

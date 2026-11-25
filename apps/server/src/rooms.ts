@@ -1,7 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { LimitOverrides, type Limits, type ResponderMode, Room } from "@beebot/contracts";
+import { LimitOverrides, type ResponderMode, Room } from "@beebot/contracts";
 import { z } from "zod";
 
 import { clampLimits } from "./limits.ts";
@@ -15,13 +15,18 @@ const RoomRow = Room.omit({ members: true, held: true, heldUntil: true }).extend
 });
 const MemberRow = z.object({ botId: z.string() });
 const NamedMember = z.object({ id: z.string(), name: z.string() });
-const Round = z.object({ botPosts: z.number(), windowStartedAt: z.string().nullable() });
+const Round = z.object({
+  botPosts: z.number(),
+  windowStartedAt: z.string().nullable(),
+  escalations: z.number(),
+  ringUntil: z.string().nullable(),
+});
 
 // A member who leaves keeps their scope row, which their past runs and wakes point at.
 export function openRooms(
   db: DatabaseSync,
   { transaction, emit }: StoreTx,
-  workspaceLimits: () => Limits,
+  readLimits: () => LimitOverrides,
 ) {
   const roomColumns = `r.id, r.kind, r.name, r.default_bot_id AS defaultBotId,
     r.created_at AS createdAt, r.responder_mode AS responderMode, r.lead_bot_id AS leadBotId,
@@ -64,14 +69,31 @@ export function openRooms(
     "UPDATE rooms SET lead_bot_id = NULL WHERE id = ? AND lead_bot_id = ?",
   );
   const selectRound = db.prepare(
-    `SELECT bot_posts AS botPosts, window_started_at AS windowStartedAt
+    `SELECT bot_posts AS botPosts, window_started_at AS windowStartedAt, escalations,
+       ring_until AS ringUntil
      FROM room_rounds WHERE room_id = ?`,
   );
   const resetRound = db.prepare(
     `INSERT INTO room_rounds (room_id, chain_id, bot_posts, window_started_at, updated_at)
      VALUES (?, ?, 0, NULL, ?)
      ON CONFLICT (room_id) DO UPDATE SET chain_id = excluded.chain_id, bot_posts = 0,
-       window_started_at = NULL, updated_at = excluded.updated_at`,
+       window_started_at = NULL, escalations = 0, ring_until = NULL,
+       updated_at = excluded.updated_at`,
+  );
+  const addRefusal = db.prepare(
+    `INSERT INTO room_rounds (room_id, chain_id, bot_posts, escalations, updated_at)
+     VALUES (?, NULL, 0, 1, ?)
+     ON CONFLICT (room_id) DO UPDATE SET escalations = escalations + 1,
+       updated_at = excluded.updated_at`,
+  );
+  const setRingUntil = db.prepare(
+    `INSERT INTO room_rounds (room_id, chain_id, bot_posts, ring_until, updated_at)
+     VALUES (?, NULL, 0, ?, ?)
+     ON CONFLICT (room_id) DO UPDATE SET ring_until = excluded.ring_until,
+       updated_at = excluded.updated_at`,
+  );
+  const clearHold = db.prepare(
+    "UPDATE room_rounds SET escalations = 0, ring_until = NULL, updated_at = ? WHERE room_id = ?",
   );
   const addBotPost = db.prepare(
     `INSERT INTO room_rounds (room_id, chain_id, bot_posts, window_started_at, updated_at)
@@ -89,7 +111,8 @@ export function openRooms(
 
   const toRoom = (row: unknown): Room => {
     const { ringUntil, escalations, ...room } = RoomRow.parse(row);
-    const escalated = escalations > 0 && escalations >= workspaceLimits().escalationCap;
+    const { escalationCap } = clampLimits({ ...readLimits(), ...room.limits });
+    const escalated = escalations > 0 && escalations >= escalationCap;
     const ringing = ringUntil !== null && ringUntil > new Date().toISOString();
     return {
       ...room,
@@ -110,6 +133,16 @@ export function openRooms(
     return room;
   };
 
+  // Runs inside the caller's transaction, and tells clients when the room's hold changed.
+  const holding = (roomId: string, work: () => void) => {
+    const before = getRoom(roomId);
+    work();
+    const after = getRoom(roomId);
+    if (before && after && (before.held !== after.held || before.heldUntil !== after.heldUntil)) {
+      emit({ type: "room.changed", room: after });
+    }
+  };
+
   const groupRoom = (id: string) => {
     const room = getRoom(id);
     return room?.kind === "group" ? room : undefined;
@@ -122,13 +155,25 @@ export function openRooms(
     namedMembers: (roomId: string): Member[] =>
       z.array(NamedMember).parse(selectNamedMembers.all(roomId)),
 
-    // Round state: bot posts since the room's last human message. These join the caller's
-    // transaction.
+    // Round state: bot posts and refused posts since the room's last human message. These join
+    // the caller's transaction.
     round: (roomId: string) =>
-      Round.parse(selectRound.get(roomId) ?? { botPosts: 0, windowStartedAt: null }),
-    startRound: (roomId: string, chainId: string, now: string) => {
-      resetRound.run(roomId, chainId, now);
-    },
+      Round.parse(
+        selectRound.get(roomId) ?? {
+          botPosts: 0,
+          windowStartedAt: null,
+          escalations: 0,
+          ringUntil: null,
+        },
+      ),
+    startRound: (roomId: string, chainId: string, now: string) =>
+      holding(roomId, () => resetRound.run(roomId, chainId, now)),
+    noteRefusal: (roomId: string) =>
+      holding(roomId, () => addRefusal.run(roomId, new Date().toISOString())),
+    tripRing: (roomId: string, until: string) =>
+      holding(roomId, () => setRingUntil.run(roomId, until, new Date().toISOString())),
+    resetHold: (roomId: string) =>
+      transaction(() => holding(roomId, () => clearHold.run(new Date().toISOString(), roomId))),
     countBotPost: (roomId: string, now: string) => {
       addBotPost.run(roomId, now, now);
     },

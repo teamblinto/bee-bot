@@ -16,6 +16,7 @@ import {
   type EngineLane,
   type EventBody,
   LimitOverrides,
+  type LimitRefusal,
   maxAvatarSeed,
   mentionKey,
   MemoryItem,
@@ -44,7 +45,15 @@ import { openEffects } from "./effects.ts";
 import { openEgress } from "./egress.ts";
 import { type BotLaunch, workingFolder } from "./engine.ts";
 import { openIngest } from "./ingest.ts";
-import { checkBotPost, checkMentionWake, clampLimits } from "./limits.ts";
+import {
+  checkBotPost,
+  checkDuplicate,
+  checkEscalation,
+  checkMentionWake,
+  checkRing,
+  clampLimits,
+  type Verdict,
+} from "./limits.ts";
 import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { outwardTool, type RecoveryVerdict } from "./recovery.ts";
@@ -1540,6 +1549,14 @@ export function openEventStore(dataDir: string) {
     `SELECT 1 FROM messages
      WHERE room_id = ? AND author = 'bot' AND bot_id = ? AND created_at >= ? LIMIT 1`,
   );
+  // Since the room's last human message, which starts the bots over.
+  const selectRecentBotPosts = db.prepare(
+    `SELECT bot_id AS botId, body, created_at AS at FROM messages
+     WHERE room_id = $room AND author = 'bot' AND bot_id IS NOT NULL AND created_at >= $since
+       AND created_at > COALESCE(
+         (SELECT MAX(created_at) FROM messages WHERE room_id = $room AND author = 'human'), '')
+     ORDER BY created_at, rowid`,
+  );
   const selectHistory = db.prepare(
     `SELECT author, body FROM messages WHERE room_id = ?
        AND (event_seq <= ? OR (author = 'bot' AND (bot_id IS NULL OR bot_id = ?)))
@@ -2026,6 +2043,56 @@ export function openEventStore(dataDir: string) {
   const limitsFor = (roomId: string) =>
     clampLimits({ ...readLimits(), ...rooms.getRoom(roomId)?.limits });
 
+  const RecentPost = z.object({ botId: z.string(), body: z.string(), at: z.string() });
+  const heldByEscalation = (roomId: string) =>
+    checkEscalation(limitsFor(roomId), rooms.round(roomId)).verdict === "refuse";
+
+  // Loop breakers for a group post. A reply the owner asked for (hop 0) always posts. Runs inside
+  // the caller's transaction.
+  function roomPostVerdict(
+    roomId: string,
+    botId: string,
+    body: string,
+    hop: number,
+    now: string,
+  ): Verdict {
+    if (hop === 0) {
+      return { verdict: "allow" };
+    }
+    const limits = limitsFor(roomId);
+    const round = rooms.round(roomId);
+    const escalated = checkEscalation(limits, round);
+    if (escalated.verdict === "refuse") {
+      return escalated;
+    }
+    const verdict = ((): Verdict => {
+      if (round.ringUntil !== null && round.ringUntil > now) {
+        return { verdict: "refuse", reason: "ring" };
+      }
+      const since = new Date(
+        Date.parse(now) - Math.max(limits.ringWindowMs, limits.dedupeWindowMs),
+      ).toISOString();
+      const recent = z.array(RecentPost).parse(selectRecentBotPosts.all({ room: roomId, since }));
+      const trimmed = body.trim();
+      const lastSameAt =
+        recent.findLast((post) => post.botId === botId && post.body.trim() === trimmed)?.at ?? null;
+      const duplicate = checkDuplicate(limits, { lastSameAt, now });
+      if (duplicate.verdict === "refuse") {
+        return duplicate;
+      }
+      const ring = checkRing(limits, { recent, botId, now });
+      if (ring.verdict === "refuse") {
+        rooms.tripRing(roomId, new Date(Date.parse(now) + limits.ringBreakMs).toISOString());
+        return ring;
+      }
+      return checkBotPost(limits, { ...round, now });
+    })();
+    if (verdict.verdict === "refuse") {
+      rooms.noteRefusal(roomId);
+    }
+    return verdict;
+  }
+
   // Where the bot's engine finds a file: its box's inbox, or the inbox in its working folder.
   const inboxPath = (botId: string, file: AttachmentRef) => {
     const bot = getBot(botId);
@@ -2465,7 +2532,7 @@ export function openEventStore(dataDir: string) {
   // A bot's group reply wakes only the bots it names, one hop further along its chain. A run with
   // no chain starts one under its own ID, as delegation does.
   function routeBotReply(message: ChatMessage, run: RunRow) {
-    if (message.botId === null) {
+    if (message.botId === null || heldByEscalation(message.roomId)) {
       return;
     }
     const routed = route({
@@ -2766,7 +2833,7 @@ export function openEventStore(dataDir: string) {
 
   const tx: StoreTx = { transaction, emit };
   const effects = openEffects(db, tx);
-  const rooms = openRooms(db, tx, limits);
+  const rooms = openRooms(db, tx, readLimits);
   const tasks = openTasks(db, tx, {
     post: ({ id, roomId, botId, body, chainId, hop }) =>
       addMessage({
@@ -3661,10 +3728,10 @@ export function openEventStore(dataDir: string) {
             (!run.startedAt || !selectPostedSince.get(roomId, run.botId, run.startedAt));
           // A reply the owner asked for always posts. Bots prompting bots spend the round.
           const gated =
+            !silent &&
             replied &&
             group &&
-            run.hop > 0 &&
-            checkBotPost(limitsFor(roomId), { ...rooms.round(roomId), now }).verdict === "refuse";
+            roomPostVerdict(roomId, run.botId, body, run.hop, now).verdict === "refuse";
           if (!silent && !gated) {
             posted = true;
             const attachments = (finished.attachmentIds ?? []).flatMap(
@@ -3733,7 +3800,7 @@ export function openEventStore(dataDir: string) {
     // Mid-turn, a group post routes and spends the round as a final reply does. A DM never routes.
     sendBotMessage: (runId: string, roomId: string, body: string) =>
       transaction(
-        (): { messageId: string } | { refused: "run_ended" | "not_in_room" | "post_budget" } => {
+        (): { messageId: string } | { refused: "run_ended" | "not_in_room" | LimitRefusal } => {
           const row = selectRun.get(runId);
           const run = row && RunRow.parse(row);
           if (!run || run.status !== "Running") {
@@ -3744,12 +3811,11 @@ export function openEventStore(dataDir: string) {
           }
           const now = new Date().toISOString();
           const group = isGroup(roomId);
-          if (
-            group &&
-            run.hop > 0 &&
-            checkBotPost(limitsFor(roomId), { ...rooms.round(roomId), now }).verdict === "refuse"
-          ) {
-            return { refused: "post_budget" };
+          const verdict = group
+            ? roomPostVerdict(roomId, run.botId, body, run.hop, now)
+            : { verdict: "allow" as const };
+          if (verdict.verdict === "refuse") {
+            return { refused: verdict.reason };
           }
           const message: ChatMessage = {
             id: `message:${NodeCrypto.randomUUID()}`,
