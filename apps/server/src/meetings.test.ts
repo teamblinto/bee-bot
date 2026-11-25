@@ -531,6 +531,32 @@ describe("a pass", () => {
     expect(dueBots()).not.toContain(bo.id);
   });
 
+  it("resumes the facilitator once when the last participant is archived mid-pass", () => {
+    const { ava, bo, cy, dee, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id);
+    finish(start(bo.id).id);
+    finish(start(cy.id).id);
+    store.archiveBot(dee.id);
+    expect(dueBots()).toEqual([ava.id]);
+  });
+
+  it("resumes the facilitator once when the last participant is stopped mid-pass", () => {
+    const { ava, bo, cy, dee, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id);
+    finish(start(bo.id).id);
+    store.stopBot(cy.id);
+    expect(dueBots()).toEqual([dee.id]);
+    const deeWake = due().find(({ botId }) => botId === dee.id);
+    if (!deeWake) {
+      throw new Error("no wake");
+    }
+    store.queueRun(deeWake);
+    store.stopBot(dee.id);
+    expect(dueBots()).toEqual([ava.id]);
+  });
+
   it("refuses a third round, and a pass that the remaining turns can't cover", () => {
     const { ava1, id } = running();
     expect(call(ava1, "next_round", { prompt: "More?" }).reason).toBe("item_not_active");

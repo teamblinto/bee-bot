@@ -3266,7 +3266,7 @@ export function openEventStore(dataDir: string) {
     archiveBot: (id: string) =>
       transaction(() => {
         if (archiveRow.run(new Date().toISOString(), id).changes > 0) {
-          cancelPendingWakes.run(id);
+          meetings.cancelWakes(id, () => cancelPendingWakes.run(id));
           waits.cancelWaits(id).forEach(tasks.releaseIfUnheld);
           const bot = BotRow.parse(selectBot.get(id));
           emit({ type: "bot.archived", bot });
@@ -3942,13 +3942,14 @@ export function openEventStore(dataDir: string) {
     stopBot: (botId: string) =>
       transaction(() => {
         tasks.cancelWaiting(botId);
-        cancelPendingWakes.run(botId);
+        meetings.cancelWakes(botId, () => cancelPendingWakes.run(botId));
         waits.cancelWaits(botId).forEach(tasks.releaseIfUnheld);
         tasks.refuseQueued(botId);
         for (const row of cancelParked.all(new Date().toISOString(), botId)) {
           const parked = RunRow.parse(row);
           recordRun(parked);
           tasks.settleRun(parked, "cancelled", "");
+          meetings.settleRun(parked, "cancelled");
         }
         tasks.cancelUnstarted(botId);
         const row = selectActiveRun.get(botId);
@@ -3964,6 +3965,7 @@ export function openEventStore(dataDir: string) {
         );
         recordRun(ended);
         tasks.settleRun(ended, "cancelled", "");
+        meetings.settleRun(ended, "cancelled");
         return undefined;
       }),
 
@@ -4172,7 +4174,7 @@ export function openEventStore(dataDir: string) {
             continue;
           }
           if (verdict !== "wait") {
-            cancelPendingWakes.run(run.botId);
+            meetings.cancelWakes(run.botId, () => cancelPendingWakes.run(run.botId));
           }
           if (verdict !== "hold" && run.inputHighSeq !== null) {
             advanceAck.run(run.inputHighSeq, run.scopeId);
@@ -4182,8 +4184,10 @@ export function openEventStore(dataDir: string) {
             tasks.promoteNextTask(run.botId);
           } else if (verdict === "wait") {
             tasks.settleRun(run, "done", "");
+            meetings.settleRun(run, "done");
           } else {
             tasks.settleRun(run, "failed", "");
+            meetings.settleRun(run, "failed");
             addRunNotice(
               run,
               actedOnce(run.id)

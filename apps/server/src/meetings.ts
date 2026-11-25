@@ -255,6 +255,10 @@ export function openMeetings(
      LIMIT 1`,
   );
   const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
+  const selectBotMeetingWakes = db.prepare(
+    `SELECT id, chain_id AS chainId FROM wakes
+     WHERE bot_id = ? AND source = 'meeting' AND status = 'pending' AND chain_id IS NOT NULL`,
+  );
   const selectOpening = db.prepare(
     "SELECT body FROM messages WHERE chain_id = ? AND hop = 0 AND author = 'human' LIMIT 1",
   );
@@ -346,6 +350,15 @@ export function openMeetings(
       attended,
       { chainId: meeting.id, hop: 0, depth: 0 },
     );
+
+  const endPassIfDone = (passChain: string, wakeId: string) => {
+    const done = PassRow.optional().parse(selectByPass.get(passChain));
+    const passing = done && get(done.id);
+    if (passing && selectPassBusy.get(passChain) === undefined) {
+      const { attended } = Attended.parse(selectWakeAttended.get(wakeId));
+      resume(passing, done.passes, attended);
+    }
+  };
 
   // One chain per pass, so selectEarlierInChain runs its wakes one at a time, in order.
   const pass = (meeting: Meeting, body: string, botIds: string[], attended: boolean) => {
@@ -450,12 +463,18 @@ export function openMeetings(
         const why = `${nameOf(run.botId)} couldn't start the meeting (${run.reason ?? "refused"}).`;
         cancel(meeting, why, new Date().toISOString());
       }
-      const passChain = run.chainId ?? "";
-      const done = PassRow.optional().parse(selectByPass.get(passChain));
-      const passing = done && get(done.id);
-      if (passing && selectPassBusy.get(passChain) === undefined) {
-        const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
-        resume(passing, done.passes, attended);
+      endPassIfDone(run.chainId ?? "", run.wakeId);
+    },
+
+    // Runs inside the caller's transaction. A cancelled wake makes no run, so no settleRun
+    // would end its pass. The facilitator holds no pass-chain wake, so it can't wake itself here.
+    cancelWakes: (botId: string, cancel: () => void) => {
+      const dropped = z
+        .array(z.object({ id: z.string(), chainId: z.string() }))
+        .parse(selectBotMeetingWakes.all(botId));
+      cancel();
+      for (const { id, chainId } of dropped) {
+        endPassIfDone(chainId, id);
       }
     },
 
