@@ -222,21 +222,15 @@ export function createTeam(deps: {
     const found = store.childrenOf(lead.id).find(named(bot));
     return found && store.getBot(found.id);
   };
-  const reachable = (runId: string, lead: Bot, bot: string) => {
-    const grant = store.tasks.runGrant(runId);
-    return (
-      grant &&
-      [...grant.children, ...grant.roommates].find(
-        (candidate) => candidate.id !== lead.id && named(bot)(candidate),
-      )
+  const reachable = (lead: Bot, bot: string) =>
+    [...store.childrenOf(lead.id), ...store.tasks.roommatesOf(lead.id)].find(
+      (candidate) => candidate.id !== lead.id && named(bot)(candidate),
     );
-  };
 
   // The request as it would be applied now, with bots by id, or why it can't be. Run when asked and
   // again when applied, since the world can move in between.
   function resolve(
     kind: TeamRequestKind,
-    runId: string,
     lead: Bot,
     args: unknown,
   ): string | Record<string, unknown> {
@@ -261,7 +255,7 @@ export function createTeam(deps: {
       }
       case "create_room": {
         const room = CreateRoom.parse(args);
-        const members = room.members.flatMap((bot) => reachable(runId, lead, bot) ?? []);
+        const members = room.members.flatMap((bot) => reachable(lead, bot) ?? []);
         if (members.length < room.members.length) {
           return "not_allowed";
         }
@@ -282,7 +276,7 @@ export function createTeam(deps: {
         if (room?.kind !== "group" || !room.members.includes(lead.id)) {
           return "not_in_room";
         }
-        const bot = reachable(runId, lead, invite.bot);
+        const bot = reachable(lead, invite.bot);
         return bot ? { room_id: room.id, bot: bot.id } : "not_allowed";
       }
     }
@@ -342,7 +336,7 @@ export function createTeam(deps: {
     if (!lead || lead.archivedAt) {
       return failed("lead_gone");
     }
-    const payload = resolve(request.kind, request.runId, lead, request.payload);
+    const payload = resolve(request.kind, lead, request.payload);
     if (typeof payload === "string") {
       return failed(payload);
     }
@@ -419,7 +413,7 @@ export function createTeam(deps: {
       if (replayed) {
         return answerFor(replayed);
       }
-      const payload = resolve(kind, run.id, lead, parsed.data);
+      const payload = resolve(kind, lead, parsed.data);
       if (typeof payload === "string") {
         return refused(payload);
       }

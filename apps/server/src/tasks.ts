@@ -668,6 +668,8 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       };
     },
 
+    roommatesOf: (botId: string) => z.array(BotRef).parse(selectRoommates.all(botId)),
+
     // A run's place in its chain, ended or not.
     runPoint: (runId: string) => GrantRow.optional().parse(selectRunPoint.get(runId)),
 

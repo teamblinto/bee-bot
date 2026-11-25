@@ -703,7 +703,19 @@ describe("team requests", () => {
     let grandId = "";
     let answer: Record<string, unknown> = {};
     const { s } = await leadTurn(
-      async (call) => {
+      async (call, runId) => {
+        db.prepare(
+          `INSERT INTO tasks (id, kind, chain_id, hop, depth, parent_run_id, requester_bot_id,
+             owner_bot_id, room_id, goal, status, delivery_key, pending_json, root_task_id, origin,
+             blocked_by_json, created_at, updated_at)
+           VALUES ('queued-task', 'delegate', ?1, 1, 1, ?1, ?2, ?3, ?4, 'Later', 'queued',
+             'queued-task', '{}', 'queued-task', 'human', '[]', 'now', 'now')`,
+        ).run(
+          runId,
+          store?.getBot(childId)?.parentBotId ?? "",
+          childId,
+          store?.getBot(childId)?.roomId ?? "",
+        );
         answer = await call("archive_bot", { bot_id: "Kid" });
       },
       {
@@ -717,6 +729,9 @@ describe("team requests", () => {
     expect(answer).toMatchObject({ status: "applied", botId: childId });
     expect(s.getBot(childId)?.archivedAt).not.toBeNull();
     expect(s.getBot(grandId)?.archivedAt).toBeNull();
+    expect(rows("SELECT status FROM tasks WHERE id = 'queued-task'")).toEqual([
+      { status: "refused" },
+    ]);
   });
 
   it("apply re-checks the lead and the child's parent", async () => {
@@ -810,5 +825,46 @@ describe("team requests", () => {
     ]);
     expect(s.rooms.getRoom(rooms.in)?.members).toContain(kidId);
     expect(s.rooms.getRoom(rooms.out)?.members).not.toContain(kidId);
+  });
+
+  it("applies room and create requests on the owner's word after the lead's turn has ended", async () => {
+    const ids = { kid: "", rae: "", old: "" };
+    const answers: Array<Record<string, unknown>> = [];
+    const { s, lead, decide } = await leadTurn(
+      async (call) => {
+        answers.push(await call("create_room", { name: "Crew", members: ["Kid", "Rae"] }));
+        answers.push(await call("invite_to_room", { room_id: ids.old, bot: "Kid" }));
+        answers.push(
+          await call("create_bot", { ...createArgs, join_rooms: [ids.old], first_task: "Tidy" }),
+        );
+      },
+      {
+        before: (s, leadId) => {
+          ids.kid = kid(s, leadId).id;
+          ids.rae = stranger(s, "Rae").id;
+          ids.old =
+            s.rooms.createGroupRoom({ name: "Old", memberIds: [leadId, ids.rae] })?.id ?? "";
+        },
+      },
+    );
+    expect(answers.map(({ status }) => status)).toEqual(Array(3).fill("awaiting_approval"));
+    await vi.waitFor(() =>
+      expect(
+        rows(`SELECT id FROM runs WHERE bot_id = '${lead.id}' AND status = 'Running'`),
+      ).toEqual([]),
+    );
+    const results = [];
+    for (const { request_id } of answers) {
+      const decided = await decide(request_id, "apply");
+      expect(decided).toMatchObject({ status: 200, body: { status: "applied" } });
+      results.push(s.team.get(String(request_id))?.result ?? {});
+    }
+    const [made, invited, created] = results;
+    const childId = String(created?.botId);
+    expect(s.rooms.getRoom(String(made?.roomId))?.members).toEqual([lead.id, ids.kid, ids.rae]);
+    expect(invited).toEqual({ roomId: ids.old });
+    expect(s.rooms.getRoom(ids.old)?.members).toEqual([lead.id, ids.rae, ids.kid, childId]);
+    expect(created).toEqual({ botId: childId, firstTask: { taskId: expect.any(String) } });
+    expect(s.getBot(childId)).toMatchObject({ parentBotId: lead.id });
   });
 });
