@@ -628,6 +628,7 @@ export async function startServer({
     turnTimeoutMs,
     clock,
     boxesReady,
+    attended: () => subscribers.size > 0,
     onStopBot: (botId) => void browser.stop(botId),
     // The owner may have narrowed the allowlist since the wait began: then it just times out.
     waitProbes: {

@@ -1,7 +1,14 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { AgendaItem, keepsMeeting, Meeting, MeetingRecord, MeetingStatus } from "@beebot/contracts";
+import {
+  AgendaItem,
+  keepsMeeting,
+  Meeting,
+  MeetingRecord,
+  MeetingStatus,
+  type Run,
+} from "@beebot/contracts";
 import { z } from "zod";
 
 import type { StoreTx } from "./store.ts";
@@ -29,11 +36,14 @@ export type MeetingRefusal =
   | "record_cap";
 
 export type MeetingDelivery = {
-  post(m: { id: string; roomId: string; botId: string; body: string } & ChainPoint): void;
+  post(m: { id: string; roomId: string; botId: string | null; body: string } & ChainPoint): void;
+  // False when the bot has no live scope in the room or is archived.
+  wake(roomId: string, botId: string, key: string, attended: boolean, chain: ChainPoint): boolean;
 };
 
 export const maxDaysAhead = 7;
 const maxLivePerFacilitator = 3;
+const openGraceMs = 60 * 60_000;
 
 // The model's clock can lag a little, so a time up to a minute past still counts as now.
 export const badTime = (at: string, now: string) =>
@@ -117,6 +127,18 @@ export function openMeetings(
     `SELECT b.name, r.id AS dmRoomId FROM bots b
      JOIN rooms r ON r.kind = 'dm' AND r.default_bot_id = b.id WHERE b.id = ?`,
   );
+  const selectDue = db.prepare(
+    `SELECT ${columns} WHERE status = 'scheduled' AND scheduled_at <= ? ORDER BY scheduled_at`,
+  );
+  const selectStale = db.prepare(
+    `SELECT ${columns} WHERE status = 'open' AND scheduled_at <= ? ORDER BY scheduled_at`,
+  );
+  const startMeeting = db.prepare(
+    `UPDATE meetings SET status = 'running', turn_cap = ?, turns_used = 1, started_at = ?,
+       ends_at = ?, updated_at = ?
+     WHERE id = ? AND status = 'open' RETURNING id`,
+  );
+  const selectScopeRoom = db.prepare("SELECT room_id AS roomId FROM scopes WHERE id = ?");
   const selectOpening = db.prepare(
     "SELECT body FROM messages WHERE chain_id = ? AND hop = 0 AND author = 'human' LIMIT 1",
   );
@@ -154,9 +176,123 @@ export function openMeetings(
     return reserved;
   };
 
+  const notice = (meeting: Meeting, body: string) =>
+    deliver.post({
+      id: `notice:${NodeCrypto.randomUUID()}`,
+      roomId: meeting.roomId,
+      botId: null,
+      body,
+      chainId: meeting.id,
+      hop: 0,
+      depth: 0,
+    });
+  const cancel = (meeting: Meeting, why: string, now: string) => {
+    if (!("refused" in transitionIn(meeting.id, "cancelled", now))) {
+      notice(meeting, why);
+    }
+  };
+  const nameOf = (botId: string) => Named.parse(selectBotName.get(botId)).name;
+
+  const open = (meeting: Meeting, now: string, attended: boolean) => {
+    if ("refused" in transitionIn(meeting.id, "open", now)) {
+      return;
+    }
+    notice(meeting, `Meeting "${meeting.title}" is starting.`);
+    const chain = { chainId: meeting.id, hop: 0, depth: 0 };
+    const key = `meeting:${meeting.id}:open`;
+    if (!deliver.wake(meeting.roomId, meeting.facilitatorBotId, key, attended, chain)) {
+      const name = nameOf(meeting.facilitatorBotId);
+      cancel(meeting, `${name} couldn't start the meeting (not in the room).`, now);
+    }
+  };
+
+  // Each row in its own transaction, so one bad row can't block the others.
+  const eachRow = (rows: unknown[], act: (meeting: Meeting) => void) => {
+    for (const row of rows) {
+      try {
+        const meeting = withRecords(row);
+        if (meeting) {
+          transaction(() => act(meeting));
+        }
+      } catch (error) {
+        console.error(`beebotd: meeting ${MeetingRow.safeParse(row).data?.id} failed`, error);
+      }
+    }
+  };
+
+  // Facilitator and participants of the room's live meeting, from its opening.
+  const takesPart = (roomId: string, botId: string) => {
+    const meeting = liveIn(roomId);
+    return (
+      (meeting?.status === "open" || meeting?.status === "running") &&
+      (meeting.facilitatorBotId === botId || meeting.participants.includes(botId))
+    );
+  };
+
   return {
     get,
     live: liveIn,
+    takesPart,
+
+    tick: (now: string, attended: boolean) => {
+      const stale = new Date(Date.parse(now) - openGraceMs).toISOString();
+      eachRow(selectStale.all(stale), (meeting) =>
+        cancel(
+          meeting,
+          `Meeting "${meeting.title}" didn't start within an hour, so it's cancelled.`,
+          now,
+        ),
+      );
+      eachRow(selectDue.all(now), (meeting) => open(meeting, now, attended));
+    },
+
+    // Runs inside claimRun's transaction: the meeting starts when its facilitator's turn does.
+    claimed: (run: { botId: string }, roomId: string, now: string) => {
+      const meeting = liveIn(roomId);
+      if (meeting?.status !== "open" || meeting.facilitatorBotId !== run.botId) {
+        return;
+      }
+      const cap = turnCap(
+        meeting.participants.length,
+        meeting.agenda.length,
+        meeting.maxRoundsPerItem,
+      );
+      const endsAt = new Date(Date.parse(now) + meeting.timeboxMin * 60_000).toISOString();
+      if (startMeeting.get(cap, now, endsAt, now, meeting.id)) {
+        changed(meeting.id);
+      }
+    },
+
+    // Runs inside the caller's transaction, next to tasks.settleRun.
+    settleRun: (
+      run: Pick<Run, "botId" | "chainId" | "reason"> & { scopeId: string },
+      status: "done" | "failed" | "cancelled" | "refused",
+    ) => {
+      const scope = z
+        .object({ roomId: z.string() })
+        .optional()
+        .parse(selectScopeRoom.get(run.scopeId));
+      const meeting = scope && liveIn(scope.roomId);
+      if (
+        status === "refused" &&
+        meeting?.status === "open" &&
+        meeting.facilitatorBotId === run.botId &&
+        run.chainId === meeting.id
+      ) {
+        const why = `${nameOf(run.botId)} couldn't start the meeting (${run.reason ?? "refused"}).`;
+        cancel(meeting, why, new Date().toISOString());
+      }
+    },
+
+    frameFor: (roomId: string, botId: string) => {
+      const meeting = liveIn(roomId);
+      return meeting?.status === "running" &&
+        meeting.facilitatorBotId === botId &&
+        meeting.currentItem === null
+        ? `[meeting] "${meeting.title}"
+The meeting has started. Call start_item for item 1.`
+        : "";
+    },
     visible: () =>
       selectVisible
         .all()
@@ -232,7 +368,7 @@ export function openMeetings(
           now,
         );
         const invitees = participants.map((botId) => Invitee.parse(selectInvitee.get(botId)));
-        const facilitator = Named.parse(selectBotName.get(facilitatorBotId)).name;
+        const facilitator = nameOf(facilitatorBotId);
         const body =
           `Meeting "${title}" at ${scheduledAt}. Facilitator: ${facilitator}. ` +
           `Participants: ${invitees.map(({ name }) => name).join(", ")}. ` +

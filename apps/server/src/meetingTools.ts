@@ -191,12 +191,6 @@ function schedule(store: EventStore, grant: Grant, args: unknown) {
     if (!grant.attended || grant.tainted) {
       return refused("room_required");
     }
-    const live = store.meetings
-      .visible()
-      .filter(({ facilitatorBotId, endedAt }) => facilitatorBotId === grant.botId && !endedAt);
-    if (live.length >= 3) {
-      return refused("too_many");
-    }
     roomId = store.rooms.createGroupRoom({
       name: data.title,
       memberIds: [grant.botId, ...ids],

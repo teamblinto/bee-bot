@@ -57,13 +57,13 @@ import {
 import { parseManifest } from "./broker.ts";
 import { openPolicy } from "./policy.ts";
 import { outwardTool, type RecoveryVerdict } from "./recovery.ts";
-import { openMeetings } from "./meetings.ts";
+import { type MeetingDelivery, openMeetings } from "./meetings.ts";
 import { openRooms } from "./rooms.ts";
 import { inboxTarget, skillsTarget as boxSkillsDir } from "@beebot/boxd/protocol";
 import { openSkills, skillsDir } from "./skills.ts";
 import { openConnectors, reservedSlug, slugFrom } from "./connectors.ts";
 import { isNoResponse, noResponse, route } from "./routing.ts";
-import { type ChainPoint, inboundText, openTasks, type TaskDelivery } from "./tasks.ts";
+import { type ChainPoint, inboundText, openTasks } from "./tasks.ts";
 import { openWaits } from "./waits.ts";
 import { attemptOutcome, slotOutcome, staggerMs } from "./routinePolicy.ts";
 import { dueSlot, nextSlot } from "./routines.ts";
@@ -1196,6 +1196,11 @@ export type FinishedRun = {
   pauseBot?: PauseReason;
 };
 
+const RunWake = z.object({
+  source: WakeSource,
+  attended: z.number().transform(Boolean),
+  key: z.string(),
+});
 const settledAs = { Completed: "done", Failed: "failed", Cancelled: "cancelled" } as const;
 const continuationNote =
   "Your previous turn was cut off before it finished. Continue from where you left off. " +
@@ -2253,7 +2258,11 @@ export function openEventStore(dataDir: string) {
       ? `[Room bulletin from the owner]\n${room.bulletin}\n[End of bulletin]`
       : "";
     return {
-      prompt: [bulletin, buildDigest(lines, frame) || continuationNote]
+      prompt: [
+        meetings.frameFor(scope.roomId, scope.botId),
+        bulletin,
+        buildDigest(lines, frame) || continuationNote,
+      ]
         .filter(Boolean)
         .join("\n\n"),
       files: inboxFiles(scope.roomId, rows),
@@ -2373,6 +2382,7 @@ export function openEventStore(dataDir: string) {
       recordRun(run);
       if (status === "Refused") {
         tasks.settleRun(run, "refused", "");
+        meetings.settleRun(run, "refused");
       }
     }
   }
@@ -2892,7 +2902,7 @@ export function openEventStore(dataDir: string) {
   const tx: StoreTx = { transaction, emit };
   const effects = openEffects(db, tx);
   const rooms = openRooms(db, tx, readLimits);
-  const postAsBot: TaskDelivery["post"] = ({ id, roomId, botId, body, chainId, hop }) =>
+  const postAsBot: MeetingDelivery["post"] = ({ id, roomId, botId, body, chainId, hop }) =>
     addMessage({
       id,
       roomId,
@@ -2918,7 +2928,17 @@ export function openEventStore(dataDir: string) {
       postMessage({ id, roomId, body, attended: false, taskId: task.id, timer }, source);
     },
   });
-  const meetings = openMeetings(db, tx, { post: postAsBot });
+  const meetings = openMeetings(db, tx, {
+    post: postAsBot,
+    wake: (roomId, botId, key, attended, chain) => {
+      const row = selectScopeForBot.get(roomId, botId);
+      if (!row || isArchived(botId)) {
+        return false;
+      }
+      addWake(Scope.parse(row), key, attended, "meeting", chain);
+      return true;
+    },
+  });
   // A delegation is done once the child exists, whether or not it has finished.
   const actedOnce = (runId: string) =>
     tasks.createdByRun(runId) > 0 ||
@@ -3548,10 +3568,7 @@ export function openEventStore(dataDir: string) {
         .parse(selectBots.all())
         .map(({ id }) => id),
     botStatus: (id: string) => getBot(id)?.status,
-    runWake: (runId: string) =>
-      z
-        .object({ source: WakeSource, attended: z.number().transform(Boolean), key: z.string() })
-        .safeParse(selectRunWake.get(runId)).data,
+    runWake: (runId: string) => RunWake.safeParse(selectRunWake.get(runId)).data,
 
     wakeContext: (wake: Wake, now: string) => {
       const bot = BotRow.parse(selectBot.get(wake.botId));
@@ -3563,7 +3580,11 @@ export function openEventStore(dataDir: string) {
         hasActiveRun:
           selectActiveRun.get(wake.botId) !== undefined ||
           selectEarlierInChain.get(wake.id) !== undefined,
-        hasInput: input.length > 0,
+        // A meeting turn's input is the meeting frame, while the bot still takes part.
+        hasInput:
+          input.length > 0 ||
+          (progress.source === "meeting" &&
+            meetings.takesPart(getScope(wake.scopeId).roomId, wake.botId)),
         boundary: bot.boundary,
         unattendedLane: laneOfBox(bot),
         bothClaudeCredentials:
@@ -3615,6 +3636,7 @@ export function openEventStore(dataDir: string) {
           const run = RunRow.parse(row);
           recordRun(run);
           tasks.settleRun(run, "refused", "");
+          meetings.settleRun(run, "refused");
         }
       }),
 
@@ -3638,6 +3660,9 @@ export function openEventStore(dataDir: string) {
         setRunLane.run((boundary === "box" ? laneOfBox(bot) : null) ?? accountLane, id);
         const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
         let scope = getScope(run.scopeId);
+        if (RunWake.safeParse(selectRunWake.get(id)).data?.source === "meeting") {
+          meetings.claimed(run, scope.roomId, now);
+        }
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         let sessionId = scope.sessionId;
         if (!sessionId || needsCleanSession(scope, attended, highSeq)) {
@@ -3840,6 +3865,7 @@ export function openEventStore(dataDir: string) {
               selectPostedSince.get(roomId, run.botId, run.startedAt) !== undefined);
           countProgress.run(progressed ? 1 : 0, run.scopeId);
           tasks.settleRun(run, settledAs[finished.status], finished.reply ?? "");
+          meetings.settleRun(run, settledAs[finished.status]);
         } else {
           tasks.promoteNextTask(run.botId);
         }

@@ -45,6 +45,8 @@ type Options = {
   boxesReady?: (() => boolean) | undefined;
   // Server mode: a bot outside a box never runs, attended or not.
   boxOnly?: boolean | undefined;
+  // Whether a client is connected, for wakes the server makes on its own, like a meeting's start.
+  attended?: (() => boolean) | undefined;
   // Whatever else a stopped bot leaves waiting, such as a takeover.
   onStopBot?: ((botId: string) => void) | undefined;
   // Puts the files a turn's input names into the bot's inbox, before the turn starts.
@@ -147,6 +149,7 @@ export function createSupervisor({
   clock = createAwakeClock(),
   boxesReady = () => false,
   boxOnly = false,
+  attended = () => false,
   onStopBot = () => {},
   copyInbox = async () => {},
   prepareBox,
@@ -548,6 +551,7 @@ export function createSupervisor({
         now,
         (botId) => boxesReady() && store.getBot(botId)?.boundary === "box",
       );
+      store.meetings.tick(now, attended());
       waits.tick(now);
       store.continuations.expireContinuations();
       deliverOutcomes();

@@ -345,3 +345,91 @@ describe("meeting tools during a meeting", () => {
     expect(call(cyRun, "position", {}).reason).toBe("not_participant");
   });
 });
+
+describe("opening a meeting", () => {
+  function booked() {
+    const team = product();
+    const scheduledAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    const meeting = store.meetings.schedule({
+      facilitatorBotId: team.ava.id,
+      roomId: team.room.id,
+      title: "Sprint",
+      participants: [team.bo.id, team.cy.id, team.dee.id],
+      agenda: ["Review", "Blockers", "Goals"],
+      scheduledAt,
+      timeboxMin: 30,
+      maxRoundsPerItem: 2,
+      createdByRunId: "run",
+      chain: { chainId: null, hop: 0, depth: 0 },
+    });
+    if ("refused" in meeting) {
+      throw new Error(meeting.refused);
+    }
+    const later = (minutes: number) =>
+      new Date(Date.parse(scheduledAt) + minutes * 60_000).toISOString();
+    return { ...team, id: meeting.id, scheduledAt, later };
+  }
+
+  it("opens at the time and wakes only the facilitator, in the room, with source meeting", () => {
+    const { ava, room, id, scheduledAt, later } = booked();
+    store.meetings.tick(later(-1), true);
+    expect(store.meetings.get(id)?.status).toBe("scheduled");
+    store.meetings.tick(scheduledAt, true);
+    expect(store.meetings.get(id)?.status).toBe("open");
+    expect(messagesIn(room.id).at(-1)?.body).toBe('Meeting "Sprint" is starting.');
+    const wakes = store.dueWakes(scheduledAt);
+    expect(wakes.map(({ botId }) => botId)).toEqual([ava.id]);
+    const [wake] = wakes;
+    if (!wake) {
+      throw new Error("no wake");
+    }
+    expect(store.wakeContext(wake, scheduledAt).hasInput).toBe(true);
+    expect(store.runWake(start(ava.id).id)).toMatchObject({
+      source: "meeting",
+      key: `meeting:${id}:open`,
+    });
+  });
+
+  it("runs from the facilitator's claim, with cap and timebox counted from then", () => {
+    const { ava, bo, id, scheduledAt } = booked();
+    store.meetings.tick(scheduledAt, true);
+    const run = start(ava.id);
+    const meeting = store.meetings.get(id);
+    expect(meeting).toMatchObject({ status: "running", turnCap: 31, turnsUsed: 1 });
+    expect(Date.parse(meeting?.endsAt ?? "") - Date.parse(meeting?.startedAt ?? "")).toBe(
+      30 * 60_000,
+    );
+    expect(run.prompt).toContain("The meeting has started. Call start_item for item 1.");
+    expect(names(meetingToolsFor(store, run.id))).toEqual(
+      expect.arrayContaining(["start_item", "close_meeting"]),
+    );
+    expect(names(meetingToolsFor(store, run.id))).not.toContain("position");
+    say(bo.roomId, "hello");
+    expect(names(meetingToolsFor(store, start(bo.id).id))).toEqual([]);
+  });
+
+  it("cancels with a notice when the facilitator's opening wake is refused as unattended", () => {
+    const { ava, room, id, scheduledAt } = booked();
+    store.meetings.tick(scheduledAt, false);
+    const wake = store.dueWakes(scheduledAt).find(({ botId }) => botId === ava.id);
+    if (!wake) {
+      throw new Error("no wake");
+    }
+    store.refuseWake(wake, "unattended");
+    expect(store.meetings.get(id)?.status).toBe("cancelled");
+    expect(messagesIn(room.id).at(-1)?.body).toBe("Ava couldn't start the meeting (unattended).");
+    expect(store.meetings.live(room.id)).toBeUndefined();
+  });
+
+  it("cancels an open meeting that hasn't started within an hour", () => {
+    const { ava, room, id, scheduledAt, later } = booked();
+    store.meetings.tick(scheduledAt, true);
+    store.meetings.tick(later(59), true);
+    expect(store.meetings.get(id)?.status).toBe("open");
+    store.meetings.tick(later(60), true);
+    expect(store.meetings.get(id)?.status).toBe("cancelled");
+    expect(messagesIn(room.id).at(-1)?.body).toMatch(/didn't start within an hour/);
+    const [wake] = store.dueWakes(later(60)).filter(({ botId }) => botId === ava.id);
+    expect(wake && store.wakeContext(wake, later(60)).hasInput).toBe(false);
+  });
+});
