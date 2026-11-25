@@ -985,6 +985,44 @@ export const migrations: Array<{
     ALTER TABLE spend ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX runs_by_task ON runs (task_id) WHERE task_id IS NOT NULL;`,
   },
+  {
+    name: "bot_lineage",
+    sql: `DELETE FROM events;
+    ALTER TABLE bots ADD COLUMN parent_bot_id TEXT REFERENCES bots (id);
+    ALTER TABLE bots ADD COLUMN spawn_key TEXT;
+    ALTER TABLE bots ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+    CREATE UNIQUE INDEX bots_spawn_key ON bots (spawn_key);`,
+  },
+  {
+    name: "team_requests",
+    sql: `CREATE TABLE team_requests (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN
+        ('create_bot', 'update_bot', 'archive_bot', 'create_room', 'invite_to_room')),
+      payload_json TEXT NOT NULL,
+      requested_by_bot_id TEXT NOT NULL REFERENCES bots (id),
+      run_id TEXT NOT NULL,
+      spawn_key TEXT UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'declined', 'failed')),
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      decided_at TEXT
+    );
+    CREATE INDEX team_requests_status ON team_requests (status);`,
+  },
+  {
+    name: "team_settings",
+    sql: "ALTER TABLE settings ADD COLUMN leads_act_without_asking INTEGER NOT NULL DEFAULT 0;",
+  },
+  {
+    name: "room_modes",
+    sql: `ALTER TABLE rooms ADD COLUMN responder_mode TEXT NOT NULL DEFAULT 'mentions';
+    ALTER TABLE rooms ADD COLUMN lead_bot_id TEXT REFERENCES bots (id);
+    ALTER TABLE rooms ADD COLUMN bulletin TEXT NOT NULL DEFAULT '';
+    ALTER TABLE rooms ADD COLUMN limits_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE room_rounds ADD COLUMN escalations INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE room_rounds ADD COLUMN ring_until TEXT;`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1274,7 +1312,7 @@ export function openEventStore(dataDir: string) {
     b.boundary, b.manifest, b.control, b.avatar_seed AS avatarSeed, b.project_path AS projectPath,
     b.unattended_lane AS unattendedLane, b.egress_any_site AS egressAnySite,
     b.archived_at AS archivedAt, b.daily_token_cap AS dailyTokenCap,
-    b.daily_usd_cap AS dailyUsdCap,
+    b.daily_usd_cap AS dailyUsdCap, b.parent_bot_id AS parentBotId, b.version,
     (SELECT json_group_array(host) FROM
       (SELECT host FROM bot_egress_hosts WHERE bot_id = b.id ORDER BY host)) AS egressHosts`;
   const selectBots = db.prepare(
@@ -1386,6 +1424,7 @@ export function openEventStore(dataDir: string) {
     "DELETE FROM messages WHERE room_id = $dm",
     "UPDATE messages SET bot_id = NULL WHERE bot_id = $bot",
     "UPDATE rooms SET default_bot_id = NULL WHERE default_bot_id = $bot AND kind = 'group'",
+    "UPDATE rooms SET lead_bot_id = NULL WHERE lead_bot_id = $bot",
     "DELETE FROM scopes WHERE bot_id = $bot",
     "DELETE FROM rooms WHERE id = $dm",
     "DELETE FROM bots WHERE id = $bot",
@@ -1702,6 +1741,12 @@ export function openEventStore(dataDir: string) {
   const selectUsageData = db.prepare("SELECT usage_data AS value FROM settings");
   const updateUsageData = db.prepare("UPDATE settings SET usage_data = ?");
   const selectLimits = db.prepare("SELECT limits_json AS json FROM settings");
+  const selectLeadsActWithoutAsking = db.prepare(
+    "SELECT leads_act_without_asking AS value FROM settings",
+  );
+  const updateLeadsActWithoutAsking = db.prepare(
+    "UPDATE settings SET leads_act_without_asking = ?",
+  );
   const updateLimits = db.prepare("UPDATE settings SET limits_json = ?");
   const selectBoxMachine = db.prepare("SELECT box_machine AS machine FROM settings");
   const updateBoxMachine = db.prepare("UPDATE settings SET box_machine = ?");
@@ -2669,7 +2714,7 @@ export function openEventStore(dataDir: string) {
 
   const tx: StoreTx = { transaction, emit };
   const effects = openEffects(db, tx);
-  const rooms = openRooms(db, tx);
+  const rooms = openRooms(db, tx, limits);
   const tasks = openTasks(db, tx, {
     post: ({ id, roomId, botId, body, chainId, hop }) =>
       addMessage({
@@ -2724,6 +2769,8 @@ export function openEventStore(dataDir: string) {
   const continuations = openContinuations(db, tx);
   const takeovers = openTakeovers(db, tx);
   const { vaultStatus } = openVaultEntries(db);
+  const leadsActWithoutAsking = () =>
+    z.object({ value: z.number() }).parse(selectLeadsActWithoutAsking.get()).value === 1;
   const usageData = () => {
     const { value } = z.object({ value: z.number().nullable() }).parse(selectUsageData.get());
     return value === null ? null : value === 1;
@@ -2874,7 +2921,16 @@ export function openEventStore(dataDir: string) {
       automatedAccessAcknowledgedAt: automatedAccessAt(),
       usageData: usageData(),
       limits: limits(),
+      teamRequests: [],
+      leadsActWithoutAsking: leadsActWithoutAsking(),
     }),
+
+    leadsActWithoutAsking,
+    setLeadsActWithoutAsking: (on: boolean) =>
+      transaction(() => {
+        updateLeadsActWithoutAsking.run(on ? 1 : 0);
+        emit({ type: "team-settings.changed", leadsActWithoutAsking: on });
+      }),
 
     usageData,
     setUsageData: (on: boolean) =>

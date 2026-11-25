@@ -1,7 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { type Run, Task, WakeSource } from "@beebot/contracts";
+import { NeedsApproval, type Run, Task, WakeSource } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { StoreTx } from "./store.ts";
@@ -34,6 +34,7 @@ const json = <T extends z.ZodType>(schema: T) =>
   z.string().transform((text): z.infer<T> => schema.parse(JSON.parse(text)));
 const TaskRow = Task.extend({
   outcome: json(Task.shape.outcome).nullable(),
+  needsApproval: json(NeedsApproval).nullable(),
   blockedBy: json(Task.shape.blockedBy),
 });
 const NextRow = TaskRow.extend({ pendingJson: z.string() });
@@ -119,6 +120,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     requester_bot_id AS requesterBotId, owner_bot_id AS ownerBotId, room_id AS roomId, goal,
     status, result_message_id AS resultMessageId, parent_task_id AS parentTaskId,
     root_task_id AS rootTaskId, origin, done_when AS doneWhen, outcome_json AS outcome,
+    json_extract(outcome_json, '$.needsApproval') AS needsApproval,
     progress_at AS progressAt, blocked_by_json AS blockedBy, created_at AS createdAt,
     updated_at AS updatedAt`;
   const active = "('queued', 'open', 'waiting', 'needs_input')";

@@ -30,6 +30,7 @@ const task: Task = {
   doneWhen: null,
   outcome: null,
   progressAt: null,
+  needsApproval: null,
   blockedBy: [],
   createdAt: "2026-11-23T00:00:00.000Z",
   updatedAt: "2026-11-23T00:00:00.000Z",

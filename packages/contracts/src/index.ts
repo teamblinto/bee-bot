@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 43;
+export const protocolVersion = 44;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -116,6 +116,8 @@ export type BotBoundary = z.infer<typeof BotBoundary>;
 
 // Grants as data, such as `browser` or `gmail.send(to-allowlist)`.
 export const Manifest = z.array(z.string().trim().min(1).max(200)).max(100);
+// Only the owner's set-bot-manifest writes it.
+export const teamManageGrant = "team.manage";
 export type Manifest = z.infer<typeof Manifest>;
 export const browserGrant = "browser";
 
@@ -180,6 +182,10 @@ export const Bot = z.object({
   // Over a rolling 24 hours. Null is no cap.
   dailyTokenCap: z.number().int().nullable(),
   dailyUsdCap: z.number().nullable(),
+  // The lead that created it.
+  parentBotId: z.string().nullable(),
+  // Bumped on every edit.
+  version: z.number().int(),
 });
 export type Bot = z.infer<typeof Bot>;
 
@@ -874,6 +880,9 @@ export const LimitRefusal = z.enum([
   "wake_approval",
   "progress_budget",
   "tree_budget",
+  "ring",
+  "escalation",
+  "duplicate",
 ]);
 export type LimitRefusal = z.infer<typeof LimitRefusal>;
 
@@ -889,6 +898,10 @@ export const Limits = z.object({
   chainWallMs: limit,
   progressRequests: limit,
   treeTurns: limit,
+  ringWindowMs: limit,
+  ringBreakMs: limit,
+  escalationCap: limit,
+  dedupeWindowMs: limit,
 });
 export type Limits = z.infer<typeof Limits>;
 export const LimitOverrides = Limits.partial();
@@ -906,9 +919,16 @@ export const limitDefaults: Limits = {
   chainWallMs: 60 * minute,
   progressRequests: 24,
   treeTurns: 300,
+  ringWindowMs: 2 * minute,
+  ringBreakMs: 5 * minute,
+  escalationCap: 2,
+  dedupeWindowMs: minute,
 };
 
 export const limitCeilings: Limits = { ...limitDefaults, hop: 4, depth: 4 };
+
+export const ResponderMode = z.enum(["mentions", "default", "everyone_optional", "lead"]);
+export type ResponderMode = z.infer<typeof ResponderMode>;
 
 export const Room = z.object({
   id: z.string(),
@@ -919,12 +939,30 @@ export const Room = z.object({
   // Bot IDs, in the order they joined.
   members: z.array(z.string()),
   createdAt: z.string(),
+  responderMode: ResponderMode,
+  leadBotId: z.string().nullable(),
+  // Set by the owner only, and shown to the room's bots as trusted text.
+  bulletin: z.string(),
+  // Room checks only. Delegation keeps the workspace limits.
+  limits: LimitOverrides,
+  // Bots stay quiet until `heldUntil`, or for escalation until a human posts.
+  held: z.enum(["ring", "escalation"]).nullable(),
+  heldUntil: z.string().nullable(),
 });
 export type Room = z.infer<typeof Room>;
 
 // How an @mention names a room member: the name lowercased, without its spaces. A mention matches
 // the member whose key it equals, or else the one member whose key it starts.
 export const mentionKey = (name: string) => name.toLowerCase().replace(/\s+/g, "");
+
+// `args` is the continuation's shown text, never raw input, which could carry a typed secret.
+export const NeedsApproval = z.object({
+  tool: z.string(),
+  args: z.string(),
+  reason: z.enum(["approval", "hand_off"]),
+  continuationId: z.string(),
+});
+export type NeedsApproval = z.infer<typeof NeedsApproval>;
 
 export const TaskOrigin = z.enum(["human", "routine", "meeting", "wake", "board"]);
 export type TaskOrigin = z.infer<typeof TaskOrigin>;
@@ -955,6 +993,7 @@ export const Task = z.object({
   origin: TaskOrigin,
   doneWhen: z.string().nullable(),
   outcome: z.object({ summary: z.string().optional() }).nullable(),
+  needsApproval: NeedsApproval.nullable(),
   progressAt: z.string().nullable(),
   blockedBy: z.array(z.string()),
   createdAt: z.string(),
@@ -962,6 +1001,27 @@ export const Task = z.object({
 });
 export type Task = z.infer<typeof Task>;
 export const activeTaskStatuses = ["queued", "open", "waiting", "needs_input"] as const;
+
+export const TeamRequestKind = z.enum([
+  "create_bot",
+  "update_bot",
+  "archive_bot",
+  "create_room",
+  "invite_to_room",
+]);
+export type TeamRequestKind = z.infer<typeof TeamRequestKind>;
+export const TeamRequest = z.object({
+  id: z.string(),
+  kind: TeamRequestKind,
+  payload: z.record(z.string(), z.unknown()),
+  requestedByBotId: z.string(),
+  runId: z.string(),
+  status: z.enum(["pending", "applied", "declined", "failed"]),
+  result: z.record(z.string(), z.unknown()).nullable(),
+  createdAt: z.string(),
+  decidedAt: z.string().nullable(),
+});
+export type TeamRequest = z.infer<typeof TeamRequest>;
 
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
@@ -991,6 +1051,9 @@ export const ChatState = z.object({
   // Null until the owner answers the usage-data question. Off unless they turned it on.
   usageData: z.boolean().nullable(),
   limits: Limits,
+  // Pending only.
+  teamRequests: z.array(TeamRequest),
+  leadsActWithoutAsking: z.boolean(),
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -1022,6 +1085,8 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("automated-access.acknowledged"), acknowledgedAt: z.string() }),
   z.object({ type: z.literal("usage-data.changed"), on: z.boolean() }),
   z.object({ type: z.literal("limits.changed"), limits: Limits }),
+  z.object({ type: z.literal("team-request.changed"), request: TeamRequest }),
+  z.object({ type: z.literal("team-settings.changed"), leadsActWithoutAsking: z.boolean() }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -1386,6 +1451,10 @@ export const Command = z.discriminatedUnion("type", [
     roomId: z.uuid(),
     name: RoomName.optional(),
     defaultBotId: z.uuid().nullable().optional(),
+    responderMode: ResponderMode.optional(),
+    leadBotId: z.uuid().nullable().optional(),
+    bulletin: z.string().max(4000).optional(),
+    limits: LimitOverrides.optional(),
   }),
   z.object({ type: z.literal("add-room-member"), roomId: z.uuid(), botId: z.uuid() }),
   z.object({ type: z.literal("remove-room-member"), roomId: z.uuid(), botId: z.uuid() }),
@@ -1548,6 +1617,12 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("set-bot-unattended-lane"), botId: z.uuid(), lane: EngineLane }),
   z.object({ type: z.literal("set-usage-data"), on: z.boolean() }),
   z.object({ type: z.literal("set-limits"), limits: LimitOverrides }),
+  z.object({
+    type: z.literal("decide-team-request"),
+    requestId: z.uuid(),
+    decision: z.enum(["apply", "decline"]),
+  }),
+  z.object({ type: z.literal("set-team-settings"), leadsActWithoutAsking: z.boolean() }),
   // From the web app, which never talks to PostHog itself. Dropped unless usage data is on.
   z.object({ type: z.literal("track"), event: WebUsageEvent }),
   z.object({ type: z.literal("report-error"), error: ErrorReport }),

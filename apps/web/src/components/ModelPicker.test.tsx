@@ -257,6 +257,8 @@ const bot = (model: string, effort: Bot["effort"] = null): Bot => ({
   archivedAt: null,
   dailyTokenCap: null,
   dailyUsdCap: null,
+  parentBotId: null,
+  version: 1,
 });
 
 function renderControls(current: Bot) {

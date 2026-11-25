@@ -83,6 +83,8 @@ const bot = {
   archivedAt: null,
   dailyTokenCap: null,
   dailyUsdCap: null,
+  parentBotId: null,
+  version: 1,
 } as const;
 
 const preview = () => host.querySelector("img.size-16")?.getAttribute("src");

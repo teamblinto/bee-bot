@@ -249,6 +249,17 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
         ...state,
         chat: { ...chat, automatedAccessAcknowledgedAt: event.acknowledgedAt },
       };
+    case "team-request.changed": {
+      // Snapshots hold pending ones only, and replay must land on the same state.
+      const { request } = event;
+      const teamRequests =
+        request.status === "pending"
+          ? upsert(chat.teamRequests, request)
+          : chat.teamRequests.filter(({ id }) => id !== request.id);
+      return { ...state, chat: { ...chat, teamRequests } };
+    }
+    case "team-settings.changed":
+      return { ...state, chat: { ...chat, leadsActWithoutAsking: event.leadsActWithoutAsking } };
   }
 }
 
@@ -397,6 +408,8 @@ let state: ConnectionState = {
     continuations: [],
     vault: { apiKeys: [] },
     automatedAccessAcknowledgedAt: null,
+    teamRequests: [],
+    leadsActWithoutAsking: false,
   },
   drafts: {},
   liveTools: {},

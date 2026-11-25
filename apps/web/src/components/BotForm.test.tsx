@@ -134,6 +134,8 @@ const ada: Bot = {
   archivedAt: null,
   dailyTokenCap: null,
   dailyUsdCap: null,
+  parentBotId: null,
+  version: 1,
 };
 
 const radio = (control: string) =>
@@ -245,6 +247,8 @@ it("saves a boxed bot's sites and its opt-in to the subscription", async () => {
     archivedAt: null,
     dailyTokenCap: null,
     dailyUsdCap: null,
+    parentBotId: null,
+    version: 1,
   };
   chat.vault.apiKeys = ["claude"];
   try {
@@ -312,6 +316,8 @@ it("narrows a bot with a browser but no box from any site to its own list", asyn
     archivedAt: null,
     dailyTokenCap: null,
     dailyUsdCap: null,
+    parentBotId: null,
+    version: 1,
   };
   postCommand.mockResolvedValue({ ok: true, body: bot });
   show(bot);
@@ -371,6 +377,8 @@ it("offers the subscription only after the automated-access notice was read", as
       archivedAt: null,
       dailyTokenCap: null,
       dailyUsdCap: null,
+      parentBotId: null,
+      version: 1,
     });
     const lane = [...host.querySelectorAll("label")]
       .find(({ textContent }) => textContent?.startsWith("On its own, it uses"))
@@ -415,6 +423,8 @@ it("warns when editing a bot that's already on Codex", () => {
     archivedAt: null,
     dailyTokenCap: null,
     dailyUsdCap: null,
+    parentBotId: null,
+    version: 1,
   });
   expect(host.textContent).toContain(warning);
 });

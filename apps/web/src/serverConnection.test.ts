@@ -42,6 +42,8 @@ const bot: Bot = {
   archivedAt: null,
   dailyTokenCap: null,
   dailyUsdCap: null,
+  parentBotId: null,
+  version: 1,
 };
 const message = (id: string): ChatMessage => ({
   id,
@@ -137,6 +139,8 @@ const emptyChat: ChatState = {
   continuations: [],
   vault: { apiKeys: [] },
   automatedAccessAcknowledgedAt: null,
+  teamRequests: [],
+  leadsActWithoutAsking: false,
 };
 
 const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => ({
@@ -222,6 +226,8 @@ it("reaches the same state by replay as by snapshot", () => {
     continuations: [],
     vault: { apiKeys: [] },
     automatedAccessAcknowledgedAt: null,
+    teamRequests: [],
+    leadsActWithoutAsking: false,
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });
@@ -261,6 +267,7 @@ it("keeps queued and waiting tasks, and drops finished ones", () => {
       doneWhen: null,
       outcome: null,
       progressAt: null,
+      needsApproval: null,
       blockedBy: [],
       createdAt: "now",
       updatedAt: "now",

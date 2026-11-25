@@ -71,7 +71,7 @@ describe("the coordination migration", () => {
     expect(runs).toMatchObject([{ id: "r1", status: "Completed", chainId: null, hop: 0 }]);
     expect(approvals).toMatchObject([{ id: "a1", runId: "r1" }]);
     expect(messages.map(({ botId }) => botId)).toEqual([null, "ada"]);
-    expect(rooms).toEqual([
+    expect(rooms).toMatchObject([
       {
         id: "room",
         kind: "dm",

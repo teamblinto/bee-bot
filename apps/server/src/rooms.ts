@@ -1,22 +1,34 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { Room } from "@beebot/contracts";
+import { LimitOverrides, type Limits, Room } from "@beebot/contracts";
 import { z } from "zod";
 
 import type { Member } from "./routing.ts";
 import type { StoreTx } from "./store.ts";
 
-const RoomRow = Room.omit({ members: true });
+const RoomRow = Room.omit({ members: true, held: true, heldUntil: true }).extend({
+  limits: z.string().transform((json) => LimitOverrides.catch({}).parse(JSON.parse(json))),
+  ringUntil: z.string().nullable(),
+  escalations: z.number(),
+});
 const MemberRow = z.object({ botId: z.string() });
 const NamedMember = z.object({ id: z.string(), name: z.string() });
 const Round = z.object({ botPosts: z.number(), windowStartedAt: z.string().nullable() });
 
 // A member who leaves keeps their scope row, which their past runs and wakes point at.
-export function openRooms(db: DatabaseSync, { transaction, emit }: StoreTx) {
-  const roomColumns = "id, kind, name, default_bot_id AS defaultBotId, created_at AS createdAt";
-  const selectRoom = db.prepare(`SELECT ${roomColumns} FROM rooms WHERE id = ?`);
-  const selectRooms = db.prepare(`SELECT ${roomColumns} FROM rooms ORDER BY rowid`);
+export function openRooms(
+  db: DatabaseSync,
+  { transaction, emit }: StoreTx,
+  workspaceLimits: () => Limits,
+) {
+  const roomColumns = `r.id, r.kind, r.name, r.default_bot_id AS defaultBotId,
+    r.created_at AS createdAt, r.responder_mode AS responderMode, r.lead_bot_id AS leadBotId,
+    r.bulletin, r.limits_json AS limits, rr.ring_until AS ringUntil,
+    COALESCE(rr.escalations, 0) AS escalations
+    FROM rooms r LEFT JOIN room_rounds rr ON rr.room_id = r.id`;
+  const selectRoom = db.prepare(`SELECT ${roomColumns} WHERE r.id = ?`);
+  const selectRooms = db.prepare(`SELECT ${roomColumns} ORDER BY r.rowid`);
   const selectMembers = db.prepare(
     "SELECT bot_id AS botId FROM scopes WHERE room_id = ? AND left_at IS NULL ORDER BY rowid",
   );
@@ -68,8 +80,15 @@ export function openRooms(db: DatabaseSync, { transaction, emit }: StoreTx) {
       .map(({ botId }) => botId);
 
   const toRoom = (row: unknown): Room => {
-    const room = RoomRow.parse(row);
-    return { ...room, members: members(room.id) };
+    const { ringUntil, escalations, ...room } = RoomRow.parse(row);
+    const escalated = escalations > 0 && escalations >= workspaceLimits().escalationCap;
+    const ringing = ringUntil !== null && ringUntil > new Date().toISOString();
+    return {
+      ...room,
+      members: members(room.id),
+      held: escalated ? "escalation" : ringing ? "ring" : null,
+      heldUntil: !escalated && ringing ? ringUntil : null,
+    };
   };
 
   const getRoom = (id: string) => {

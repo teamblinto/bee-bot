@@ -27,6 +27,8 @@ const bot: Bot = {
   archivedAt: null,
   dailyTokenCap: null,
   dailyUsdCap: null,
+  parentBotId: null,
+  version: 1,
 };
 
 const run: Run = {

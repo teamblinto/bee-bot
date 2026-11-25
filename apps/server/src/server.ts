@@ -1492,6 +1492,11 @@ export async function startServer({
       case "set-limits":
         store.setLimits(command.limits);
         return ok;
+      case "set-team-settings":
+        store.setLeadsActWithoutAsking(command.leadsActWithoutAsking);
+        return ok;
+      case "decide-team-request":
+        return notFound;
       case "track":
         track(command.event, {});
         return ok;
