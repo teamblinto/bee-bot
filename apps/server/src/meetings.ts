@@ -294,6 +294,7 @@ const Passes = z.object({ passes: z.number() });
 const PassRow = z.object({ id: z.string(), passes: z.number() });
 const Round = z.object({ round: z.number() });
 const Attended = z.object({ attended: z.number().transform(Boolean) });
+const WakeChain = z.object({ chainId: z.string().nullable() });
 
 export function openMeetings(
   db: DatabaseSync,
@@ -380,6 +381,7 @@ export function openMeetings(
      LIMIT 1`,
   );
   const selectWakeAttended = db.prepare("SELECT attended FROM wakes WHERE id = ?");
+  const selectWakeChain = db.prepare("SELECT chain_id AS chainId FROM wakes WHERE id = ?");
   const selectBotMeetingWakes = db.prepare(
     `SELECT id, chain_id AS chainId FROM wakes
      WHERE bot_id = ? AND source = 'meeting' AND status = 'pending' AND chain_id IS NOT NULL`,
@@ -751,7 +753,7 @@ export function openMeetings(
 
     // Runs inside the caller's transaction, next to tasks.settleRun.
     settleRun: (
-      run: Pick<Run, "botId" | "chainId" | "reason"> & { scopeId: string; wakeId: string },
+      run: Pick<Run, "botId" | "reason"> & { scopeId: string; wakeId: string },
       status: "done" | "failed" | "cancelled" | "refused",
     ) => {
       const scope = z
@@ -759,16 +761,19 @@ export function openMeetings(
         .optional()
         .parse(selectScopeRoom.get(run.scopeId));
       const meeting = scope && liveIn(scope.roomId);
+      // A run can carry another wake's chain (a pending task wake, or a parked run resumed), so
+      // the meeting is told by the chain of the wake that started it.
+      const chainId = WakeChain.optional().parse(selectWakeChain.get(run.wakeId))?.chainId ?? "";
       if (
         status === "refused" &&
         meeting?.status === "open" &&
         meeting.facilitatorBotId === run.botId &&
-        run.chainId === meeting.id
+        chainId === meeting.id
       ) {
         const why = `${nameOf(run.botId)} couldn't start the meeting (${run.reason ?? "refused"}).`;
         cancel(meeting, why, new Date().toISOString());
       }
-      endPassIfDone(run.chainId ?? "", run.wakeId);
+      endPassIfDone(chainId, run.wakeId);
       const after = scope && liveIn(scope.roomId);
       if (
         after?.status === "running" &&

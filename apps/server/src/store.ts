@@ -1502,6 +1502,8 @@ export function openEventStore(dataDir: string) {
        WHERE result_message_id IN (SELECT id FROM messages WHERE room_id = $dm)`,
     `UPDATE meeting_records SET task_id = NULL
        WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
+    `UPDATE wakes SET status = 'done' WHERE status = 'pending' AND EXISTS (SELECT 1 FROM meetings m
+       WHERE m.facilitator_bot_id = $bot AND wakes.idempotency_key LIKE 'meeting:' || m.id || ':%')`,
     `DELETE FROM meeting_records WHERE meeting_id IN
        (SELECT id FROM meetings WHERE facilitator_bot_id = $bot)`,
     "DELETE FROM meetings WHERE facilitator_bot_id = $bot",
@@ -2920,7 +2922,9 @@ export function openEventStore(dataDir: string) {
 
   const tx: StoreTx = { transaction, emit };
   const effects = openEffects(db, tx);
-  const rooms = openRooms(db, tx, readLimits);
+  const rooms = openRooms(db, tx, readLimits, (botId, cancel) =>
+    meetings.cancelWakes(botId, cancel),
+  );
   const postAsBot: MeetingDelivery["post"] = ({ id, roomId, botId, body, chainId, hop }) =>
     addMessage({
       id,
@@ -3346,6 +3350,7 @@ export function openEventStore(dataDir: string) {
         const touched = z.array(IdRow).parse(selectBotRooms.all(ids));
         const dropped = z.array(PendingRequestRow).parse(selectPendingRequestsBy.all(id));
         const children = z.array(IdRow).parse(selectAllChildren.all(id));
+        meetings.cancelWakes(id, () => cancelPendingWakes.run(id));
         for (const statement of deleteBotRows) {
           statement.run(ids);
         }

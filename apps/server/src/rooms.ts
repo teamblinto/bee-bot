@@ -27,6 +27,7 @@ export function openRooms(
   db: DatabaseSync,
   { transaction, emit }: StoreTx,
   readLimits: () => LimitOverrides,
+  dropWakes: (botId: string, cancel: () => void) => void,
 ) {
   const roomColumns = `r.id, r.kind, r.name, r.default_bot_id AS defaultBotId,
     r.created_at AS createdAt, r.responder_mode AS responderMode, r.lead_bot_id AS leadBotId,
@@ -274,7 +275,7 @@ export function openRooms(
         if (leaveScope.run(new Date().toISOString(), roomId, botId).changes === 0) {
           return getRoom(roomId);
         }
-        closeScopeWakes.run(roomId, botId);
+        dropWakes(botId, () => closeScopeWakes.run(roomId, botId));
         clearDefault.run(roomId, botId);
         clearLead.run(roomId, botId);
         return changed(roomId);

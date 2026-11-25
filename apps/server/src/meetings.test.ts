@@ -100,7 +100,7 @@ function actionTask() {
   }
   insertMeeting({ id: "m1", roomId: room.id, botId: ava.id, status: "running" });
   insertRecord({ meetingId: "m1", kind: "action", taskId: task.id });
-  return { ava, dee };
+  return { ava, dee, room };
 }
 
 describe("the meetings migration", () => {
@@ -115,11 +115,18 @@ describe("the meetings migration", () => {
     expect(() => insertRecord({ meetingId: "m1", kind: "vote" })).toThrow(/CHECK/);
   });
 
-  it("deleting a facilitator removes its meetings and unlinks action tasks it owned", () => {
-    const { ava } = actionTask();
+  it("deleting a facilitator removes its meetings, unlinks action tasks it owned, and drops their pass wakes", () => {
+    const { ava, dee, room } = actionTask();
+    db.prepare(
+      `INSERT INTO wakes (id, bot_id, scope_id, idempotency_key, attended, status, created_at,
+         source, chain_id)
+       SELECT 'w1', bot_id, id, 'meeting:m1:pass:1:dee', 1, 'pending', 'now', 'meeting', 'pass'
+       FROM scopes WHERE room_id = ? AND bot_id = ?`,
+    ).run(room.id, dee.id);
     store.deleteBot(ava.id);
     expect(rows("SELECT id FROM meetings")).toEqual([]);
     expect(rows("SELECT id FROM meeting_records")).toEqual([]);
+    expect(rows("SELECT status FROM wakes WHERE id = 'w1'")).toEqual([{ status: "done" }]);
   });
 
   it("unlinks an action's task when the task's owner is deleted, keeping the record", () => {
@@ -546,6 +553,38 @@ describe("a pass", () => {
     finish(start(bo.id).id);
     finish(start(cy.id).id);
     store.archiveBot(dee.id);
+    expect(dueBots()).toEqual([ava.id]);
+  });
+
+  it("resumes the facilitator once when the last participant leaves the room mid-pass", () => {
+    const { ava, bo, cy, dee, room, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id);
+    finish(start(bo.id).id);
+    finish(start(cy.id).id);
+    store.rooms.removeMember(room.id, dee.id);
+    expect(dueBots()).toEqual([ava.id]);
+  });
+
+  it("resumes the facilitator once when the last participant is deleted mid-pass", () => {
+    const { ava, bo, cy, dee, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id);
+    finish(start(bo.id).id);
+    finish(start(cy.id).id);
+    expect(store.deleteBot(dee.id)).toBe("deleted");
+    expect(dueBots()).toEqual([ava.id]);
+  });
+
+  it("resumes the facilitator when the last participant's run carries another chain", () => {
+    const { ava, bo, cy, dee, ava1 } = running();
+    call(ava1, "start_item", { item_id: "1", prompt: "Go" });
+    finish(ava1.id);
+    finish(start(bo.id).id);
+    finish(start(cy.id).id);
+    const deeRun = start(dee.id);
+    db.prepare("UPDATE runs SET chain_id = 'task-chain' WHERE id = ?").run(deeRun.id);
+    finish(deeRun.id);
     expect(dueBots()).toEqual([ava.id]);
   });
 
