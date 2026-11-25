@@ -118,6 +118,9 @@ function newestWithin(lines: string[], limit: number) {
   return kept;
 }
 
+// Record text sits on one frame line, so it can't fake a new line or header.
+const oneLine = (text: string) => text.replace(/[\r\n]+/g, " ");
+
 const escapeProvenance = (text: string) => text.replace(/^\[from /gm, "\\[from ");
 
 export function meetingFrame(
@@ -388,10 +391,15 @@ export function openMeetings(
   );
   const insertRecord = db.prepare(
     `INSERT INTO meeting_records (id, meeting_id, kind, item_id, text, owner_bot_id, owner_is_human,
-       task_id, due, proposal_id, options_json, created_by_bot_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       task_id, due, proposal_id, options_json, created_by_bot_id, tainted, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (proposal_id, owner_bot_id) WHERE kind = 'position'
-       DO UPDATE SET text = excluded.text, created_at = excluded.created_at`,
+       DO UPDATE SET text = excluded.text, tainted = excluded.tainted,
+         created_at = excluded.created_at`,
+  );
+  const selectTaintedRecord = db.prepare(
+    `SELECT 1 FROM meeting_records
+     WHERE meeting_id = ? AND tainted = 1 AND created_by_bot_id <> ? LIMIT 1`,
   );
   const setAgenda = db.prepare(
     `UPDATE meetings SET agenda_json = ?, current_item = ?, round = ?, updated_at = ?
@@ -568,6 +576,7 @@ export function openMeetings(
   const addRecord = (
     meeting: Meeting,
     byBotId: string,
+    tainted: boolean,
     record: Pick<MeetingRecord, "kind" | "itemId" | "text"> &
       Partial<Omit<MeetingRecord, "kind" | "itemId" | "text">>,
   ) => {
@@ -577,14 +586,15 @@ export function openMeetings(
       meeting.id,
       record.kind,
       record.itemId,
-      record.text,
+      oneLine(record.text),
       record.ownerBotId ?? null,
       record.ownerIsHuman ? 1 : 0,
       record.taskId ?? null,
       record.due ?? null,
       record.proposalId ?? null,
-      JSON.stringify(record.options ?? []),
+      JSON.stringify((record.options ?? []).map(oneLine)),
       byBotId,
+      tainted ? 1 : 0,
       new Date().toISOString(),
     );
     return changed(meeting.id)?.records.find(
@@ -810,6 +820,17 @@ export function openMeetings(
         : "";
     },
 
+    // shortcut: any tainted record by another bot counts, shown in the frame or not; mirror the
+    // frame's filters if that over-taints in practice.
+    frameTainted: (roomId: string, botId: string) => {
+      const meeting = liveIn(roomId);
+      return (
+        meeting !== undefined &&
+        meetingFrame(meeting, botId, new Map(), new Date().toISOString()) !== "" &&
+        selectTaintedRecord.get(meeting.id, botId) !== undefined
+      );
+    },
+
     startItem: (
       meetingId: string,
       byBotId: string,
@@ -898,7 +919,7 @@ export function openMeetings(
         owner?: string | undefined;
         due?: string | undefined;
       },
-      run: { id: string; attended: boolean },
+      run: { id: string; attended: boolean; tainted: boolean },
     ) =>
       transaction((): MeetingRecord | { refused: MeetingRefusal } => {
         const meeting = facilitating(meetingId, byBotId);
@@ -918,14 +939,14 @@ export function openMeetings(
         }
         const record = { kind: input.kind, itemId, text: input.text, due: input.due ?? null };
         if (input.kind !== "action") {
-          return saved(addRecord(meeting, byBotId, record));
+          return saved(addRecord(meeting, byBotId, run.tainted, record));
         }
         const owner = input.owner?.trim().toLowerCase();
         if (!owner) {
           return { refused: "owner_required" };
         }
         if (owner === "owner") {
-          return saved(addRecord(meeting, byBotId, { ...record, ownerIsHuman: true }));
+          return saved(addRecord(meeting, byBotId, run.tainted, { ...record, ownerIsHuman: true }));
         }
         const ownerBotId = [meeting.facilitatorBotId, ...meeting.participants].find(
           (botId) => botId === input.owner?.trim() || nameIn(botId)?.toLowerCase() === owner,
@@ -948,7 +969,7 @@ export function openMeetings(
           facilitatorBotId: meeting.facilitatorBotId,
           ownerBotId,
           roomId: meeting.roomId,
-          text: input.text,
+          text: oneLine(input.text),
           due: record.due,
           parentRunId: run.id,
           attended: run.attended,
@@ -956,7 +977,9 @@ export function openMeetings(
         if ("refused" in task) {
           return { refused: "too_many" };
         }
-        return saved(addRecord(meeting, byBotId, { ...record, id, ownerBotId, taskId: task.id }));
+        return saved(
+          addRecord(meeting, byBotId, run.tainted, { ...record, id, ownerBotId, taskId: task.id }),
+        );
       }),
 
     closeItem: (meetingId: string, byBotId: string, itemId: string, summary: string) =>
@@ -991,7 +1014,7 @@ export function openMeetings(
       meetingId: string,
       byBotId: string,
       input: { options: string[]; text?: string | undefined; itemId?: string | undefined },
-      attended: boolean,
+      run: { attended: boolean; tainted: boolean },
     ) =>
       transaction((): { proposal_id: string } | { refused: MeetingRefusal } => {
         const meeting = control(meetingId, byBotId);
@@ -1017,13 +1040,13 @@ export function openMeetings(
         const text = input.text ?? "Which option?";
         const { options } = input;
         const { id } = saved(
-          addRecord(meeting, byBotId, { kind: "proposal", itemId, text, options }),
+          addRecord(meeting, byBotId, run.tainted, { kind: "proposal", itemId, text, options }),
         );
         pass(
           meeting,
           [`Proposal ${id.slice(0, 8)}: ${text}`, ...options].join("\n"),
           meeting.participants,
-          attended,
+          run.attended,
         );
         return { proposal_id: id };
       }),
@@ -1032,6 +1055,7 @@ export function openMeetings(
       meetingId: string,
       byBotId: string,
       input: { proposalId: string; option: string; reason: string },
+      tainted: boolean,
     ) =>
       transaction((): MeetingRecord | { refused: MeetingRefusal } => {
         const meeting = get(meetingId);
@@ -1064,7 +1088,7 @@ export function openMeetings(
           return { refused: "record_cap" };
         }
         return saved(
-          addRecord(meeting, byBotId, {
+          addRecord(meeting, byBotId, tainted, {
             kind: "position",
             itemId: proposal.itemId,
             text: `${option} — ${input.reason}`,

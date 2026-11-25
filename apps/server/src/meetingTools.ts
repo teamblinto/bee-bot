@@ -273,7 +273,7 @@ export function callMeetingTool(
     return refused("not_participant");
   }
   const meetingId = store.meetings.live(grant.roomId)?.id ?? "";
-  const { botId, attended } = grant;
+  const { botId, attended, tainted } = grant;
   const passed = (result: ReturnType<EventStore["meetings"]["startItem"]>, status: string) =>
     "refused" in result ? refused(result.refused) : answer({ status, note: endTurn.trim() });
   if (name === "start_item") {
@@ -310,7 +310,7 @@ export function callMeetingTool(
       meetingId,
       botId,
       { ...input, itemId },
-      { id: grant.runId, attended },
+      { id: grant.runId, attended, tainted },
     );
     if ("refused" in record) {
       return refused(record.refused);
@@ -347,7 +347,7 @@ export function callMeetingTool(
       return refused("invalid_arguments for propose");
     }
     const input = { options: data.options, text: data.text, itemId: data.item_id };
-    const result = store.meetings.propose(meetingId, botId, input, attended);
+    const result = store.meetings.propose(meetingId, botId, input, { attended, tainted });
     return "refused" in result
       ? refused(result.refused)
       : answer({ status: "proposed", proposal_id: result.proposal_id, note: endTurn.trim() });
@@ -358,7 +358,7 @@ export function callMeetingTool(
       return refused("invalid_arguments for position");
     }
     const input = { proposalId: data.proposal_id, option: data.option, reason: data.reason };
-    const result = store.meetings.position(meetingId, botId, input);
+    const result = store.meetings.position(meetingId, botId, input, tainted);
     return "refused" in result
       ? refused(result.refused)
       : answer({ status: "recorded", position: result.text, note: "End your turn." });

@@ -1081,6 +1081,8 @@ export const migrations: Array<{
       options_json TEXT NOT NULL DEFAULT '[]',
       done_at TEXT,
       created_by_bot_id TEXT NOT NULL,
+      -- Whether the writer's session was tainted, fixed when the record is written.
+      tainted INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     );
     CREATE INDEX meeting_records_by_meeting ON meeting_records (meeting_id, created_at);
@@ -2422,8 +2424,10 @@ export function openEventStore(dataDir: string) {
     }
   }
 
+  // The meeting frame is input too: it carries what other bots wrote into the meeting's records.
   const hasTaintedInput = (scope: Scope, highSeq: number) =>
-    selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId) !== undefined;
+    selectTaintedInput.get(scope.roomId, scope.ackedEventSeq, highSeq, scope.botId) !== undefined ||
+    meetings.frameTainted(scope.roomId, scope.botId);
 
   const taintFromInput = (scope: Scope, highSeq: number) => {
     if (hasTaintedInput(scope, highSeq)) {
