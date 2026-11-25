@@ -396,7 +396,14 @@ describe("opening a meeting", () => {
     expect(store.meetings.get(id)?.status).toBe("scheduled");
     store.meetings.tick(scheduledAt, true);
     expect(store.meetings.get(id)?.status).toBe("open");
-    expect(messagesIn(room.id).at(-1)?.body).toBe('Meeting "Sprint" is starting.');
+    const last = db.prepare(
+      "SELECT id, bot_id AS botId, body FROM messages WHERE room_id = ? ORDER BY rowid DESC LIMIT 1",
+    );
+    expect(last.get(room.id)).toMatchObject({
+      id: expect.stringMatching(/^notice:/),
+      botId: null,
+      body: 'Meeting "Sprint" is starting.',
+    });
     const wakes = store.dueWakes(scheduledAt);
     expect(wakes.map(({ botId }) => botId)).toEqual([ava.id]);
     const [wake] = wakes;
@@ -420,6 +427,7 @@ describe("opening a meeting", () => {
       30 * 60_000,
     );
     expect(run.prompt).toContain("The meeting has started. Call start_item for item 1.");
+    expect(run.prompt).not.toContain("cut off");
     expect(names(meetingToolsFor(store, run.id))).toEqual(
       expect.arrayContaining(["start_item", "close_meeting"]),
     );

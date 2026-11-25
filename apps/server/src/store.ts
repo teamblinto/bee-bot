@@ -2257,7 +2257,7 @@ export function openEventStore(dataDir: string) {
 
   // A group bot has its own session, so each turn opens with a bounded digest of the room: what
   // came since it was last handed input, or the latest lines for a new session.
-  function roomPrompt(scope: Scope, highSeq: number) {
+  function roomPrompt(scope: Scope, highSeq: number, emptyNote: string) {
     const after = scope.sessionStarted ? scope.deliveredEventSeq : 0;
     const rows = z
       .array(Input)
@@ -2276,7 +2276,7 @@ export function openEventStore(dataDir: string) {
       prompt: [
         meetings.frameFor(scope.roomId, scope.botId),
         bulletin,
-        buildDigest(lines, frame) || continuationNote,
+        buildDigest(lines, frame) || emptyNote,
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -2287,14 +2287,20 @@ export function openEventStore(dataDir: string) {
   // Delivered input is already in the engine's transcript, so it is never sent twice. A new session
   // has no transcript, so it opens with the room history that came before this input. `files` are
   // the attachments it names, for the supervisor to copy into the bot's inbox.
-  function turnPrompt(scope: Scope, highSeq: number) {
+  function turnPrompt(scope: Scope, highSeq: number, runId: string) {
+    // A meeting wake brings no new lines, since the meeting frame is what it acts on. Any other turn
+    // with nothing new is the re-run of one that was cut off.
+    const emptyNote =
+      RunWake.safeParse(selectRunWake.get(runId)).data?.source === "meeting"
+        ? ""
+        : continuationNote;
     if (isGroup(scope.roomId)) {
-      return roomPrompt(scope, highSeq);
+      return roomPrompt(scope, highSeq, emptyNote);
     }
     const input = unackedInput(scope).filter(
       ({ seq }) => seq > scope.deliveredEventSeq && seq <= highSeq,
     );
-    const text = inputText(scope, input) || continuationNote;
+    const text = inputText(scope, input) || emptyNote;
     const files = inboxFiles(scope.roomId, input);
     if (scope.sessionStarted) {
       return { prompt: text, files };
@@ -3737,7 +3743,7 @@ export function openEventStore(dataDir: string) {
         }
         pinInput.run(highSeq, id);
         taintFromInput(scope, highSeq);
-        const { prompt, files } = turnPrompt(scope, highSeq);
+        const { prompt, files } = turnPrompt(scope, highSeq, id);
         // A file's contents are untrusted input, like a tainted bot's text.
         if (files.length > 0) {
           taintScope.run(scope.id);
@@ -3856,7 +3862,7 @@ export function openEventStore(dataDir: string) {
         if (heldMemory) {
           holdPrivate.run(scopeId);
         }
-        return { sessionId, prompt: turnPrompt(scope, inputHighSeq ?? 0).prompt };
+        return { sessionId, prompt: turnPrompt(scope, inputHighSeq ?? 0, id).prompt };
       }),
 
     finishRun: (id: string, bootId: string, finished: FinishedRun) =>
