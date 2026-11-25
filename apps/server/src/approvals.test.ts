@@ -1867,6 +1867,45 @@ describe("in Box mode a tool call", () => {
       expect(ran).toHaveLength(1);
     });
 
+    it("resumes a handed-back task on its own chain, and leaves its room's hold alone", async () => {
+      // A room prompt ends with its framing and streams slowly, so each turn gets a short script.
+      const lifted: RunTurn = (input) =>
+        tainting({ ...input, prompt: input.prompt.includes(goal) ? goal : "ok" });
+      const goal = "/approve Bash echo hi";
+      const { store, bot, ada, task, waiting, answer } = await delegated(true, {
+        runTurn: lifted,
+      });
+      const room = store.rooms.createGroupRoom({ name: "Crew", memberIds: [ada.id, bot.id] });
+      const parentRunId = String(rows(`SELECT id FROM runs WHERE bot_id = '${ada.id}'`)[0]?.id);
+      const made = store.tasks.createTask(
+        {
+          kind: "handoff",
+          chainId: "chain",
+          hop: 2,
+          depth: 1,
+          parentRunId,
+          requesterBotId: ada.id,
+          ownerBotId: bot.id,
+          roomId: room?.id ?? "",
+          goal,
+          deliveryKey: NodeCrypto.randomUUID(),
+          attended: true,
+        },
+        3,
+      );
+      const id = "id" in made ? made.id : "";
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      store.rooms.tripRing(room?.id ?? "", new Date(Date.now() + 300_000).toISOString());
+      await answer(card, "approve");
+      await vi.waitFor(() => expect(task(id)?.status).toBe("done"));
+      expect(
+        rows(`SELECT chain_id AS chainId, hop, depth, task_id AS taskId FROM wakes
+          WHERE bot_id = '${bot.id}' AND source = 'continue'`),
+      ).toEqual([{ chainId: "chain", hop: 2, depth: 1, taskId: id }]);
+      expect(store.rooms.getRoom(room?.id ?? "")?.held).toBe("ring");
+    });
+
     it("fails the reopened task when the resume itself throws", async () => {
       const { store, delegate, task, waiting, answer } = await delegated();
       const id = delegate("/approve Bash echo hi");

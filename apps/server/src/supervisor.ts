@@ -198,6 +198,7 @@ export function createSupervisor({
       try {
         const target = store.continuations.deliveryTarget(row.id);
         reopened = store.tasks.reopenHandedBack(row.id);
+        // A reopened task resumes on its own chain, like a timer, so it keeps its loop breakers.
         const sent =
           target &&
           store.sendMessage(
@@ -207,6 +208,13 @@ export function createSupervisor({
               body: outcomeText(row),
               attended: row.reason === "owner" || target.attended,
               ...(target.replyToId && { replyToId: target.replyToId }),
+              ...(reopened && {
+                taskId: reopened.id,
+                timer: {
+                  scopeId: target.scopeId,
+                  chain: { chainId: reopened.chainId, hop: reopened.hop, depth: reopened.depth },
+                },
+              }),
             },
             reopened ? "continue" : undefined,
           );

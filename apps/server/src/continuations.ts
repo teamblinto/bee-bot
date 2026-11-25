@@ -60,6 +60,7 @@ export type NewContinuation = Pick<
 
 // Where an outcome goes back: the room of the run that asked, as a reply to the bot's last word.
 const DeliveryTarget = z.object({
+  scopeId: z.string(),
   roomId: z.string(),
   replyToId: z.string().nullable(),
   attended: z.number().transform(Boolean),
@@ -93,7 +94,7 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
      AND status IN ('denied', 'expired', 'succeeded', 'failed', 'unknown') ORDER BY rowid`,
   );
   const selectTarget = db.prepare(
-    `SELECT s.room_id AS roomId, w.attended,
+    `SELECT s.id AS scopeId, s.room_id AS roomId, w.attended,
        (SELECT m.id FROM messages m WHERE m.room_id = s.room_id AND m.bot_id = c.bot_id
          ORDER BY m.event_seq DESC LIMIT 1) AS replyToId
      FROM continuations c JOIN runs r ON r.id = c.run_id JOIN scopes s ON s.id = r.scope_id
