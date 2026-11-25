@@ -226,11 +226,14 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectRunAttended = db.prepare(
     "SELECT w.attended FROM runs r JOIN wakes w ON w.id = r.wake_id WHERE r.id = ?",
   );
-  const selectGrant = db.prepare(
-    `SELECT r.bot_id AS botId, s.room_id AS roomId, r.chain_id AS chainId, r.hop, r.depth,
-       r.task_id AS taskId, w.source, w.attended, s.tainted
+  const runPointSql = `SELECT r.bot_id AS botId, s.room_id AS roomId, r.chain_id AS chainId, r.hop,
+       r.depth, r.task_id AS taskId, w.source, w.attended, s.tainted
      FROM runs r JOIN scopes s ON s.id = r.scope_id JOIN wakes w ON w.id = r.wake_id
-     WHERE r.id = ? AND r.status = 'Running'`,
+     WHERE r.id = ?`;
+  const selectGrant = db.prepare(`${runPointSql} AND r.status = 'Running'`);
+  const selectRunPoint = db.prepare(runPointSql);
+  const selectChildren = db.prepare(
+    "SELECT id, name FROM bots WHERE parent_bot_id = ? AND archived_at IS NULL ORDER BY rowid",
   );
   const selectChain = db.prepare(
     `SELECT COUNT(*) AS turns, MIN(created_at) AS startedAt FROM runs
@@ -654,6 +657,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         tasksInRun: Count.parse(countForRun.get(runId)).count,
         ancestors,
         roommates: z.array(BotRef).parse(selectRoommates.all(run.botId)),
+        children: z.array(BotRef).parse(selectChildren.all(run.botId)),
         mentioned: z.array(BotRef).parse(selectMentioned.all(chainId)),
         inChain: z
           .array(z.object({ id: z.string() }))
@@ -663,6 +667,9 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         inRoom: (roomId: string, botId: string) => selectRoomScope.get(roomId, botId) !== undefined,
       };
     },
+
+    // A run's place in its chain, ended or not.
+    runPoint: (runId: string) => GrantRow.optional().parse(selectRunPoint.get(runId)),
 
     postFrom: (
       from: { botId: string } & ChainPoint,

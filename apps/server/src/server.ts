@@ -60,7 +60,7 @@ import type { BoxOptions } from "./boxEngine.ts";
 import { preToolUsePath, staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
-import { callBotTool, refused as refusedAnswer, shareFile } from "./botTools.ts";
+import { callBotTool, shareFile } from "./botTools.ts";
 import { outbox, probeFile } from "./boxRuntime.ts";
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { boxExecutors } from "./boxExecutors.ts";
@@ -123,7 +123,7 @@ import type { Vault } from "./vault.ts";
 import { deleteApiKey, openVault, storeApiKey, VaultError } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
 import { probeUrl } from "./waits.ts";
-import { teamToolNames } from "./team.ts";
+import { type CommandResult, createTeam, teamToolNames } from "./team.ts";
 import { createTerminals } from "./terminal.ts";
 import {
   createLimitRefresher,
@@ -1066,7 +1066,6 @@ export async function startServer({
     return { status: 200, body: { ok: true } };
   }
 
-  type CommandResult = { status: number; body: unknown };
   const notFound = { status: 404, body: { code: "not_found" } };
   type CreateBotInput = Omit<Extract<Command, { type: "create-bot" }>, "type"> & {
     parentBotId?: string;
@@ -1188,6 +1187,8 @@ export async function startServer({
     const room = bot ? store.rooms.addMember(roomId, botId) : undefined;
     return room ? { status: 200, body: room } : notFound;
   }
+
+  const team = createTeam({ store, apply: { createBot, addRoomMember }, boxesReady, modelsOf });
 
   function runCommand(command: Command) {
     const ok = { status: 200, body: { ok: true } };
@@ -1541,7 +1542,7 @@ export async function startServer({
         store.setLeadsActWithoutAsking(command.leadsActWithoutAsking);
         return ok;
       case "decide-team-request":
-        return notFound;
+        return team.decide(command);
       case "track":
         track(command.event, {});
         return ok;
@@ -1793,7 +1794,7 @@ export async function startServer({
         bot: (name, args) =>
           gateTool(store.policy, run, name, args, () =>
             teamToolNames.has(name)
-              ? refusedAnswer("unknown_tool")
+              ? team.call(run, name, args)
               : name === "share_file"
                 ? shareFile(store, run, args, {
                     dataDir,

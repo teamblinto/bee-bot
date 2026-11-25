@@ -39,6 +39,7 @@ import { type InboxFile, inboxName, openAttachments } from "./attachments.ts";
 import { openBoxes } from "./boxes.ts";
 import { openContinuations } from "./continuations.ts";
 import { openTakeovers } from "./takeovers.ts";
+import { openTeamRequests } from "./teamRequests.ts";
 import { openEffects } from "./effects.ts";
 import { openEgress } from "./egress.ts";
 import { type BotLaunch, workingFolder } from "./engine.ts";
@@ -2795,6 +2796,7 @@ export function openEventStore(dataDir: string) {
   const connectors = openConnectors(db, tx, appendAudit);
   const continuations = openContinuations(db, tx);
   const takeovers = openTakeovers(db, tx);
+  const team = openTeamRequests(db, tx);
   const { vaultStatus } = openVaultEntries(db);
   const leadsActWithoutAsking = () =>
     z.object({ value: z.number() }).parse(selectLeadsActWithoutAsking.get()).value === 1;
@@ -2904,6 +2906,7 @@ export function openEventStore(dataDir: string) {
     appendAudit,
     effects,
     policy: openPolicy(db, tx, getBot),
+    team,
     egress: openEgress(db),
     onEvent: (listener: (event: ServerEvent) => void) => {
       listeners.add(listener);
@@ -2948,7 +2951,7 @@ export function openEventStore(dataDir: string) {
       automatedAccessAcknowledgedAt: automatedAccessAt(),
       usageData: usageData(),
       limits: limits(),
-      teamRequests: [],
+      teamRequests: team.pending(),
       leadsActWithoutAsking: leadsActWithoutAsking(),
     }),
 
@@ -3187,8 +3190,8 @@ export function openEventStore(dataDir: string) {
         }
       }),
 
-    sendMessage: (input: Parameters<typeof postMessage>[0]) =>
-      transaction(() => postMessage(input)),
+    sendMessage: (input: Parameters<typeof postMessage>[0], source?: WakeSource) =>
+      transaction(() => postMessage(input, source)),
     addAttachment: (row: Parameters<typeof attachmentStore.addAttachment>[0]) =>
       transaction(() => attachmentStore.addAttachment(row)),
     sweepAttachments: (cutoff: string) =>

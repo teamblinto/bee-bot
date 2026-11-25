@@ -6,9 +6,12 @@ import { DatabaseSync } from "node:sqlite";
 import { protocolVersion } from "@beebot/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createBoxService } from "./boxSetup.ts";
+import { staticClaudeModels } from "./claude.ts";
 import type { RunTurn } from "./engine.ts";
 import { startServer } from "./server.ts";
 import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
+import { createTeam } from "./team.ts";
 
 let dataDir: string;
 let db: DatabaseSync;
@@ -232,7 +235,9 @@ describe("the team.manage grant", () => {
 
   it("refuses the next team call once the grant is taken away mid-turn", async () => {
     await leadTurn(["team.manage"], async (url, bearer, base) => {
-      expect(await called(url, bearer, "create_bot")).toMatchObject({ reason: "unknown_tool" });
+      expect(await called(url, bearer, "create_bot")).toMatchObject({
+        reason: "boxes_unavailable",
+      });
       const botId = store?.botIds()[0];
       const response = await fetch(`${base}/commands?protocolVersion=${protocolVersion}`, {
         method: "POST",
@@ -246,5 +251,337 @@ describe("the team.manage grant", () => {
       });
     });
     expect(rows("SELECT COUNT(*) AS n FROM team_requests")).toEqual([{ n: 0 }]);
+  });
+});
+
+describe("team requests", () => {
+  const token = "t".repeat(43);
+  const createArgs = { name: "Cy", personality: "Helpful" };
+  let close: (() => Promise<void>) | undefined;
+
+  afterEach(async () => {
+    await close?.();
+    close = undefined;
+  });
+
+  type Call = (name: string, args: object) => Promise<Record<string, unknown>>;
+  type Setup = { boxesUp?: () => boolean; before?: (s: EventStore, leadId: string) => void };
+
+  const fakeBoxes = (up: () => boolean) => {
+    const refuse = async () => Promise.reject(new Error("no boxes"));
+    const service = createBoxService({
+      machine: () => "beebot-test",
+      probe: async () => ({
+        found: false,
+        running: false,
+        boxdInstalled: false,
+        imageBuilt: false,
+      }),
+      initMachine: refuse,
+      startMachine: refuse,
+      stopMachine: refuse,
+      buildImage: refuse,
+      startHost: refuse,
+      setUpBefore: () => false,
+      markSetUp: () => {},
+    });
+    return { ...service, ready: up };
+  };
+
+  // One turn for a granted lead, running `turn` against its MCP endpoint. Later turns, such as the
+  // one a decision's DM line wakes, end at once.
+  async function leadTurn(turn: (call: Call, runId: string) => Promise<void>, setup: Setup = {}) {
+    const s = (store = openEventStore(dataDir));
+    const lead = s.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+    s.policy.setBotManifest(lead.id, ["team.manage"]);
+    setup.before?.(s, lead.id);
+    let pending: typeof turn | undefined = turn;
+    let done = false;
+    let failure: unknown;
+    const runTurn: RunTurn = async ({ permissions, onDelivered }) => {
+      onDelivered();
+      const current = pending;
+      pending = undefined;
+      if (current) {
+        const runId = String(
+          rows(`SELECT id FROM runs WHERE bot_id = '${lead.id}' AND status = 'Running'`)[0]?.id,
+        );
+        const call: Call = async (name, args) => {
+          const response = await fetch(permissions.url, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${permissions.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "tools/call",
+              params: { name, arguments: args },
+            }),
+          });
+          const text = await response.text();
+          const json = text.startsWith("{") ? text : (/^data: (.*)$/m.exec(text)?.[1] ?? "null");
+          return JSON.parse(JSON.parse(json).result.content[0].text);
+        };
+        await current(call, runId).catch((error: unknown) => {
+          failure = error;
+        });
+        done = true;
+      }
+      return { kind: "completed", text: "done" };
+    };
+    const server = await startServer({
+      port: 0,
+      token,
+      dataDir,
+      allowedOrigins: [],
+      fakeEngine: true,
+      store: s,
+      runTurn,
+      boxes: fakeBoxes(setup.boxesUp ?? (() => true)),
+      probeEngine: async () => ({
+        cliFound: true,
+        version: "2.1.318",
+        auth: "authenticated" as const,
+        email: null,
+        pauseReason: null,
+      }),
+    });
+    close = () => server.close();
+    s.sendMessage({ id: crypto.randomUUID(), roomId: lead.roomId, body: "Go", attended: true });
+    await vi.waitFor(() => expect(done).toBe(true), { timeout: 10_000 });
+    if (failure) {
+      throw failure;
+    }
+    const decide = async (requestId: unknown, decision: "apply" | "decline") => {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/commands?protocolVersion=${protocolVersion}`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ type: "decide-team-request", requestId, decision }),
+        },
+      );
+      return { status: response.status, body: await response.json() };
+    };
+    return { s, lead, decide };
+  }
+
+  const botCount = () => rows("SELECT COUNT(*) AS n FROM bots")[0]?.n;
+  const dmLine = (requestId: unknown) =>
+    rows(`SELECT room_id AS roomId, body FROM messages WHERE id = 'team-request:${requestId}'`);
+
+  it("queues a lead's create_bot for the owner by default, and creates nothing yet", async () => {
+    let answer: Record<string, unknown> = {};
+    const { s } = await leadTurn(async (call) => {
+      answer = await call("create_bot", createArgs);
+    });
+    expect(answer).toMatchObject({ status: "awaiting_approval" });
+    expect(s.state().teamRequests).toMatchObject([
+      { id: answer.request_id, kind: "create_bot", payload: createArgs, status: "pending" },
+    ]);
+    expect(botCount()).toBe(1);
+  });
+
+  it("applies on the owner's word: a boxed child of the lead, on the lead's engine, told in the lead's DM", async () => {
+    let answer: Record<string, unknown> = {};
+    const { s, lead, decide } = await leadTurn(async (call) => {
+      answer = await call("create_bot", createArgs);
+    });
+    const decided = await decide(answer.request_id, "apply");
+    expect(decided).toMatchObject({ status: 200, body: { status: "applied" } });
+    const child = s.getBot(String(s.team.get(String(answer.request_id))?.result?.botId));
+    expect(child).toMatchObject({
+      name: "Cy",
+      boundary: "box",
+      parentBotId: lead.id,
+      manifest: [],
+      projectPath: null,
+      engineAccountId: lead.engineAccountId,
+    });
+    expect(dmLine(answer.request_id)).toMatchObject([{ roomId: lead.roomId }]);
+    expect(s.state().teamRequests).toEqual([]);
+  });
+
+  it("declines without creating, and tells the lead", async () => {
+    let answer: Record<string, unknown> = {};
+    const { lead, decide } = await leadTurn(async (call) => {
+      answer = await call("create_bot", createArgs);
+    });
+    expect(await decide(answer.request_id, "decline")).toMatchObject({
+      status: 200,
+      body: { status: "declined" },
+    });
+    expect(botCount()).toBe(1);
+    expect(dmLine(answer.request_id)).toMatchObject([{ roomId: lead.roomId }]);
+  });
+
+  it("returns the same request for a replayed call", async () => {
+    const answers: Array<Record<string, unknown>> = [];
+    await leadTurn(async (call) => {
+      answers.push(await call("create_bot", createArgs));
+      answers.push(await call("create_bot", createArgs));
+    });
+    expect(answers[1]?.request_id).toBe(answers[0]?.request_id);
+    expect(rows("SELECT COUNT(*) AS n FROM team_requests")).toEqual([{ n: 1 }]);
+  });
+
+  it("acts at once when leads may act without asking and the run is attended and clean", async () => {
+    let answer: Record<string, unknown> = {};
+    const { s, lead } = await leadTurn(
+      async (call) => {
+        answer = await call("create_bot", createArgs);
+      },
+      { before: (s) => s.setLeadsActWithoutAsking(true) },
+    );
+    expect(answer).toMatchObject({ status: "applied" });
+    expect(s.getBot(String(answer.botId))).toMatchObject({ parentBotId: lead.id, boundary: "box" });
+  });
+
+  it("still waits for the owner from a tainted session or an unattended run, whatever the setting", async () => {
+    const answers: Array<Record<string, unknown>> = [];
+    const { s } = await leadTurn(
+      async (call, runId) => {
+        const lead = store?.botIds()[0] ?? "";
+        const team = createTeam({
+          store: store ?? openEventStore(dataDir),
+          apply: {
+            createBot: () => ({ status: 500, body: { code: "must_not_apply" } }),
+            addRoomMember: () => ({ status: 500, body: { code: "must_not_apply" } }),
+          },
+          boxesReady: () => true,
+          modelsOf: () => staticClaudeModels,
+        });
+        const unattended = team.call({ id: runId, botId: lead, attended: false }, "create_bot", {
+          ...createArgs,
+          name: "Dee",
+        });
+        answers.push(JSON.parse(unattended));
+        store?.markUntrusted(runId);
+        answers.push(await call("create_bot", createArgs));
+      },
+      { before: (s) => s.setLeadsActWithoutAsking(true) },
+    );
+    expect(answers).toMatchObject([
+      { status: "awaiting_approval" },
+      { status: "awaiting_approval" },
+    ]);
+    expect(s.state().teamRequests).toHaveLength(2);
+    expect(botCount()).toBe(1);
+  });
+
+  it("refuses a 4th create_bot in one turn", async () => {
+    const answers: Array<Record<string, unknown>> = [];
+    await leadTurn(async (call) => {
+      for (const name of ["A", "B", "C", "D"]) {
+        answers.push(await call("create_bot", { ...createArgs, name }));
+      }
+    });
+    expect(answers.map(({ status }) => status)).toEqual([
+      "awaiting_approval",
+      "awaiting_approval",
+      "awaiting_approval",
+      "refused",
+    ]);
+    expect(answers[3]).toMatchObject({ reason: "spawn_cap_turn" });
+  });
+
+  it("refuses past 20 lead-made bots, counting pending creates", async () => {
+    const answers: Array<Record<string, unknown>> = [];
+    await leadTurn(
+      async (call) => {
+        answers.push(await call("create_bot", { ...createArgs, name: "A" }));
+        answers.push(await call("create_bot", { ...createArgs, name: "B" }));
+      },
+      {
+        before: (s, leadId) => {
+          for (let i = 0; i < 19; i += 1) {
+            s.createBot({
+              name: `K${i}`,
+              personality: "",
+              engineAccountId: "fake",
+              parentBotId: leadId,
+            });
+          }
+        },
+      },
+    );
+    expect(answers).toMatchObject([
+      { status: "awaiting_approval" },
+      { status: "refused", reason: "spawn_cap_workspace" },
+    ]);
+  });
+
+  it("refuses extra arguments such as a manifest", async () => {
+    let answer: Record<string, unknown> = {};
+    await leadTurn(async (call) => {
+      answer = await call("create_bot", { ...createArgs, manifest: ["team.manage"] });
+    });
+    expect(answer).toMatchObject({ status: "refused", reason: "invalid_arguments" });
+    expect(rows("SELECT COUNT(*) AS n FROM team_requests")).toEqual([{ n: 0 }]);
+  });
+
+  it("refuses a create_bot when boxes are unavailable", async () => {
+    let answer: Record<string, unknown> = {};
+    await leadTurn(
+      async (call) => {
+        answer = await call("create_bot", createArgs);
+      },
+      { boxesUp: () => false },
+    );
+    expect(answer).toMatchObject({ status: "refused", reason: "boxes_unavailable" });
+  });
+
+  it("lets a lead delegate to its own child with no shared room", async () => {
+    let answer: Record<string, unknown> = {};
+    await leadTurn(
+      async (call) => {
+        answer = await call("delegate", { to: "Kid", goal: "Tidy up" });
+      },
+      {
+        before: (s, leadId) => {
+          s.createBot({
+            name: "Kid",
+            personality: "",
+            engineAccountId: "fake",
+            parentBotId: leadId,
+          });
+        },
+      },
+    );
+    expect(answer).toMatchObject({ status: "delegated", to: "Kid" });
+  });
+
+  it("apply fails cleanly when the world moved", async () => {
+    let up = true;
+    let answer: Record<string, unknown> = {};
+    const { s, lead, decide } = await leadTurn(
+      async (call) => {
+        answer = await call("create_bot", createArgs);
+      },
+      { boxesUp: () => up },
+    );
+    up = false;
+    expect(await decide(answer.request_id, "apply")).toMatchObject({
+      status: 200,
+      body: { status: "failed", result: { code: "boxes_unavailable" } },
+    });
+    expect(botCount()).toBe(1);
+    expect(s.state().teamRequests).toEqual([]);
+    expect(dmLine(answer.request_id)).toMatchObject([{ roomId: lead.roomId }]);
+  });
+
+  it("refuses a second decision on the same request", async () => {
+    let answer: Record<string, unknown> = {};
+    const { decide } = await leadTurn(async (call) => {
+      answer = await call("create_bot", createArgs);
+    });
+    expect((await decide(answer.request_id, "decline")).status).toBe(200);
+    expect(await decide(answer.request_id, "apply")).toMatchObject({
+      status: 409,
+      body: { code: "team_request_closed" },
+    });
+    expect(botCount()).toBe(1);
   });
 });

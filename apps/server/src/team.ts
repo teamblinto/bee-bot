@@ -1,3 +1,21 @@
+import * as NodeCrypto from "node:crypto";
+
+import {
+  type Bot,
+  BotModel,
+  type Command,
+  EngineAccountId,
+  type EngineModel,
+  SkillName,
+  type TeamRequest,
+} from "@beebot/contracts";
+import { z } from "zod";
+
+import { answer, refused } from "./botTools.ts";
+import { checkDelegation, clampLimits } from "./limits.ts";
+import { canonical } from "./policy.ts";
+import type { EventStore } from "./store.ts";
+
 const text = { type: "string" };
 const botRef = { type: "string", description: "Bot name or id" };
 const schema = (properties: Record<string, object>, required: string[]) => ({
@@ -62,3 +80,259 @@ export const teamTools = [
 ];
 
 export const teamToolNames = new Set(teamTools.map(({ name }) => name));
+
+export type CommandResult = { status: number; body: unknown };
+
+const CreateBot = z.strictObject({
+  name: z.string().trim().min(1).max(80),
+  personality: z.string().trim().max(4000),
+  model: BotModel.optional(),
+  skills: z.array(SkillName).max(20).optional(),
+  join_rooms: z.array(z.string()).max(10).optional(),
+  first_task: z.string().trim().min(1).max(32_000).optional(),
+});
+type CreateBot = z.infer<typeof CreateBot>;
+
+export const leadCaps = { createsPerTurn: 3, spawnedInWorkspace: 20, pendingPerLead: 10 };
+
+const awaiting = "The owner decides in Needs you. End your turn; you'll hear back in your DM.";
+const Code = z.object({ code: z.string() });
+const Made = z.object({ id: z.string() });
+type Outcome = { status: "applied" | "failed"; result: Record<string, unknown> };
+const failed = (code: string): Outcome => ({ status: "failed", result: { code } });
+
+function answerFor(request: TeamRequest) {
+  const { id: request_id, status } = request;
+  return status === "pending"
+    ? answer({ status: "awaiting_approval", request_id, note: awaiting })
+    : answer({ status, request_id, ...request.result });
+}
+
+function notice({ id, kind, status, result }: TeamRequest) {
+  const what = `your ${kind} request (${id})`;
+  if (status === "declined") {
+    return `The owner declined ${what}. Nothing was changed.`;
+  }
+  const detail = JSON.stringify(result ?? {});
+  return status === "applied"
+    ? `The owner approved ${what}, and it is done: ${detail}`
+    : `The owner approved ${what}, but it could not be applied: ${detail}`;
+}
+
+// A lead's team tools. Each call is a request the owner decides on NeedsYou, applied at once only
+// when the owner lets leads act and the run is attended and has read nothing untrusted.
+export function createTeam(deps: {
+  store: EventStore;
+  apply: {
+    createBot: (input: {
+      name: string;
+      personality: string;
+      model: string;
+      engineAccountId: z.infer<typeof EngineAccountId>;
+      parentBotId: string;
+      spawnKey: string;
+      forceBox: true;
+    }) => CommandResult;
+    addRoomMember: (roomId: string, botId: string) => CommandResult;
+  };
+  boxesReady: () => boolean;
+  modelsOf: (engine: string) => EngineModel[];
+}) {
+  const { store, apply } = deps;
+
+  // Checked when asked and again when applied, since the world can move in between.
+  function checkCreate(lead: Bot, args: CreateBot) {
+    if (!deps.boxesReady()) {
+      return "boxes_unavailable";
+    }
+    const model = args.model ?? lead.model;
+    if (!deps.modelsOf(lead.engineAccountId).some(({ id }) => id === model)) {
+      return "unknown_model";
+    }
+    const outside = (args.join_rooms ?? []).some((roomId) => {
+      const room = store.rooms.getRoom(roomId);
+      return room?.kind !== "group" || !room.members.includes(lead.id);
+    });
+    return outside ? "not_in_room" : undefined;
+  }
+
+  function firstTask(request: TeamRequest, lead: Bot, childId: string, goal: string) {
+    const point = store.tasks.runPoint(request.runId);
+    if (!point) {
+      return { refused: "run_gone" };
+    }
+    const { source } = point;
+    const task = store.tasks.createTask(
+      {
+        kind: "delegate",
+        chainId: point.chainId ?? request.runId,
+        hop: point.hop + 1,
+        depth: point.depth + 1,
+        parentRunId: request.runId,
+        requesterBotId: lead.id,
+        ownerBotId: childId,
+        roomId: point.roomId,
+        goal,
+        parentTaskId: point.taskId,
+        origin: source === "routine" ? "routine" : source === "wait" ? "wake" : "human",
+        deliveryKey: `team:${request.id}`,
+        attended: point.attended,
+      },
+      clampLimits(store.readLimits()).fanOut,
+    );
+    return "refused" in task ? { refused: task.refused } : { taskId: task.id };
+  }
+
+  // Once the bot exists the request counts as applied: a join, skill or task that is refused is
+  // recorded in the result rather than undoing the bot.
+  function applyCreate(request: TeamRequest, made: { botId?: string }): Outcome {
+    const lead = store.getBot(request.requestedByBotId);
+    if (!lead) {
+      return failed("lead_gone");
+    }
+    const args = CreateBot.parse(request.payload);
+    const problem = checkCreate(lead, args);
+    if (problem) {
+      return failed(problem);
+    }
+    const engine = EngineAccountId.safeParse(lead.engineAccountId).data;
+    if (!engine) {
+      return failed("unknown_engine");
+    }
+    const created = apply.createBot({
+      name: args.name,
+      personality: args.personality,
+      model: args.model ?? lead.model,
+      engineAccountId: engine,
+      parentBotId: lead.id,
+      spawnKey: `team:${request.id}`,
+      forceBox: true,
+    });
+    if (created.status !== 200) {
+      return failed(Code.safeParse(created.body).data?.code ?? "apply_failed");
+    }
+    const botId = Made.parse(created.body).id;
+    made.botId = botId;
+    const skippedRooms = (args.join_rooms ?? []).filter(
+      (roomId) => apply.addRoomMember(roomId, botId).status !== 200,
+    );
+    const skippedSkills = (args.skills ?? []).filter(
+      (skill) => typeof store.setBotSkill(botId, skill, true) === "string",
+    );
+    const task = args.first_task && firstTask(request, lead, botId, args.first_task);
+    return {
+      status: "applied",
+      result: {
+        botId,
+        ...(skippedRooms.length > 0 && { skippedRooms }),
+        ...(skippedSkills.length > 0 && { skippedSkills }),
+        ...(task && { firstTask: task }),
+      },
+    };
+  }
+
+  // Undefined when the request was no longer pending.
+  function applyRequest(request: TeamRequest) {
+    const made: { botId?: string } = {};
+    let outcome: Outcome;
+    try {
+      outcome = applyCreate(request, made);
+    } catch (error) {
+      console.error(`beebotd: team request ${request.id} failed`, error);
+      outcome = made.botId
+        ? { status: "applied", result: { botId: made.botId, code: "apply_incomplete" } }
+        : failed("apply_failed");
+    }
+    return store.team.finish(request.id, outcome.status, outcome.result);
+  }
+
+  return {
+    call: (run: { id: string; botId: string; attended: boolean }, name: string, args: unknown) => {
+      if (name !== "create_bot") {
+        return refused("unknown_tool");
+      }
+      const grant = store.tasks.runGrant(run.id);
+      const lead = store.getBot(run.botId);
+      if (!grant || !lead) {
+        return refused("run_ended");
+      }
+      const parsed = CreateBot.safeParse(args);
+      if (!parsed.success) {
+        return refused("invalid_arguments");
+      }
+      const payload = parsed.data;
+      const digest = NodeCrypto.createHash("sha256")
+        .update(JSON.stringify(canonical({ kind: name, args: payload })))
+        .digest("hex");
+      const spawnKey = `${run.id}:${digest}`;
+      const replayed = store.team.byKey(spawnKey);
+      if (replayed) {
+        return answerFor(replayed);
+      }
+      const problem = checkCreate(lead, payload);
+      if (problem) {
+        return refused(problem);
+      }
+      if (payload.first_task) {
+        const { hop, depth, turns, startedAt, tasksInRun, tree } = grant;
+        const verdict = checkDelegation(clampLimits(store.readLimits()), {
+          chain: { hop, depth, turns, startedAt },
+          tasksInRun,
+          now: new Date().toISOString(),
+          tree,
+        });
+        if (verdict.verdict === "refuse") {
+          return refused(verdict.reason);
+        }
+      }
+      if (store.team.countForRun(run.id, name) >= leadCaps.createsPerTurn) {
+        return refused("spawn_cap_turn");
+      }
+      if (store.spawnedBotCount() + store.team.pendingCreates() >= leadCaps.spawnedInWorkspace) {
+        return refused("spawn_cap_workspace");
+      }
+      if (store.team.pendingFor(lead.id) >= leadCaps.pendingPerLead) {
+        return refused("too_many_pending");
+      }
+      const { request, created } = store.team.insert({
+        kind: name,
+        payload,
+        requestedByBotId: lead.id,
+        runId: run.id,
+        spawnKey,
+      });
+      // Fails closed: a run with no session legs counts as having read something untrusted.
+      const clean = store.policy.sessionLegs(run.id)?.readsUntrusted === false;
+      if (created && store.leadsActWithoutAsking() && run.attended && clean) {
+        return answerFor(applyRequest(request) ?? request);
+      }
+      return answerFor(request);
+    },
+
+    decide: ({
+      requestId,
+      decision,
+    }: Extract<Command, { type: "decide-team-request" }>): CommandResult => {
+      const request = store.team.get(requestId);
+      if (!request) {
+        return { status: 404, body: { code: "not_found" } };
+      }
+      const decided =
+        request.status !== "pending"
+          ? undefined
+          : decision === "apply"
+            ? applyRequest(request)
+            : store.team.finish(request.id, "declined", null);
+      if (!decided) {
+        return { status: 409, body: { code: "team_request_closed" } };
+      }
+      const lead = store.getBot(decided.requestedByBotId);
+      if (lead) {
+        const body = notice(decided);
+        const id = `team-request:${decided.id}`;
+        store.sendMessage({ id, roomId: lead.roomId, body, attended: true }, "approval");
+      }
+      return { status: 200, body: decided };
+    },
+  };
+}

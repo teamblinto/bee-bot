@@ -21,6 +21,7 @@ import {
   parseManifest,
   type PolicyDecision,
   ruleFor,
+  type ToolLabels,
   type ToolRule,
 } from "./broker.ts";
 import type { StoreTx } from "./store.ts";
@@ -31,7 +32,7 @@ const flag = z.number().transform((value) => value === 1);
 const Legs = z.object({ readsUntrusted: flag, readsPrivate: flag, sideEffect: flag });
 const BotPolicy = z.object({ access: BotAccess, manifest: z.string(), control: BotControl });
 
-function canonical(value: unknown): unknown {
+export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonical);
   }
@@ -140,6 +141,11 @@ export function openPolicy(
         });
         return decision;
       }),
+
+    sessionLegs: (runId: string): ToolLabels | undefined => {
+      const row = selectLegs.get(runId);
+      return row === undefined ? undefined : Legs.parse(row);
+    },
 
     // Takes effect at the next call: every call reads the manifest afresh.
     setBotManifest: (botId: string, manifest: Manifest) =>

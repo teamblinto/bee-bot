@@ -244,7 +244,7 @@ const WaitUntil = z.object({
   timeout_minutes: z.number().int().min(1).max(maxWaitMinutes),
 });
 
-const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
+export const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
 export const refused = (reason: string) =>
   answer({ status: "refused", reason, note: "This is an answer, not an error. Tell the user." });
 const malformed = (tool: string) => refused(`invalid_arguments for ${tool}`);
@@ -257,10 +257,10 @@ const named =
   ({ id, name }: { id: string; name: string }) =>
     id === to || name.toLowerCase() === to.toLowerCase() || mentionKey(name) === to.toLowerCase();
 
-// The one rule for reaching another bot: it shares a room with the caller, or the owner mentioned
-// it in this chain. Never the caller itself.
+// The one rule for reaching another bot: it shares a room with the caller, the owner mentioned it
+// in this chain, or the caller created it. Never the caller itself.
 function reachableBot(grant: Grant, to: string) {
-  return [...grant.roommates, ...grant.mentioned].find(
+  return [...grant.roommates, ...grant.mentioned, ...grant.children].find(
     (bot) => bot.id !== grant.botId && named(to)(bot),
   );
 }
