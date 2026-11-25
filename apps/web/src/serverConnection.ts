@@ -704,6 +704,8 @@ const errorSentences: Record<string, string> = {
   mention_limit: "That names too many bots at once. Mention fewer.",
   no_bot_addressed: "Which bot should answer? Mention one with @, or set a room default.",
   not_member: "That bot isn't in this room.",
+  too_many_members: "Everyone answering works for rooms of up to 6 bots.",
+  default_bot_required: "Pick a default bot for this room first.",
   bot_archived: "That bot is archived. Restore it first.",
   attachment_not_found: "A file wasn't uploaded, or was already sent. Attach it again.",
   attachment_too_large: "A file can be at most 50 MB.",
