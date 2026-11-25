@@ -378,6 +378,12 @@ it("reaches the same meetings by replay as by snapshot, dropping closed meetings
     event: meetingEvent(6, meeting("m2", "closed", [done])),
   });
   expect(finished.chat.meetings).toEqual([]);
+
+  const deleted = applyServerMessage(replayed, {
+    type: "event",
+    event: { seq: 6, createdAt: "now", type: "bot.deleted", botId: "bot" },
+  });
+  expect(deleted.chat.meetings).toEqual([]);
 });
 
 it("accumulates deltas and clears them when the run ends, keeping the cursor", () => {

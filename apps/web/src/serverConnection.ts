@@ -138,6 +138,7 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
           ),
           boxes: chat.boxes.filter(mine),
           continuations: chat.continuations.filter(mine),
+          meetings: chat.meetings.filter(({ facilitatorBotId }) => facilitatorBotId !== botId),
           // Its own connectors went with it, and its grants on the shared ones.
           connectors: chat.connectors
             .filter(({ ownerBotId }) => ownerBotId !== botId)
