@@ -469,6 +469,7 @@ export function openMeetings(
   const cancel = (meeting: Meeting, why: string, now: string) => {
     if (!("refused" in transitionIn(meeting.id, "cancelled", now))) {
       notice(meeting, why);
+      deliver.cancelWakesByKey(`meeting:${meeting.id}:`);
     }
   };
   const nameOf = (botId: string) => Named.parse(selectBotName.get(botId)).name;
@@ -732,9 +733,9 @@ export function openMeetings(
       }),
 
     // Runs inside claimRun's transaction: the meeting starts when its facilitator's turn does.
-    claimed: (run: { botId: string }, roomId: string, now: string) => {
+    claimed: (wakeKey: string, roomId: string, now: string) => {
       const meeting = liveIn(roomId);
-      if (meeting?.status !== "open" || meeting.facilitatorBotId !== run.botId) {
+      if (meeting?.status !== "open" || wakeKey !== `meeting:${meeting.id}:open`) {
         return;
       }
       const cap = turnCap(

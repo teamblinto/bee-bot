@@ -3713,8 +3713,9 @@ export function openEventStore(dataDir: string) {
         setRunLane.run((boundary === "box" ? laneOfBox(bot) : null) ?? accountLane, id);
         const { attended } = Attended.parse(selectWakeAttended.get(run.wakeId));
         let scope = getScope(run.scopeId);
-        if (RunWake.safeParse(selectRunWake.get(id)).data?.source === "meeting") {
-          meetings.claimed(run, scope.roomId, now);
+        const runWake = RunWake.safeParse(selectRunWake.get(id)).data;
+        if (runWake?.source === "meeting") {
+          meetings.claimed(runWake.key, scope.roomId, now);
         }
         const highSeq = unackedInput(scope).at(-1)?.seq ?? scope.ackedEventSeq;
         let sessionId = scope.sessionId;

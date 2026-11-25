@@ -442,8 +442,16 @@ describe("opening a meeting", () => {
     store.meetings.tick(later(60), true);
     expect(store.meetings.get(id)?.status).toBe("cancelled");
     expect(messagesIn(room.id).at(-1)?.body).toMatch(/didn't start within an hour/);
-    const [wake] = store.dueWakes(later(60)).filter(({ botId }) => botId === ava.id);
-    expect(wake && store.wakeContext(wake, later(60)).hasInput).toBe(false);
+    expect(store.dueWakes(later(60)).filter(({ botId }) => botId === ava.id)).toEqual([]);
+  });
+
+  it("starts a meeting only from its own opening wake", () => {
+    const { ava, room, id, scheduledAt } = booked();
+    store.meetings.tick(scheduledAt, true);
+    store.meetings.transition(id, "cancelled", scheduledAt);
+    insertMeeting({ id: "m2", roomId: room.id, botId: ava.id, status: "open" });
+    expect(store.runWake(start(ava.id).id)).toMatchObject({ key: `meeting:${id}:open` });
+    expect(store.meetings.get("m2")?.status).toBe("open");
   });
 });
 
