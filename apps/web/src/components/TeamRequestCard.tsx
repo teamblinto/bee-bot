@@ -86,7 +86,9 @@ export function TeamRequestCard({
           .map(([label, value]) => (
             <div key={label} className="flex gap-2">
               <dt className="shrink-0 text-ink-secondary">{label}</dt>
-              <dd className="line-clamp-3 wrap-anywhere whitespace-pre-wrap">{value}</dd>
+              <dd className="max-h-60 overflow-y-auto wrap-anywhere whitespace-pre-wrap">
+                {value}
+              </dd>
             </div>
           ))}
       </dl>

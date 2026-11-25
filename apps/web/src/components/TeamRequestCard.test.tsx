@@ -87,3 +87,9 @@ it("names bots and rooms by their ids, and says when one is gone", () => {
   expect(host.textContent).toContain("Kit");
   expect(host.textContent).toContain("Research");
 });
+
+it("shows the lead's whole first task, however long", () => {
+  const firstTask = Array.from({ length: 40 }, (_, i) => `Step ${i + 1}: do the thing.`).join("\n");
+  show(request("create_bot", { name: "Kit", first_task: firstTask }));
+  expect(host.textContent).toContain(firstTask);
+});
