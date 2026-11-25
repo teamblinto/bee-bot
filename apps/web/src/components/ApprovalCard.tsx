@@ -6,10 +6,10 @@ import {
   type PendingApproval,
 } from "@beebot/contracts";
 import { Clock } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { approvalTitle, changeLines, changeNote, hiddenCharsLine, visibleDetail } from "../labels";
-import { postCommand } from "../serverConnection";
+import { getConnectionState, postCommand, subscribeToConnection } from "../serverConnection";
 import { iconProps } from "./ui";
 
 const cardClass =
@@ -203,6 +203,10 @@ export function ContinuationCard({
   const card = useRef<HTMLElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const tasks = useSyncExternalStore(subscribeToConnection, () => getConnectionState().chat.tasks);
+  const bots = useSyncExternalStore(subscribeToConnection, () => getConnectionState().chat.bots);
+  const task = tasks.find((t) => t.needsApproval?.continuationId === continuation.id);
+  const requester = task && bots.find(({ id }) => id === task.requesterBotId)?.name;
 
   async function decide(decision: "approve" | "deny" | "always") {
     if (deciding.current) {
@@ -249,6 +253,11 @@ export function ContinuationCard({
       <CardHeader title={title}>
         <TimeLeft createdAt={continuation.createdAt} expiresAt={continuation.expiresAt} />
       </CardHeader>
+      {task && (
+        <p className={noteClass}>
+          Asked during {requester ?? "another bot"}'s task: {visibleDetail(task.goal)}
+        </p>
+      )}
       {worded ? (
         exact.length > 0 && (
           <p className="font-mono text-caption wrap-anywhere whitespace-pre-wrap text-ink-secondary">

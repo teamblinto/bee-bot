@@ -96,7 +96,9 @@ export type TaskDelivery = {
 
 export type Refused = { refused: "fan_out" };
 export type FollowUpKind = "ask" | "answer" | "rework" | "cancel";
-type FollowUpRefused = { refused: "not_found" | "not_party" | "wrong_state" | "not_reachable" };
+type FollowUpRefused = {
+  refused: "not_found" | "not_party" | "wrong_state" | "not_reachable" | "awaiting_owner";
+};
 type EndStatus = "done" | "failed" | "cancelled" | "refused";
 
 export function provenanceLabel(message: {
@@ -135,13 +137,16 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `(EXISTS (SELECT 1 FROM waits WHERE task_id = ${id} AND status = 'pending')
       OR EXISTS (SELECT 1 FROM routines r JOIN runs u ON u.id = r.created_by_run_id
         WHERE r.kind = 'once' AND r.enabled = 1 AND u.task_id = ${id}))`;
+  const handedBack =
+    "status = 'needs_input' AND json_extract(outcome_json, '$.needsApproval') IS NOT NULL";
   const selectHolds = db.prepare(`SELECT ${holds("?1")} AS held`);
   // A bot waiting on a timer keeps its slot; one waiting only on children doesn't.
   const selectBusy = db.prepare(
     `SELECT 1 FROM tasks WHERE owner_bot_id = ?1 AND status = 'open'
      UNION ALL SELECT 1 FROM runs WHERE bot_id = ?1 AND status IN ('Queued', 'Running')
      UNION ALL SELECT 1 FROM tasks t WHERE owner_bot_id = ?1 AND status = 'waiting'
-       AND ${holds("t.id")}`,
+       AND ${holds("t.id")}
+     UNION ALL SELECT 1 FROM tasks WHERE owner_bot_id = ?1 AND ${handedBack}`,
   );
   // A chain is human-origin when its first wake came from the owner.
   const selectNext = db.prepare(
@@ -158,7 +163,8 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'queued' ORDER BY rowid`,
   );
   const selectWaiting = db.prepare(
-    `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'waiting' ORDER BY rowid`,
+    `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND (status = 'waiting' OR ${handedBack})
+     ORDER BY rowid`,
   );
   const selectUnstarted = db.prepare(
     `SELECT ${taskColumns} FROM tasks WHERE owner_bot_id = ? AND status = 'open'
@@ -209,6 +215,17 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
   const selectMine = db.prepare(
     `SELECT ${taskColumns} FROM tasks
      WHERE (requester_bot_id = ? OR owner_bot_id = ?) AND status IN ${active} ORDER BY rowid`,
+  );
+  const setHandedBack = db.prepare(
+    `UPDATE tasks SET status = 'needs_input', updated_at = ?,
+       outcome_json = json_set(COALESCE(outcome_json, '{}'), '$.needsApproval', json(?))
+     WHERE id = ? AND owner_bot_id = ? AND status = 'open' RETURNING ${taskColumns}`,
+  );
+  const reopenOne = db.prepare(
+    `UPDATE tasks SET status = 'open', updated_at = ?,
+       outcome_json = json_remove(outcome_json, '$.needsApproval')
+     WHERE ${handedBack} AND json_extract(outcome_json, '$.needsApproval.continuationId') = ?
+     RETURNING ${taskColumns}`,
   );
   const setStatus = db.prepare(
     `UPDATE tasks SET status = ?, pending_json = ?, updated_at = ? WHERE id = ?
@@ -562,6 +579,9 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
         if (!allowed.includes(task.status)) {
           return { refused: "wrong_state" };
         }
+        if (kind === "answer" && task.needsApproval) {
+          return { refused: "awaiting_owner" };
+        }
         const { chainId, hop, depth } = task;
         const now = new Date().toISOString();
         if (kind === "ask") {
@@ -668,6 +688,40 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
       };
     },
 
+    // The gated action is not run here: the task waits on the owner's answer to the continuation,
+    // and its bot takes nothing else until then.
+    handBack: (runId: string, needsApproval: NeedsApproval) =>
+      transaction(() => {
+        const run = GrantRow.optional().parse(selectRunPoint.get(runId));
+        if (!run?.taskId) {
+          return undefined;
+        }
+        const now = new Date().toISOString();
+        const row = setHandedBack.get(now, JSON.stringify(needsApproval), run.taskId, run.botId);
+        if (!row) {
+          return undefined;
+        }
+        const task = changed(row);
+        const { chainId, hop, depth, roomId } = task;
+        const body = `Waiting on the owner's approval before going on: ${needsApproval.args.slice(0, 500)}. It's in Needs you.`;
+        deliver.post({
+          id: messageId("notify"),
+          roomId,
+          botId: run.botId,
+          body,
+          chainId,
+          hop,
+          depth,
+        });
+        return task;
+      }),
+
+    reopenHandedBack: (continuationId: string) =>
+      transaction(() => {
+        const row = reopenOne.get(new Date().toISOString(), continuationId);
+        return row ? changed(row) : undefined;
+      }),
+
     roommatesOf: (botId: string) => z.array(BotRef).parse(selectRoommates.all(botId)),
 
     // A run's place in its chain, ended or not.
@@ -719,7 +773,7 @@ export function openTasks(db: DatabaseSync, { transaction, emit }: StoreTx, deli
     cancelWaiting: (botId: string) => {
       for (const { id } of z.array(TaskRow).parse(selectWaiting.all(botId))) {
         const task = getTask(id);
-        if (task?.status === "waiting") {
+        if (task?.status === "waiting" || (task?.status === "needs_input" && task.needsApproval)) {
           endWithResult(task, "cancelled", noResult("cancelled"), parentAttended(task));
         }
       }

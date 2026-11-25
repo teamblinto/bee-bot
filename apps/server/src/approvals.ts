@@ -398,7 +398,7 @@ export function createApprovals({
 
   // What the bot is told: the call waits, or it can't be asked for.
   function openWaiting(
-    run: Pick<Run, "id" | "botId">,
+    run: Pick<Run, "id" | "botId" | "attended">,
     kind: ContinuationKind,
     tool: string,
     input: Record<string, unknown>,
@@ -419,6 +419,14 @@ export function createApprovals({
       request: JSON.stringify({ tool, input }),
       ttlMs: continuationTtlMs,
     });
+    if (!run.attended || store.policy.sessionLegs(run.id)?.readsUntrusted) {
+      store.tasks.handBack(run.id, {
+        tool,
+        args: resolved.shown,
+        reason: kind,
+        continuationId: id,
+      });
+    }
     return waitingMessage(id);
   }
 
@@ -622,7 +630,7 @@ export function createApprovals({
 
     // For a tool on /mcp that the broker says needs the owner: never held, as for a Box bot (R17).
     requestApproval: (
-      run: Pick<Run, "id" | "botId">,
+      run: Pick<Run, "id" | "botId" | "attended">,
       tool: string,
       input: Record<string, unknown>,
       shown?: string,

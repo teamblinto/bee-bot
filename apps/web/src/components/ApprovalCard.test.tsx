@@ -5,7 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const postCommand = vi.hoisted(() => vi.fn());
-vi.mock("../serverConnection", () => ({ postCommand }));
+const chat = vi.hoisted(() => ({ tasks: [] as unknown[], bots: [] as unknown[] }));
+vi.mock("../serverConnection", () => ({
+  postCommand,
+  getConnectionState: () => ({ chat }),
+  subscribeToConnection: () => () => {},
+}));
 
 const { ApprovalCard, ContinuationCard } = await import("./ApprovalCard");
 
@@ -24,6 +29,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
+  chat.tasks = [];
+  chat.bots = [];
 });
 
 const approval: Approval = {
@@ -178,6 +185,15 @@ it("answers a Box bot's action bound to the digest of exactly what it shows", as
     digest: continuation.digest,
     decision: "approve",
   });
+});
+
+it("names the requester's task an action was handed back from", () => {
+  chat.bots = [{ id: "ada", name: "Ada" }];
+  chat.tasks = [
+    { requesterBotId: "ada", goal: "Ship it", needsApproval: { continuationId: continuation.id } },
+  ];
+  act(() => root.render(<ContinuationCard name="Bo" continuation={continuation} connected />));
+  expect(host.textContent).toContain("Asked during Ada's task: Ship it");
 });
 
 it("heads an action on this PC with its words, invisible characters shown", () => {

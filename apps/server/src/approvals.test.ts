@@ -1700,6 +1700,202 @@ describe("in Box mode a tool call", () => {
     expect(bodies().filter((body) => body.startsWith("Denied"))).toEqual([]);
     expect(ran).toEqual([]);
   });
+
+  describe("from a delegated run", () => {
+    const line =
+      "Waiting on the owner's approval before going on: Bash: echo hi. It's in Needs you.";
+
+    // Each turn reads untrusted text before it acts.
+    const tainting: RunTurn = (input) => {
+      const db = new DatabaseSync(NodePath.join(dataDir, "beebot.db"));
+      db.exec(`UPDATE scopes SET tainted = 1, legs_untrusted = 1
+        WHERE id IN (SELECT scope_id FROM runs WHERE status = 'Running')`);
+      db.close();
+      return fakeRunTurn(input);
+    };
+
+    // Ada delegates to the Box bot Bo. An unattended run needs a box, so these runs are attended
+    // and tainted, unless `tainted` is false.
+    async function delegated(tainted = true, options: BootOptions = {}) {
+      const env = await boxBoot(tainted ? { runTurn: tainting, ...options } : options);
+      const ada = env.store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+      const body = "hi";
+      env.store.sendMessage({
+        id: NodeCrypto.randomUUID(),
+        roomId: ada.roomId,
+        body,
+        attended: true,
+      });
+      const adaRuns = () => rows(`SELECT id, status FROM runs WHERE bot_id = '${ada.id}'`);
+      await vi.waitFor(() => expect(adaRuns()[0]?.status).toBe("Completed"), { timeout: 3000 });
+      const parentRunId = String(adaRuns()[0]?.id);
+      const delegate = (goal: string) => {
+        const task = env.store.tasks.createTask(
+          {
+            kind: "delegate",
+            chainId: NodeCrypto.randomUUID(),
+            hop: 1,
+            depth: 1,
+            parentRunId,
+            requesterBotId: ada.id,
+            ownerBotId: env.bot.id,
+            roomId: ada.roomId,
+            goal,
+            deliveryKey: NodeCrypto.randomUUID(),
+            attended: true,
+          },
+          3,
+        );
+        if ("refused" in task) {
+          throw new Error("refused");
+        }
+        return task.id;
+      };
+      const task = (id: string) => env.store.tasks.getTask(id);
+      const toAda = () =>
+        env.store
+          .state()
+          .messages.filter((m) => m.roomId === ada.roomId && m.botId === env.bot.id)
+          .map((m) => m.body);
+      return { ...env, ada, delegate, task, toAda };
+    }
+
+    it("hands a delegated box run's gated action back: task needs_input with needsApproval, a line in the requester's room, no wake", () => {
+      const store = openEventStore(dataDir);
+      cleanups.push(() => store.close());
+      const claim = (botId: string) => {
+        const wake = store.dueWakes(new Date().toISOString()).find((w) => w.botId === botId);
+        store.queueRun(wake as NonNullable<typeof wake>);
+        const queued = store.queuedRuns().find((r) => r.botId === botId);
+        return store.claimRun(queued?.id as string, "boot", new Date().toISOString());
+      };
+      const ada = store.createBot({ name: "Ada", personality: "", engineAccountId: "fake" });
+      const bo = store.createBot({ name: "Bo", personality: "", engineAccountId: "claude" });
+      store.sendMessage({ id: "m", roomId: ada.roomId, body: "hi", attended: false });
+      const parent = claim(ada.id);
+      const task = store.tasks.createTask(
+        {
+          kind: "delegate",
+          chainId: "chain",
+          hop: 1,
+          depth: 1,
+          parentRunId: parent?.id as string,
+          requesterBotId: ada.id,
+          ownerBotId: bo.id,
+          roomId: ada.roomId,
+          goal: "Tidy up",
+          deliveryKey: "k",
+          attended: false,
+        },
+        3,
+      );
+      const id = "id" in task ? task.id : "";
+      store.finishRun(parent?.id as string, "boot", {
+        status: "Completed",
+        reason: null,
+        reply: "ok",
+      });
+      const run = claim(bo.id);
+      expect(run?.attended).toBe(false);
+
+      const approvals = createApprovals({
+        store,
+        dataDir,
+        onChange: () => {},
+        hasSurface: () => true,
+        executors: new Map([["Bash", execute]]),
+      });
+      cleanups.push(() => approvals.close());
+      const asked = { id: run?.id as string, botId: bo.id, attended: false };
+      const answer = approvals.requestApproval(asked, "Bash", { command: "echo hi" });
+      const [card] = store.state().continuations;
+      expect(answer).toBe(waitingMessage(card?.id as string));
+      expect(store.tasks.getTask(id)).toMatchObject({
+        status: "needs_input",
+        needsApproval: {
+          tool: "Bash",
+          args: "Bash: echo hi",
+          reason: "approval",
+          continuationId: card?.id,
+        },
+      });
+      const toAda = store
+        .state()
+        .messages.filter((m) => m.roomId === ada.roomId && m.botId === bo.id);
+      expect(toAda.map((m) => m.body)).toEqual([line]);
+      expect(
+        rows(`SELECT id FROM wakes WHERE bot_id = '${ada.id}' AND status = 'pending'`),
+      ).toEqual([]);
+      expect(ran).toEqual([]);
+    });
+
+    it("does the same for an attended run from a tainted session", async () => {
+      const { delegate, task, toAda, waiting } = await delegated();
+      const id = delegate("/approve Bash echo hi");
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      expect(task(id)?.needsApproval).toMatchObject({
+        args: "Bash: echo hi",
+        continuationId: card.id,
+      });
+      expect(toAda()).toEqual([line]);
+    });
+
+    it("leaves an attended clean run's task alone", async () => {
+      const { delegate, task, toAda, waiting, lastRun } = await delegated(false);
+      const id = delegate("/approve Bash echo hi");
+      await waiting();
+      await vi.waitFor(() => expect(lastRun()?.status).toBe("WaitingUser"));
+      expect(task(id)).toMatchObject({ status: "open", needsApproval: null });
+      expect(toAda()).toEqual([]);
+    });
+
+    it("resumes the task on the owner's approval, and its next reply settles it to the requester", async () => {
+      const { delegate, task, toAda, waiting, answer } = await delegated();
+      const id = delegate("/approve Bash echo hi");
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      expect((await answer(card, "approve")).status).toBe(200);
+      await vi.waitFor(() => expect(task(id)?.status).toBe("done"));
+      expect(task(id)?.needsApproval).toBeNull();
+      expect(toAda()).toEqual([line, expect.stringMatching(/^Test engine reply: /)]);
+      expect(ran).toHaveLength(1);
+    });
+
+    it("opens nothing else for the bot while it waits on the owner", async () => {
+      const { delegate, task, waiting, answer } = await delegated();
+      const first = delegate("/approve Bash echo hi");
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(first)?.status).toBe("needs_input"));
+      const second = delegate("Then this");
+      expect(task(second)?.status).toBe("queued");
+      await answer(card, "approve");
+      await vi.waitFor(() => expect(task(first)?.status).toBe("done"));
+      await vi.waitFor(() => expect(task(second)?.status).toBe("done"));
+    });
+
+    it("reopens on expiry too, so the bot hears it was not run", async () => {
+      const { bodies, delegate, task } = await delegated(true, { continuationTtlMs: 300 });
+      const id = delegate("/approve Bash echo hi");
+      await vi.waitFor(() => expect(task(id)?.status).toBe("done"), { timeout: 5000 });
+      expect(bodies()).toContain("No answer in time, so this was not run:\nBash: echo hi");
+      expect(ran).toEqual([]);
+    });
+
+    it("refuses a requester answering a task that waits on the owner, and a stop ends it", async () => {
+      const { store, bot, post, ada, delegate, task, waiting } = await delegated();
+      const id = delegate("/approve Bash echo hi");
+      await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      const reply = { taskId: id, botId: ada.id, message: "Go ahead", attended: true };
+      expect(store.tasks.followUp({ ...reply, kind: "answer" })).toEqual({
+        refused: "awaiting_owner",
+      });
+      expect(task(id)?.status).toBe("needs_input");
+      await post({ type: "stop-bot", botId: bot.id });
+      await vi.waitFor(() => expect(task(id)?.status).toBe("cancelled"));
+    });
+  });
 });
 
 describe("the owner's computer", () => {

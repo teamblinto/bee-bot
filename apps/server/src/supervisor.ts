@@ -196,15 +196,19 @@ export function createSupervisor({
     for (const row of store.continuations.unresumedContinuations()) {
       try {
         const target = store.continuations.deliveryTarget(row.id);
+        const reopened = store.tasks.reopenHandedBack(row.id);
         const sent =
           target &&
-          store.sendMessage({
-            id: `continuation:${row.id}`,
-            roomId: target.roomId,
-            body: outcomeText(row),
-            attended: row.reason === "owner" || target.attended,
-            ...(target.replyToId && { replyToId: target.replyToId }),
-          });
+          store.sendMessage(
+            {
+              id: `continuation:${row.id}`,
+              roomId: target.roomId,
+              body: outcomeText(row),
+              attended: row.reason === "owner" || target.attended,
+              ...(target.replyToId && { replyToId: target.replyToId }),
+            },
+            reopened ? "continue" : undefined,
+          );
         if (sent !== "sent" && sent !== "duplicate") {
           console.error(`beebotd: outcome of ${row.id} was not delivered: ${sent}`);
         }
