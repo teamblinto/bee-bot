@@ -1185,6 +1185,9 @@ export async function startServer({
       return { status: 409, body: { code: "bot_archived" } };
     }
     const room = bot ? store.rooms.addMember(roomId, botId) : undefined;
+    if (room === "too_many_members") {
+      return { status: 409, body: { code: room } };
+    }
     return room ? { status: 200, body: room } : notFound;
   }
 
@@ -1273,17 +1276,20 @@ export async function startServer({
       case "create-room":
         return createRoom(command);
       case "update-room": {
-        const { roomId, name, defaultBotId } = command;
-        const room = store.rooms.updateGroupRoom(roomId, {
+        const { roomId, name, defaultBotId, type: _, ...settings } = command;
+        const renamed = store.rooms.updateGroupRoom(roomId, {
           ...(name !== undefined && { name }),
           ...(defaultBotId !== undefined && { defaultBotId }),
         });
+        const room =
+          typeof renamed === "string" ? renamed : store.rooms.setRoomSettings(roomId, settings);
         if (room === "not_found") {
           return notFound;
         }
-        return room === "not_member"
-          ? { status: 400, body: { code: room } }
-          : { status: 200, body: room };
+        if (typeof room === "string") {
+          return { status: room === "too_many_members" ? 409 : 400, body: { code: room } };
+        }
+        return { status: 200, body: room };
       }
       case "add-room-member":
         return addRoomMember(command.roomId, command.botId);

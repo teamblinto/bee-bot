@@ -378,3 +378,168 @@ describe("a busy bot", () => {
     expect(engine.turns[1]?.prompt).toBe("second");
   });
 });
+
+describe("room settings", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 1200));
+
+  it("runs everyone_optional members one at a time, so the second sees the first's reply, and posts nothing for NO_RESPONSE", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns, roomMessages } =
+      await boot();
+    const [ada, ben, cy] = [await createBot("Ada"), await createBot("Ben"), await createBot("Cy")];
+    const room = await createRoom([ada, ben, cy]);
+    const updated = await command({
+      type: "update-room",
+      roomId: room.id,
+      responderMode: "everyone_optional",
+    });
+    expect(await updated.json()).toMatchObject({ responderMode: "everyone_optional" });
+    expect((await send(room.id, "thoughts?")).status).toBe(200);
+    await expectTurns(1);
+    expect(engine.turns[0]?.botId).toBe(ada.id);
+    expect(engine.turns[0]?.prompt).toContain("Everyone here was asked.");
+    await settle();
+    expect(engine.turns).toHaveLength(1);
+    engine.turns[0]?.finish(done("Ada's take."));
+    await expectTurns(2);
+    expect(engine.turns[1]?.botId).toBe(ben.id);
+    expect(engine.turns[1]?.prompt).toContain("Ada: Ada's take.");
+    engine.turns[1]?.finish(done("NO_RESPONSE"));
+    await expectTurns(3);
+    expect(engine.turns[2]?.botId).toBe(cy.id);
+    engine.turns[2]?.finish(done("Cy adds one thing."));
+    await vi.waitFor(() => expect(roomMessages(room)).toHaveLength(3));
+    expect(roomMessages(room).map(({ body }) => body)).toEqual([
+      "thoughts?",
+      "Ada's take.",
+      "Cy adds one thing.",
+    ]);
+  });
+
+  it("wakes all 6 members of an everyone_optional room for one human message", async () => {
+    real.on = true;
+    const { createBot, createRoom, command, send } = await boot();
+    const bots = [];
+    for (const name of ["A", "B", "C", "D", "E", "F"]) {
+      bots.push(await createBot(name));
+    }
+    const room = await createRoom(bots);
+    await command({ type: "update-room", roomId: room.id, responderMode: "everyone_optional" });
+    expect((await send(room.id, "thoughts?")).status).toBe(200);
+    expect(checks.mention).toEqual([]);
+    expect(query("SELECT bot_id AS botId FROM wakes ORDER BY rowid")).toEqual(
+      bots.map(({ id }) => ({ botId: id })),
+    );
+  });
+
+  it("refuses everyone_optional above 6 members, and a 7th member in such a room", async () => {
+    const { createBot, createRoom, command, store } = await boot();
+    const bots = [];
+    for (const name of ["A", "B", "C", "D", "E", "F", "G"]) {
+      bots.push(await createBot(name));
+    }
+    const [seventh] = bots.splice(6);
+    const big = await createRoom([...bots, seventh as Bot]);
+    const refused = await command({
+      type: "update-room",
+      roomId: big.id,
+      responderMode: "everyone_optional",
+    });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ code: "too_many_members" });
+    expect(store.rooms.getRoom(big.id)?.responderMode).toBe("mentions");
+    const six = await createRoom(bots);
+    await command({ type: "update-room", roomId: six.id, responderMode: "everyone_optional" });
+    const added = await command({
+      type: "add-room-member",
+      roomId: six.id,
+      botId: seventh?.id ?? "",
+    });
+    expect(added.status).toBe(409);
+    expect(await added.json()).toEqual({ code: "too_many_members" });
+    expect(store.rooms.getRoom(six.id)?.members).toHaveLength(6);
+  });
+
+  it("refuses lead mode without a member lead and default mode without a default", async () => {
+    const { createBot, createRoom, command } = await boot();
+    const [ada, ben, cy] = [await createBot("Ada"), await createBot("Ben"), await createBot("Cy")];
+    const room = await createRoom([ada, ben]);
+    const lead = (leadBotId: string | null) =>
+      command({ type: "update-room", roomId: room.id, responderMode: "lead", leadBotId });
+    expect(await (await lead(cy.id)).json()).toEqual({ code: "not_member" });
+    expect(await (await lead(null)).json()).toEqual({ code: "not_member" });
+    const noDefault = await command({
+      type: "update-room",
+      roomId: room.id,
+      responderMode: "default",
+    });
+    expect(noDefault.status).toBe(400);
+    expect(await noDefault.json()).toEqual({ code: "default_bot_required" });
+    const withDefault = await command({
+      type: "update-room",
+      roomId: room.id,
+      defaultBotId: ada.id,
+      responderMode: "default",
+    });
+    expect(await withDefault.json()).toMatchObject({
+      responderMode: "default",
+      defaultBotId: ada.id,
+    });
+  });
+
+  it("clears the lead when it leaves the room", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns } = await boot();
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    const room = await createRoom([ada, ben], ada);
+    await command({
+      type: "update-room",
+      roomId: room.id,
+      responderMode: "lead",
+      leadBotId: ben.id,
+    });
+    const left = await command({ type: "remove-room-member", roomId: room.id, botId: ben.id });
+    expect(await left.json()).toMatchObject({ responderMode: "lead", leadBotId: null });
+    await send(room.id, "go");
+    await expectTurns(1);
+    expect(engine.turns[0]?.botId).toBe(ada.id);
+  });
+
+  it("puts the owner's bulletin at the top of a member's room prompt", async () => {
+    const { createBot, createRoom, command, send, engine, expectTurns } = await boot();
+    const ada = await createBot("Ada");
+    const room = await createRoom([ada], ada);
+    await command({ type: "update-room", roomId: room.id, bulletin: "Ship by Friday." });
+    await send(room.id, "status?");
+    await expectTurns(1);
+    expect(engine.turns[0]?.prompt).toMatch(
+      /^\[Room bulletin from the owner\]\nShip by Friday\.\n\[End of bulletin\]\n\n\[New messages/,
+    );
+  });
+
+  it("holds a room to its own post budget", async () => {
+    real.on = true;
+    const { createBot, createRoom, command, send, engine, expectTurns, roomMessages, store } =
+      await boot();
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    const strict = await createRoom([ada, ben], ada);
+    const loose = await createRoom([ada, ben], ada);
+    const set = await command({ type: "update-room", roomId: strict.id, limits: { posts: 1 } });
+    expect(await set.json()).toMatchObject({ limits: { posts: 1 } });
+    // Hop 0 posts always; hop 1 spends the first post; hop 2 needs a second.
+    const exchange = async (room: Room, first: number) => {
+      await send(room.id, "plan it");
+      await expectTurns(first + 1);
+      engine.turns[first]?.finish(done("@ben over to you"));
+      await expectTurns(first + 2);
+      engine.turns[first + 1]?.finish(done("@ada back to you"));
+      await expectTurns(first + 3);
+      engine.turns[first + 2]?.finish(done("@ben once more"));
+      await vi.waitFor(() =>
+        expect(store.state().runs.filter(({ status }) => status === "Running")).toEqual([]),
+      );
+    };
+    await exchange(strict, 0);
+    expect(roomMessages(strict).map(({ hop }) => hop)).toEqual([0, 0, 1]);
+    await exchange(loose, 3);
+    expect(roomMessages(loose).map(({ hop }) => hop)).toEqual([0, 0, 1, 2]);
+  });
+});

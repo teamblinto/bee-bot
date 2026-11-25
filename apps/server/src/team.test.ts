@@ -827,6 +827,31 @@ describe("team requests", () => {
     expect(s.rooms.getRoom(rooms.out)?.members).not.toContain(kidId);
   });
 
+  it("refuses inviting a 7th member into an everyone_optional room", async () => {
+    let roomId = "";
+    const answers: Array<Record<string, unknown>> = [];
+    const { s } = await leadTurn(
+      async (call) => {
+        answers.push(await call("invite_to_room", { room_id: roomId, bot: "Kid" }));
+      },
+      {
+        before: (s, leadId) => {
+          s.setLeadsActWithoutAsking(true);
+          kid(s, leadId);
+          const others = ["B", "C", "D", "E", "F"].map((name) => stranger(s, name).id);
+          roomId =
+            s.rooms.createGroupRoom({ name: "Six", memberIds: [leadId, ...others] })?.id ?? "";
+          s.rooms.setRoomSettings(roomId, { responderMode: "everyone_optional" });
+        },
+      },
+    );
+    expect(answers).toMatchObject([{ status: "failed" }]);
+    expect(s.team.get(String(answers[0]?.request_id))?.result).toEqual({
+      code: "too_many_members",
+    });
+    expect(s.rooms.getRoom(roomId)?.members).toHaveLength(6);
+  });
+
   it("applies room and create requests on the owner's word after the lead's turn has ended", async () => {
     const ids = { kid: "", rae: "", old: "" };
     const answers: Array<Record<string, unknown>> = [];

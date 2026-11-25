@@ -1,10 +1,11 @@
 import * as NodeCrypto from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { LimitOverrides, type Limits, Room } from "@beebot/contracts";
+import { LimitOverrides, type Limits, type ResponderMode, Room } from "@beebot/contracts";
 import { z } from "zod";
 
-import type { Member } from "./routing.ts";
+import { clampLimits } from "./limits.ts";
+import { everyoneOptionalCap, type Member } from "./routing.ts";
 import type { StoreTx } from "./store.ts";
 
 const RoomRow = Room.omit({ members: true, held: true, heldUntil: true }).extend({
@@ -41,6 +42,10 @@ export function openRooms(
      VALUES (?, 'group', ?, ?, ?)`,
   );
   const updateRoom = db.prepare("UPDATE rooms SET name = ?, default_bot_id = ? WHERE id = ?");
+  const updateSettings = db.prepare(
+    `UPDATE rooms SET responder_mode = ?, lead_bot_id = ?, bulletin = ?, limits_json = ?
+     WHERE id = ?`,
+  );
   const joinScope = db.prepare(
     `INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)
      ON CONFLICT (room_id, bot_id) DO UPDATE SET left_at = NULL`,
@@ -54,6 +59,9 @@ export function openRooms(
   );
   const clearDefault = db.prepare(
     "UPDATE rooms SET default_bot_id = NULL WHERE id = ? AND default_bot_id = ?",
+  );
+  const clearLead = db.prepare(
+    "UPDATE rooms SET lead_bot_id = NULL WHERE id = ? AND lead_bot_id = ?",
   );
   const selectRound = db.prepare(
     `SELECT bot_posts AS botPosts, window_started_at AS windowStartedAt
@@ -155,11 +163,65 @@ export function openRooms(
         return changed(roomId);
       }),
 
+    // A mode is checked only when this call sets it, so a room whose lead or default left can
+    // still take other edits. Limits keep only the keys sent.
+    setRoomSettings: (
+      roomId: string,
+      input: {
+        responderMode?: ResponderMode | undefined;
+        leadBotId?: string | null | undefined;
+        bulletin?: string | undefined;
+        limits?: LimitOverrides | undefined;
+      },
+    ) =>
+      transaction(() => {
+        const room = groupRoom(roomId);
+        if (!room) {
+          return "not_found";
+        }
+        const {
+          responderMode = room.responderMode,
+          leadBotId = room.leadBotId,
+          bulletin = room.bulletin,
+        } = input;
+        const sent = input.responderMode;
+        if (
+          (leadBotId !== null && !room.members.includes(leadBotId)) ||
+          (sent === "lead" && leadBotId === null)
+        ) {
+          return "not_member";
+        }
+        if (sent === "everyone_optional" && room.members.length > everyoneOptionalCap) {
+          return "too_many_members";
+        }
+        if (sent === "default" && room.defaultBotId === null) {
+          return "default_bot_required";
+        }
+        const sentLimits = input.limits;
+        const limits = sentLimits
+          ? Object.fromEntries(
+              Object.entries(clampLimits(sentLimits)).filter(([key]) =>
+                Object.hasOwn(sentLimits, key),
+              ),
+            )
+          : room.limits;
+        updateSettings.run(responderMode, leadBotId, bulletin, JSON.stringify(limits), roomId);
+        return changed(roomId);
+      }),
+
     // DMs keep their one bot, so only a group's members change.
     addMember: (roomId: string, botId: string) =>
       transaction(() => {
-        if (!groupRoom(roomId)) {
+        const room = groupRoom(roomId);
+        if (!room) {
           return undefined;
+        }
+        if (
+          room.responderMode === "everyone_optional" &&
+          !room.members.includes(botId) &&
+          room.members.length >= everyoneOptionalCap
+        ) {
+          return "too_many_members";
         }
         joinScope.run(NodeCrypto.randomUUID(), roomId, botId);
         return changed(roomId);
@@ -175,6 +237,7 @@ export function openRooms(
         }
         closeScopeWakes.run(roomId, botId);
         clearDefault.run(roomId, botId);
+        clearLead.run(roomId, botId);
         return changed(roomId);
       }),
   };

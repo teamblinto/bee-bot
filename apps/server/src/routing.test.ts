@@ -1,3 +1,4 @@
+import type { ResponderMode } from "@beebot/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { isNoResponse, route } from "./routing.ts";
@@ -7,13 +8,23 @@ const members = [
   { id: "ben", name: "Ben Ito" },
   { id: "cy", name: "Cy" },
 ];
-const human = (body: string, fields: { defaultBotId?: string; replyToBotId?: string } = {}) =>
+const human = (
+  body: string,
+  fields: {
+    defaultBotId?: string;
+    replyToBotId?: string;
+    mode?: ResponderMode;
+    leadBotId?: string;
+  } = {},
+) =>
   route({
     body,
     members,
     defaultBotId: fields.defaultBotId ?? null,
     replyToBotId: fields.replyToBotId ?? null,
     authorBotId: null,
+    mode: fields.mode ?? "mentions",
+    leadBotId: fields.leadBotId ?? null,
   });
 
 describe("routing a human's message", () => {
@@ -41,7 +52,15 @@ describe("routing a human's message", () => {
     const twins = [...members, { id: "ada2", name: "Ada" }];
     const prefix = [...members, { id: "cyd", name: "Cyd" }, { id: "cyra", name: "Cyra" }];
     const send = (body: string, list: typeof members) =>
-      route({ body, members: list, defaultBotId: "cy", replyToBotId: null, authorBotId: null });
+      route({
+        body,
+        members: list,
+        defaultBotId: "cy",
+        replyToBotId: null,
+        authorBotId: null,
+        mode: "mentions",
+        leadBotId: null,
+      });
     expect(send("@ada go", twins)).toEqual({ kind: "ambiguous", mention: "ada" });
     expect(send("@cyd go", prefix)).toEqual({ kind: "wake", botIds: ["cyd"] });
     expect(send("@cy go", prefix)).toEqual({ kind: "wake", botIds: ["cy"] });
@@ -53,11 +72,54 @@ describe("routing a human's message", () => {
   it("ignores a reply to someone who left", () => {
     expect(human("ok", { replyToBotId: "gone" })).toEqual({ kind: "ask" });
   });
+
+  it("wakes every member in join order for an un-addressed message in everyone_optional", () => {
+    expect(human("thoughts?", { mode: "everyone_optional", defaultBotId: "cy" })).toEqual({
+      kind: "wake",
+      botIds: ["ada", "ben", "cy"],
+      everyone: true,
+    });
+  });
+
+  it("sends an un-addressed message to the lead in lead mode, and to the default when the lead left", () => {
+    expect(human("go", { mode: "lead", leadBotId: "ben", defaultBotId: "cy" })).toEqual({
+      kind: "wake",
+      botIds: ["ben"],
+    });
+    expect(human("go", { mode: "lead", leadBotId: "gone", defaultBotId: "cy" })).toEqual({
+      kind: "wake",
+      botIds: ["cy"],
+    });
+    expect(human("go", { mode: "lead", leadBotId: "gone" })).toEqual({ kind: "ask" });
+    expect(human("go", { mode: "default", defaultBotId: "cy" })).toEqual({
+      kind: "wake",
+      botIds: ["cy"],
+    });
+  });
+
+  it("lets a reply or a mention win in every mode", () => {
+    for (const mode of ["mentions", "default", "everyone_optional", "lead"] as const) {
+      const fields = { mode, leadBotId: "ada", defaultBotId: "ada" };
+      expect(human("@cy go", fields)).toEqual({ kind: "wake", botIds: ["cy"] });
+      expect(human("ok", { ...fields, replyToBotId: "ben" })).toEqual({
+        kind: "wake",
+        botIds: ["ben"],
+      });
+    }
+  });
 });
 
 describe("routing a bot's message", () => {
   const bot = (body: string) =>
-    route({ body, members, defaultBotId: "ada", replyToBotId: null, authorBotId: "ada" });
+    route({
+      body,
+      members,
+      defaultBotId: "ada",
+      replyToBotId: null,
+      authorBotId: "ada",
+      mode: "everyone_optional",
+      leadBotId: "ben",
+    });
 
   it("wakes only the bots it names, never itself or the default", () => {
     expect(bot("@ben can you check? cc @ada")).toEqual({ kind: "wake", botIds: ["ben"] });

@@ -1091,7 +1091,7 @@ describe("group rooms", () => {
       members: [ben.id],
       defaultBotId: null,
     });
-    expect(store.rooms.addMember(roomId, bot.id)?.members).toEqual([bot.id, ben.id]);
+    expect(store.rooms.addMember(roomId, bot.id)).toMatchObject({ members: [bot.id, ben.id] });
     expect(store.rooms.addMember(bot.roomId, ben.id)).toBeUndefined();
     expect(store.state().bots.map(({ id }) => id)).toEqual([bot.id, ben.id]);
   });

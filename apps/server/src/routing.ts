@@ -1,14 +1,16 @@
-import { mentionKey } from "@beebot/contracts";
+import { mentionKey, type ResponderMode } from "@beebot/contracts";
 
 export type Member = { id: string; name: string };
 
 export type Route =
-  | { kind: "wake"; botIds: string[] }
+  | { kind: "wake"; botIds: string[]; everyone?: true }
   | { kind: "ask" }
   | { kind: "ambiguous"; mention: string }
   | { kind: "none" };
 
 export const noResponse = "NO_RESPONSE";
+
+export const everyoneOptionalCap = 6;
 
 export const isNoResponse = (text: string) => text.trim() === noResponse;
 
@@ -32,7 +34,7 @@ function mentioned(body: string, members: Member[]) {
   return { ids };
 }
 
-// A human's message: the bot it replies to, then mentions in order, then the room default, then
+// A human's message: the bot it replies to, then mentions in order, then the room's mode, then
 // the human picks. A bot's message wakes only the bots it mentions, never itself.
 export function route(input: {
   body: string;
@@ -40,8 +42,10 @@ export function route(input: {
   defaultBotId: string | null;
   replyToBotId: string | null;
   authorBotId: string | null;
+  mode: ResponderMode;
+  leadBotId: string | null;
 }): Route {
-  const { body, defaultBotId, replyToBotId, authorBotId } = input;
+  const { body, defaultBotId, replyToBotId, authorBotId, mode, leadBotId } = input;
   const members = input.members.filter(({ id }) => id !== authorBotId);
   const isMember = (id: string | null) => members.some((member) => member.id === id);
   const found = mentioned(body, members);
@@ -56,7 +60,11 @@ export function route(input: {
   if (botIds.length > 0) {
     return { kind: "wake", botIds };
   }
-  return defaultBotId !== null && isMember(defaultBotId)
-    ? { kind: "wake", botIds: [defaultBotId] }
+  if (mode === "everyone_optional" && members.length > 0) {
+    return { kind: "wake", botIds: members.map(({ id }) => id), everyone: true };
+  }
+  const fallback = mode === "lead" && isMember(leadBotId) ? leadBotId : defaultBotId;
+  return fallback !== null && isMember(fallback)
+    ? { kind: "wake", botIds: [fallback] }
     : { kind: "ask" };
 }
