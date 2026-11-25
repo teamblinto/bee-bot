@@ -165,6 +165,10 @@ describe("noProgressDelay", () => {
   it("never holds a human's input", () => {
     expect(noProgressDelay({ noProgressRuns: 5, source: "human" })).toBe(0);
   });
+
+  it("never holds a meeting wake for lack of progress", () => {
+    expect(noProgressDelay({ noProgressRuns: 9, source: "meeting" })).toBe(0);
+  });
 });
 
 describe("backoffUntil", () => {

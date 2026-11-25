@@ -1708,14 +1708,14 @@ export function openEventStore(dataDir: string) {
   const selectChainTally = db.prepare(
     "SELECT COUNT(*) AS turns, MIN(created_at) AS startedAt FROM runs WHERE chain_id = ? OR id = ?",
   );
-  // A chain's message wakes run one at a time, in the order they were made, so a later bot sees
-  // the earlier replies. Task wakes don't wait: a delegating run may still be live.
+  // A chain's message and meeting wakes run one at a time, in the order they were made, so a later
+  // bot sees the earlier replies. Task wakes don't wait: a delegating run may still be live.
   const selectEarlierInChain = db.prepare(
     `SELECT 1 FROM wakes w JOIN wakes earlier
        ON earlier.chain_id = w.chain_id AND earlier.rowid < w.rowid
      LEFT JOIN runs r ON r.wake_id = earlier.id
-     WHERE w.id = ? AND w.source IN ('human', 'mention')
-       AND earlier.source IN ('human', 'mention')
+     WHERE w.id = ? AND w.source IN ('human', 'mention', 'meeting')
+       AND earlier.source IN ('human', 'mention', 'meeting')
        AND (earlier.status = 'pending' OR r.status IN ('Queued', 'Running'))
      LIMIT 1`,
   );

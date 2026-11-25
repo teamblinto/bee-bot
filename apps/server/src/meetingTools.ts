@@ -131,6 +131,11 @@ const Schedule = z
   })
   .refine(({ at, in_minutes }) => (at === undefined) !== (in_minutes === undefined));
 
+const Prompt = z.string().trim().min(1).max(2000);
+const StartItem = z.object({ item_id: z.string(), prompt: Prompt });
+const NextRound = z.object({ prompt: Prompt });
+const Ask = z.object({ bot: z.string().trim().min(1), question: Prompt });
+
 type Grant = NonNullable<ReturnType<EventStore["tasks"]["runGrant"]>>;
 
 const canSchedule = (store: EventStore, grant: Grant) =>
@@ -246,6 +251,34 @@ export function callMeetingTool(
   }
   if (name === "position" && role !== "participant") {
     return refused("not_participant");
+  }
+  const meetingId = store.meetings.live(grant.roomId)?.id ?? "";
+  const { botId, attended } = grant;
+  const passed = (result: ReturnType<EventStore["meetings"]["startItem"]>, status: string) =>
+    "refused" in result ? refused(result.refused) : answer({ status, note: endTurn.trim() });
+  if (name === "start_item") {
+    const { data } = StartItem.safeParse(args);
+    return data
+      ? passed(
+          store.meetings.startItem(meetingId, botId, data.item_id, data.prompt, attended),
+          "started",
+        )
+      : refused("invalid_arguments for start_item");
+  }
+  if (name === "next_round") {
+    const { data } = NextRound.safeParse(args);
+    return data
+      ? passed(store.meetings.nextRound(meetingId, botId, data.prompt, attended), "started")
+      : refused("invalid_arguments for next_round");
+  }
+  if (name === "ask_participant") {
+    const { data } = Ask.safeParse(args);
+    return data
+      ? passed(
+          store.meetings.askParticipant(meetingId, botId, data.bot, data.question, attended),
+          "asked",
+        )
+      : refused("invalid_arguments for ask_participant");
   }
   return refused("unknown_tool");
 }

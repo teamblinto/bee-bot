@@ -142,8 +142,11 @@ export function checkDuplicate(
 }
 
 // Milliseconds to hold the wake, 0 for none. A human's input, an approval among it, never waits.
+// Nor does a meeting turn: a participant's earlier NO_RESPONSE would stall the whole meeting.
 export function noProgressDelay(input: { noProgressRuns: number; source: WakeSource }): number {
-  if (input.source === "human" || input.source === "approval" || input.noProgressRuns < 2) return 0;
+  const exempt =
+    input.source === "human" || input.source === "approval" || input.source === "meeting";
+  if (exempt || input.noProgressRuns < 2) return 0;
   return Math.min(2 * minute * 2 ** (input.noProgressRuns - 2), 30 * minute);
 }
 
