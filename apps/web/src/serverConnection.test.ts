@@ -141,6 +141,7 @@ const emptyChat: ChatState = {
   automatedAccessAcknowledgedAt: null,
   teamRequests: [],
   leadsActWithoutAsking: false,
+  meetings: [],
 };
 
 const state = (seq: number, chat: Partial<ChatState> = {}): ConnectionState => ({
@@ -228,6 +229,7 @@ it("reaches the same state by replay as by snapshot", () => {
     automatedAccessAcknowledgedAt: null,
     teamRequests: [],
     leadsActWithoutAsking: false,
+    meetings: [],
   };
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 6, state: chat });

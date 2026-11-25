@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const protocolVersion = 44;
+export const protocolVersion = 45;
 
 // Restarting can't fix these, so the desktop supervisor gives up on them.
 export const noRestartExitCodes = {
@@ -863,6 +863,7 @@ export const WakeSource = z.enum([
   "continue",
   "mention",
   "wait",
+  "meeting",
 ]);
 export type WakeSource = z.infer<typeof WakeSource>;
 
@@ -1023,6 +1024,74 @@ export const TeamRequest = z.object({
 });
 export type TeamRequest = z.infer<typeof TeamRequest>;
 
+export const MeetingStatus = z.enum(["scheduled", "open", "running", "closed", "cancelled"]);
+export type MeetingStatus = z.infer<typeof MeetingStatus>;
+export const AgendaItem = z.object({
+  id: z.string(),
+  title: z.string(),
+  ownerBotId: z.string().nullable(),
+  status: z.enum(["pending", "active", "done", "deferred"]),
+  summary: z.string().nullable(),
+});
+export type AgendaItem = z.infer<typeof AgendaItem>;
+export const MeetingRecordKind = z.enum([
+  "decision",
+  "action",
+  "note",
+  "risk",
+  "proposal",
+  "position",
+]);
+export type MeetingRecordKind = z.infer<typeof MeetingRecordKind>;
+export const MeetingRecord = z.object({
+  id: z.string(),
+  meetingId: z.string(),
+  kind: MeetingRecordKind,
+  itemId: z.string().nullable(),
+  text: z.string(),
+  ownerBotId: z.string().nullable(),
+  ownerIsHuman: z.boolean(),
+  taskId: z.string().nullable(),
+  due: z.string().nullable(),
+  proposalId: z.string().nullable(),
+  options: z.array(z.string()),
+  doneAt: z.string().nullable(),
+  createdByBotId: z.string(),
+  createdAt: z.string(),
+});
+export type MeetingRecord = z.infer<typeof MeetingRecord>;
+export const Meeting = z.object({
+  id: z.string(),
+  roomId: z.string(),
+  facilitatorBotId: z.string(),
+  title: z.string(),
+  scheduledAt: z.string(),
+  timeboxMin: z.number(),
+  status: MeetingStatus,
+  participants: z.array(z.string()),
+  agenda: z.array(AgendaItem),
+  currentItem: z.string().nullable(),
+  round: z.number(),
+  maxRoundsPerItem: z.number(),
+  minutesMessageId: z.string().nullable(),
+  turnCap: z.number().nullable(),
+  turnsUsed: z.number(),
+  startedAt: z.string().nullable(),
+  endsAt: z.string().nullable(),
+  timesUpAt: z.string().nullable(),
+  endedAt: z.string().nullable(),
+  createdAt: z.string(),
+  records: z.array(MeetingRecord),
+});
+export type Meeting = z.infer<typeof Meeting>;
+
+// The snapshot and the event reducer both filter with this, so replay matches a snapshot.
+export const keepsMeeting = ({ status, records }: Meeting) =>
+  status === "scheduled" ||
+  status === "open" ||
+  status === "running" ||
+  records.some(({ kind, ownerIsHuman, doneAt }) => kind === "action" && ownerIsHuman && !doneAt);
+
 // `runs` holds only the latest run of each bot.
 export const ChatState = z.object({
   bots: z.array(Bot),
@@ -1054,6 +1123,8 @@ export const ChatState = z.object({
   // Pending only.
   teamRequests: z.array(TeamRequest),
   leadsActWithoutAsking: z.boolean(),
+  // Live, or still holding an owner's open action item.
+  meetings: z.array(Meeting),
 });
 export type ChatState = z.infer<typeof ChatState>;
 
@@ -1087,6 +1158,7 @@ export const EventBody = z.discriminatedUnion("type", [
   z.object({ type: z.literal("limits.changed"), limits: Limits }),
   z.object({ type: z.literal("team-request.changed"), request: TeamRequest }),
   z.object({ type: z.literal("team-settings.changed"), leadsActWithoutAsking: z.boolean() }),
+  z.object({ type: z.literal("meeting.changed"), meeting: Meeting }),
 ]);
 export type EventBody = z.infer<typeof EventBody>;
 
@@ -1474,6 +1546,8 @@ export const Command = z.discriminatedUnion("type", [
     maxConcurrentRuns: z.number().int(),
   }),
   z.object({ type: z.literal("continue-run"), runId: z.uuid() }),
+  z.object({ type: z.literal("cancel-meeting"), meetingId: z.uuid() }),
+  z.object({ type: z.literal("finish-meeting-action"), recordId: z.uuid() }),
   z.object({
     type: z.literal("decide-approval"),
     approvalId: z.uuid(),

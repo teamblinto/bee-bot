@@ -1034,6 +1034,57 @@ export const migrations: Array<{
     ALTER TABLE room_rounds ADD COLUMN escalations INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE room_rounds ADD COLUMN ring_until TEXT;`,
   },
+  {
+    name: "meetings",
+    sql: `CREATE TABLE meetings (
+      id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL REFERENCES rooms (id),
+      facilitator_bot_id TEXT NOT NULL REFERENCES bots (id),
+      title TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      timebox_min INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('scheduled','open','running','closed','cancelled')),
+      participants_json TEXT NOT NULL,
+      agenda_json TEXT NOT NULL,
+      current_item TEXT,
+      round INTEGER NOT NULL DEFAULT 0,
+      max_rounds_per_item INTEGER NOT NULL DEFAULT 2,
+      minutes_message_id TEXT,
+      turn_cap INTEGER,
+      turns_used INTEGER NOT NULL DEFAULT 0,
+      pass_chain_id TEXT,
+      passes INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT, ends_at TEXT, times_up_at TEXT, ended_at TEXT,
+      created_by_run_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX meetings_one_live_per_room ON meetings (room_id)
+      WHERE status IN ('scheduled','open','running');
+    CREATE INDEX meetings_live ON meetings (status) WHERE status IN ('scheduled','open','running');
+    CREATE INDEX meetings_by_pass ON meetings (pass_chain_id) WHERE pass_chain_id IS NOT NULL;
+    CREATE TABLE meeting_records (
+      id TEXT PRIMARY KEY,
+      meeting_id TEXT NOT NULL REFERENCES meetings (id),
+      kind TEXT NOT NULL
+        CHECK (kind IN ('decision','action','note','risk','proposal','position')),
+      item_id TEXT,
+      text TEXT NOT NULL,
+      -- No foreign key: a deleted bot's name just drops out of the minutes.
+      owner_bot_id TEXT,
+      owner_is_human INTEGER NOT NULL DEFAULT 0,
+      task_id TEXT REFERENCES tasks (id),
+      due TEXT,
+      proposal_id TEXT REFERENCES meeting_records (id),
+      options_json TEXT NOT NULL DEFAULT '[]',
+      done_at TEXT,
+      created_by_bot_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX meeting_records_by_meeting ON meeting_records (meeting_id, created_at);
+    CREATE UNIQUE INDEX meeting_positions_one_per_bot ON meeting_records (proposal_id, owner_bot_id)
+      WHERE kind = 'position';`,
+  },
 ];
 
 const Migration = z.object({ id: z.number(), name: z.string() });
@@ -1442,6 +1493,11 @@ export function openEventStore(dataDir: string) {
        WHERE parent_task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
     `UPDATE tasks SET result_message_id = NULL
        WHERE result_message_id IN (SELECT id FROM messages WHERE room_id = $dm)`,
+    `UPDATE meeting_records SET task_id = NULL
+       WHERE task_id IN (SELECT id FROM tasks WHERE ${doomedTasks})`,
+    `DELETE FROM meeting_records WHERE meeting_id IN
+       (SELECT id FROM meetings WHERE facilitator_bot_id = $bot)`,
+    "DELETE FROM meetings WHERE facilitator_bot_id = $bot",
     `DELETE FROM tasks WHERE ${doomedTasks}`,
     "DELETE FROM runs WHERE bot_id = $bot",
     "DELETE FROM wakes WHERE bot_id = $bot",
@@ -3045,6 +3101,7 @@ export function openEventStore(dataDir: string) {
       limits: limits(),
       teamRequests: team.pending(),
       leadsActWithoutAsking: leadsActWithoutAsking(),
+      meetings: [],
     }),
 
     leadsActWithoutAsking,

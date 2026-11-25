@@ -10,6 +10,7 @@ import {
   EngineStatus,
   type HostControlAvailability,
   HostPlatform,
+  keepsMeeting,
   limitDefaults,
   type ModelCatalog,
   type PendingApproval,
@@ -260,6 +261,13 @@ function applyEvent(state: ConnectionState, event: ServerEvent) {
     }
     case "team-settings.changed":
       return { ...state, chat: { ...chat, leadsActWithoutAsking: event.leadsActWithoutAsking } };
+    case "meeting.changed": {
+      const { meeting } = event;
+      const meetings = keepsMeeting(meeting)
+        ? upsert(chat.meetings, meeting)
+        : chat.meetings.filter(({ id }) => id !== meeting.id);
+      return { ...state, chat: { ...chat, meetings } };
+    }
   }
 }
 
@@ -410,6 +418,7 @@ let state: ConnectionState = {
     automatedAccessAcknowledgedAt: null,
     teamRequests: [],
     leadsActWithoutAsking: false,
+    meetings: [],
   },
   drafts: {},
   liveTools: {},
