@@ -15,6 +15,7 @@ import {
 } from "./computer.ts";
 import { cuaToolNames, cuaTools } from "./cuaScreen.ts";
 import { memoryTools } from "./memory.ts";
+import { teamToolNames, teamTools } from "./team.ts";
 
 const defaultKeepaliveMs = 15_000;
 
@@ -36,13 +37,19 @@ const approveTool = {
 
 // The tools a bot sees follow its control mode, so it never reaches for a screen it lacks. Each
 // call is still checked against the mode by the broker. A host bot gets the cua tools when
-// cua-driver runs, and the pointer-moving ones sized to the display otherwise.
-export function toolsFor(control: BotControl, screen: ScreenSize | "cua" | undefined): Tool[] {
+// cua-driver runs, and the pointer-moving ones sized to the display otherwise. Only a lead sees
+// the team tools.
+export function toolsFor(
+  control: BotControl,
+  screen: ScreenSize | "cua" | undefined,
+  lead: boolean,
+): Tool[] {
   const browsing = control === "browser" || control === "computer";
   return [
     approveTool,
     ...memoryTools,
     ...botTools,
+    ...(lead ? teamTools : []),
     ...(browsing ? [...browserTools, takeoverTool] : []),
     ...(control === "computer" ? computerTools(boxScreen, "box") : []),
     ...(control === "host" && screen === "cua" ? cuaTools : []),
@@ -172,7 +179,10 @@ export async function answerMcp(
         answer({ content: [{ type: "text", text }] });
         return;
       }
-      if (typeof params?.name === "string" && botToolNames.has(params.name)) {
+      if (
+        typeof params?.name === "string" &&
+        (botToolNames.has(params.name) || teamToolNames.has(params.name))
+      ) {
         let text: string;
         try {
           text = await bot(params.name, params.arguments);

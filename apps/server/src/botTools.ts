@@ -245,7 +245,7 @@ const WaitUntil = z.object({
 });
 
 const answer = (fields: Record<string, unknown>) => JSON.stringify(fields);
-const refused = (reason: string) =>
+export const refused = (reason: string) =>
   answer({ status: "refused", reason, note: "This is an answer, not an error. Tell the user." });
 const malformed = (tool: string) => refused(`invalid_arguments for ${tool}`);
 const endTurn = "End your turn now. Don't wait or poll: the answer arrives as a new message.";

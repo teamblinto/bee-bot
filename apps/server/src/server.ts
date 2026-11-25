@@ -24,6 +24,7 @@ import {
   type ServerInfo,
   type ServerMessage,
   setupCommand,
+  teamManageGrant,
   usageDays,
   type UsageRefreshResult,
 } from "@beebot/contracts";
@@ -59,7 +60,7 @@ import type { BoxOptions } from "./boxEngine.ts";
 import { preToolUsePath, staticClaudeModels } from "./claude.ts";
 import { staticCodexModels } from "./codex.ts";
 import { fakeRunTurn, type RunTurn, workingFolder, workspacePath } from "./engine.ts";
-import { callBotTool, shareFile } from "./botTools.ts";
+import { callBotTool, refused as refusedAnswer, shareFile } from "./botTools.ts";
 import { outbox, probeFile } from "./boxRuntime.ts";
 import { type Decide, decide as policyDecide } from "./broker.ts";
 import { boxExecutors } from "./boxExecutors.ts";
@@ -122,6 +123,7 @@ import type { Vault } from "./vault.ts";
 import { deleteApiKey, openVault, storeApiKey, VaultError } from "./vaultStore.ts";
 import { createSupervisor } from "./supervisor.ts";
 import { probeUrl } from "./waits.ts";
+import { teamToolNames } from "./team.ts";
 import { createTerminals } from "./terminal.ts";
 import {
   createLimitRefresher,
@@ -1790,19 +1792,21 @@ export async function startServer({
           gateTool(store.policy, run, name, args, () => callMemoryTool(store, run, name, args)),
         bot: (name, args) =>
           gateTool(store.policy, run, name, args, () =>
-            name === "share_file"
-              ? shareFile(store, run, args, {
-                  dataDir,
-                  workdir: box?.layout.workdir ?? "/work",
-                  read:
-                    box && store.getBot(run.botId)?.boundary === "box"
-                      ? (botId, path) => outbox(box.runtime, box.layout, botId, path)
-                      : undefined,
-                  attach: supervisor.shareFile,
-                })
-              : callBotTool(store, run, name, args, ({ runId }) =>
-                  supervisor.parkWaitingUser(runId),
-                ),
+            teamToolNames.has(name)
+              ? refusedAnswer("unknown_tool")
+              : name === "share_file"
+                ? shareFile(store, run, args, {
+                    dataDir,
+                    workdir: box?.layout.workdir ?? "/work",
+                    read:
+                      box && store.getBot(run.botId)?.boundary === "box"
+                        ? (botId, path) => outbox(box.runtime, box.layout, botId, path)
+                        : undefined,
+                    attach: supervisor.shareFile,
+                  })
+                : callBotTool(store, run, name, args, ({ runId }) =>
+                    supervisor.parkWaitingUser(runId),
+                  ),
           ),
         browser: (name, args) => browser.call(run, name, args),
         computer: (name, args) =>
@@ -1810,18 +1814,20 @@ export async function startServer({
             ? cua.call(run, name, args)
             : computer.call(run, name, args),
         tools: async () => {
-          const control = store.getBot(run.botId)?.control ?? "none";
+          const bot = store.getBot(run.botId);
+          const control = bot?.control ?? "none";
+          const lead = bot?.manifest.includes(teamManageGrant) ?? false;
           if (control !== "host" || !host || !hostControl().available) {
-            return toolsFor(control, undefined);
+            return toolsFor(control, undefined, lead);
           }
           if (await cua?.ready()) {
-            return toolsFor(control, "cua");
+            return toolsFor(control, "cua", lead);
           }
           // The bot's coordinates are the display's, fitted, so the size is read before it looks.
           await host.measure().catch((error: unknown) => {
             console.error(`beebotd: host screen unavailable: ${(error as Error)?.message}`);
           });
-          return toolsFor(control, host.screen.size);
+          return toolsFor(control, host.screen.size, lead);
         },
       },
       mcpKeepaliveMs,

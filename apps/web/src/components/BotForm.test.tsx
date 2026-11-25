@@ -428,3 +428,34 @@ it("warns when editing a bot that's already on Codex", () => {
   });
   expect(host.textContent).toContain(warning);
 });
+
+it("makes a bot a team lead only when the owner ticks it", async () => {
+  const lead = () =>
+    [...host.querySelectorAll("label")]
+      .find(({ textContent }) => textContent?.startsWith("Team lead"))
+      ?.querySelector("input");
+  const manifests = () =>
+    postCommand.mock.calls
+      .map(([command]) => command)
+      .filter(({ type }) => type === "set-bot-manifest");
+  postCommand.mockResolvedValue({ ok: true, body: ada });
+  show(ada);
+  await act(async () => host.querySelector("form")?.requestSubmit());
+  expect(manifests()).toEqual([]);
+
+  act(() => lead()?.click());
+  await act(async () => host.querySelector("form")?.requestSubmit());
+  expect(manifests()).toEqual([
+    { type: "set-bot-manifest", botId: ada.id, manifest: ["team.manage"] },
+  ]);
+
+  postCommand.mockReset();
+  const granted = { ...ada, manifest: ["team.manage"] };
+  postCommand.mockResolvedValue({ ok: true, body: granted });
+  act(() => root.unmount());
+  root = createRoot(host);
+  show(granted);
+  act(() => lead()?.click());
+  await act(async () => host.querySelector("form")?.requestSubmit());
+  expect(manifests()).toEqual([{ type: "set-bot-manifest", botId: ada.id, manifest: [] }]);
+});

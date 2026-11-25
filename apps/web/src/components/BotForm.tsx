@@ -5,6 +5,7 @@ import {
   defaultBotModel,
   EngineAccountId,
   EngineLane,
+  teamManageGrant,
 } from "@beebot/contracts";
 import { ChevronRight, Info, Shuffle, X } from "lucide-react";
 import {
@@ -145,6 +146,8 @@ export function BotForm({
   );
   const [tokenCap, setTokenCap] = useState(String(bot?.dailyTokenCap ?? ""));
   const [usdCap, setUsdCap] = useState(String(bot?.dailyUsdCap ?? ""));
+  const [lead, setLead] = useState(bot?.manifest.includes(teamManageGrant) ?? false);
+  const leadChanged = bot !== undefined && lead !== bot.manifest.includes(teamManageGrant);
   const automatedAccessRead = useSyncExternalStore(
     subscribeToConnection,
     () => getConnectionState().chat.automatedAccessAcknowledgedAt !== null,
@@ -196,6 +199,7 @@ export function BotForm({
       egressHosts.join() !== bot.egressHosts.join() ||
       unattendedLane !== bot.unattendedLane ||
       capsChanged ||
+      leadChanged ||
       (laneChoice !== undefined && laneChoice !== savedLane));
 
   async function submit(event: FormEvent) {
@@ -270,6 +274,17 @@ export function BotForm({
       boxed && capsChanged
         ? await postCommand({ type: "raise-bot-cap", botId: boxed.id, dailyTokenCap, dailyUsdCap })
         : undefined;
+    const leadResult =
+      boxed && leadChanged
+        ? await postCommand({
+            type: "set-bot-manifest",
+            botId: boxed.id,
+            manifest: [
+              ...boxed.manifest.filter((grant) => grant !== teamManageGrant),
+              ...(lead ? [teamManageGrant] : []),
+            ],
+          })
+        : undefined;
     saving.current = false;
     setBusy(false);
     const results = [
@@ -279,6 +294,7 @@ export function BotForm({
       egressResult,
       unattendedResult,
       capResult,
+      leadResult,
     ];
     // The first refusal, so a later step that went through can't hide it.
     const last =
@@ -559,6 +575,24 @@ export function BotForm({
                   </p>
                 </>
               )}
+            </Option>
+          )}
+          {bot && (
+            <Option label="Team lead" value={lead ? "On" : "Off"}>
+              <label className="flex items-start gap-2 text-ink">
+                <input
+                  type="checkbox"
+                  className={checkClass}
+                  checked={lead}
+                  onChange={(event) => setLead(event.target.checked)}
+                />
+                <span className="flex flex-col">
+                  <span>Team lead: can create and manage its own bots</span>
+                  <span className="text-caption text-ink-secondary">
+                    Each change waits for you in Needs you unless you let leads act without asking.
+                  </span>
+                </span>
+              </label>
             </Option>
           )}
           {bot && (

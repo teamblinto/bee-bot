@@ -1,4 +1,10 @@
-import { type BotAccess, type BotControl, browserGrant, Manifest } from "@beebot/contracts";
+import {
+  type BotAccess,
+  type BotControl,
+  browserGrant,
+  Manifest,
+  teamManageGrant,
+} from "@beebot/contracts";
 
 // Static per tool, never taken from the model: the Rule of Two legs a call touches.
 export type ToolLabels = { readsUntrusted: boolean; readsPrivate: boolean; sideEffect: boolean };
@@ -52,6 +58,12 @@ const beeRules: Record<string, ToolRule> = {
   report_progress: { labels: legs("sideEffect") },
   // The file goes to the owner alone, like a reply, so it reads the workspace and nothing more.
   share_file: { labels: legs("readsPrivate") },
+  // Queuing a request acts on nothing, and applying at once needs an attended, clean session.
+  create_bot: { labels: noLegs, grant: teamManageGrant },
+  update_bot: { labels: noLegs, grant: teamManageGrant },
+  archive_bot: { labels: noLegs, grant: teamManageGrant },
+  create_room: { labels: noLegs, grant: teamManageGrant },
+  invite_to_room: { labels: noLegs, grant: teamManageGrant },
 };
 
 // A write from a session that saw untrusted text waits for the owner's review, which is the draft
