@@ -1005,6 +1005,35 @@ describe("progress budgets", () => {
     });
   });
 
+  it("lifts the room hold only for the owner's progress on an open task", () => {
+    openStore();
+    const { ada, ben, task_id } = delegated();
+    const id = String(task_id);
+    const roomId = String(store.tasks.getTask(id)?.roomId);
+    const ringUntil = () => store.rooms.round(roomId).ringUntil;
+    const trip = () => store.rooms.tripRing(roomId, new Date(Date.now() + 300_000).toISOString());
+    const owner = start(ben.id);
+    say(ada.roomId, "again");
+    const requester = start(ada.id);
+
+    trip();
+    expect(call(requester, "report_progress", { task_id: id, note: "Mine" })).toMatchObject({
+      status: "recorded",
+    });
+    expect(ringUntil()).not.toBeNull();
+    expect(call(owner, "report_progress", { task_id: id, note: "Half done." })).toMatchObject({
+      status: "recorded",
+    });
+    expect(ringUntil()).toBeNull();
+
+    trip();
+    seed("UPDATE tasks SET status = 'done' WHERE id = ?", [[id]]);
+    expect(call(owner, "report_progress", { task_id: id, note: "Done." })).toMatchObject({
+      status: "recorded",
+    });
+    expect(ringUntil()).not.toBeNull();
+  });
+
   it("caps an unattended tree's total turns, but never a human one", () => {
     openStore();
     const { ben, task_id } = delegated();
