@@ -16,15 +16,21 @@ function subscribe(listener: () => void) {
 }
 
 // A ref callback: a ticking label writes to the DOM, so it never re-renders the transcript.
-export function tickElapsed(startedAt: string) {
+function tickText(text: () => string) {
   return (node: HTMLElement | null) => {
     if (!node) {
       return undefined;
     }
     const write = () => {
-      node.textContent = formatElapsed(Date.now() - Date.parse(startedAt));
+      node.textContent = text();
     };
     write();
     return subscribe(write);
   };
 }
+
+export const tickElapsed = (startedAt: string) =>
+  tickText(() => formatElapsed(Date.now() - Date.parse(startedAt)));
+
+export const tickRemaining = (endsAt: string) =>
+  tickText(() => formatElapsed(Date.parse(endsAt) - Date.now()));

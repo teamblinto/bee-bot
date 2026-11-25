@@ -1,9 +1,15 @@
-import type { Bot, Command } from "@beebot/contracts";
+import type { Bot, Command, Meeting, MeetingRecord } from "@beebot/contracts";
 import { Inbox, PanelLeft } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
 import { approvalTitle, dailyLimitLine, memoryReview, shortTime } from "../labels";
-import { memoriesToReview, type WaitingItem, waitingItems, waitingKind } from "../needsYou";
+import {
+  memoriesToReview,
+  ownerActions,
+  type WaitingItem,
+  waitingItems,
+  waitingKind,
+} from "../needsYou";
 import { type ConnectionState, postCommand } from "../serverConnection";
 import { ApprovalCard, ContinuationCard } from "./ApprovalCard";
 import { Avatar } from "./Avatar";
@@ -157,6 +163,48 @@ function LeadsSetting({ on, connected }: { on: boolean; connected: boolean }) {
   );
 }
 
+function MeetingAction({
+  meeting,
+  record,
+  connected,
+}: {
+  meeting: Meeting;
+  record: MeetingRecord;
+  connected: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function finish() {
+    setBusy(true);
+    setError(undefined);
+    const result = await postCommand({ type: "finish-meeting-action", recordId: record.id });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+  }
+
+  return (
+    <li className="flex items-start gap-3 border-b border-edge-subtle p-4">
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <p className="text-body-s">{record.text}</p>
+        <p className="text-caption text-ink-secondary">
+          {meeting.title}
+          {record.due && ` · due ${record.due}`}
+        </p>
+        {error && <p className="text-caption text-ink-secondary">{error}</p>}
+      </div>
+      <button
+        type="button"
+        className="button button-sm button-outline shrink-0"
+        disabled={busy || !connected}
+        onClick={() => void finish()}
+      >
+        Done
+      </button>
+    </li>
+  );
+}
+
 function WaitingCard({
   item,
   bot,
@@ -214,6 +262,7 @@ export function NeedsYouPage({
   const { chat } = connection;
   const waiting = waitingItems(chat);
   const memories = memoriesToReview(chat);
+  const actions = ownerActions(chat);
   const botOf = (botId: string) => chat.bots.find(({ id }) => id === botId);
 
   return (
@@ -231,7 +280,7 @@ export function NeedsYouPage({
       </header>
       <LeadsSetting on={chat.leadsActWithoutAsking} connected={connection.status === "connected"} />
       <div className="scroller min-h-0 flex-1 overflow-y-auto">
-        {waiting.length === 0 && memories.length === 0 ? (
+        {waiting.length === 0 && memories.length === 0 && actions.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center p-6">
             <div className="flex max-w-[480px] flex-col items-center gap-4 p-6 text-center">
               <span className="flex size-12 items-center justify-center rounded-full bg-sidebar">
@@ -265,6 +314,18 @@ export function NeedsYouPage({
                     )
                   );
                 })}
+              </Section>
+            )}
+            {actions.length > 0 && (
+              <Section title="Meeting actions" count={actions.length}>
+                {actions.map(({ meeting, record }) => (
+                  <MeetingAction
+                    key={record.id}
+                    meeting={meeting}
+                    record={record}
+                    connected={connection.status === "connected"}
+                  />
+                ))}
               </Section>
             )}
             {memories.length > 0 && (

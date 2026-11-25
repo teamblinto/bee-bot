@@ -4,6 +4,8 @@ import type {
   Bot,
   ChatState,
   Continuation,
+  Meeting,
+  MeetingRecord,
   MemoryItem,
   Routine,
   RoutineFiring,
@@ -11,7 +13,7 @@ import type {
 } from "@beebot/contracts";
 import { expect, it } from "vite-plus/test";
 
-import { memoriesToReview, waitingItems, waitingKind } from "./needsYou";
+import { memoriesToReview, ownerActions, waitingItems, waitingKind } from "./needsYou";
 
 const bot = (id: string, archivedAt: string | null = null) => ({ id, name: id, archivedAt }) as Bot;
 
@@ -102,4 +104,28 @@ it("lists pending team requests with the other waiting items, oldest first, and 
   expect(items.map(({ id }) => id)).toEqual(["t2", "a1", "t1"]);
   expect(items.map(({ botId }) => botId)).toEqual(["ada", "ada", "ada"]);
   expect(items.map(waitingKind)).toEqual(["New bot", "Command", "New bot"]);
+});
+
+it("lists owner-owned meeting actions until they are done, oldest first", () => {
+  const action = (id: string, createdAt: string, fields: Partial<MeetingRecord> = {}) =>
+    ({
+      id,
+      kind: "action",
+      ownerIsHuman: true,
+      doneAt: null,
+      createdAt,
+      ...fields,
+    }) as MeetingRecord;
+  const open = action("open", "2026-01-01T00:02:00Z");
+  const done = action("done", "2026-01-01T00:00:00Z", { doneAt: "2026-01-01T00:03:00Z" });
+  const botOwned = action("bot", "2026-01-01T00:00:00Z", { ownerIsHuman: false });
+  const older = action("older", "2026-01-01T00:01:00Z");
+  const meetings = [
+    { id: "m1", records: [open, done, botOwned] },
+    { id: "m2", records: [older, { ...older, id: "note", kind: "note" }] },
+  ] as Meeting[];
+  expect(ownerActions(chat({ meetings })).map(({ record }) => record.id)).toEqual([
+    "older",
+    "open",
+  ]);
 });

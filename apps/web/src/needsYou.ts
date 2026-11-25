@@ -106,3 +106,12 @@ export const memoriesToReview = (chat: ChatState): MemoryItem[] => {
   const active = new Set(chat.bots.filter(({ archivedAt }) => !archivedAt).map(({ id }) => id));
   return chat.memories.filter(({ botId, status }) => status === "pending" && active.has(botId));
 };
+
+export const ownerActions = (chat: ChatState) =>
+  chat.meetings
+    .flatMap((meeting) =>
+      meeting.records
+        .filter(({ kind, ownerIsHuman, doneAt }) => kind === "action" && ownerIsHuman && !doneAt)
+        .map((record) => ({ meeting, record })),
+    )
+    .sort((a, b) => a.record.createdAt.localeCompare(b.record.createdAt));

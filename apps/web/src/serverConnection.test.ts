@@ -3,6 +3,8 @@ import type {
   Bot,
   ChatMessage,
   ChatState,
+  Meeting,
+  MeetingRecord,
   MemoryItem,
   PendingApproval,
   Routine,
@@ -304,6 +306,78 @@ it("reaches the same memories by replay as by snapshot, without superseded or fo
   const replayed = applyServerMessage(state(0), { type: "replay", events });
   const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 10, state: chat });
   expect(replayed).toEqual(snapshotted);
+});
+
+const meeting = (
+  id: string,
+  status: Meeting["status"],
+  records: Meeting["records"] = [],
+): Meeting => ({
+  id,
+  roomId: "room",
+  facilitatorBotId: "bot",
+  title: id,
+  scheduledAt: "now",
+  timeboxMin: 30,
+  status,
+  participants: [],
+  agenda: [],
+  currentItem: null,
+  round: 0,
+  maxRoundsPerItem: 2,
+  minutesMessageId: null,
+  turnCap: null,
+  turnsUsed: 0,
+  startedAt: null,
+  endsAt: null,
+  timesUpAt: null,
+  endedAt: null,
+  createdAt: "now",
+  records,
+});
+const meetingEvent = (seq: number, changed: Meeting): ServerEvent => ({
+  seq,
+  createdAt: "now",
+  type: "meeting.changed",
+  meeting: changed,
+});
+
+it("reaches the same meetings by replay as by snapshot, dropping closed meetings with no open owner action", () => {
+  const ownerAction: MeetingRecord = {
+    id: "r1",
+    meetingId: "m2",
+    kind: "action",
+    itemId: "1",
+    text: "Get keys",
+    ownerBotId: null,
+    ownerIsHuman: true,
+    taskId: null,
+    due: null,
+    proposalId: null,
+    options: [],
+    doneAt: null,
+    createdByBotId: "bot",
+    createdAt: "now",
+  };
+  const events = [
+    meetingEvent(1, meeting("m1", "scheduled")),
+    meetingEvent(2, meeting("m2", "running")),
+    meetingEvent(3, meeting("m1", "running")),
+    meetingEvent(4, meeting("m1", "closed")),
+    meetingEvent(5, meeting("m2", "closed", [ownerAction])),
+  ];
+  const snapshot = { ...emptyChat, meetings: [meeting("m2", "closed", [ownerAction])] };
+  const replayed = applyServerMessage(state(0), { type: "replay", events });
+  const snapshotted = applyServerMessage(state(0), { type: "snapshot", seq: 5, state: snapshot });
+  expect(replayed).toEqual(snapshotted);
+  expect(replayed.chat.meetings.map(({ id }) => id)).toEqual(["m2"]);
+
+  const done = { ...ownerAction, doneAt: "later" };
+  const finished = applyServerMessage(replayed, {
+    type: "event",
+    event: meetingEvent(6, meeting("m2", "closed", [done])),
+  });
+  expect(finished.chat.meetings).toEqual([]);
 });
 
 it("accumulates deltas and clears them when the run ends, keeping the cursor", () => {

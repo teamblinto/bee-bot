@@ -22,6 +22,7 @@ import {
   isActive,
   postCommand,
   requestNotifications,
+  roomMeeting,
   sendCommand,
   waitingOnOwner,
 } from "../serverConnection";
@@ -29,6 +30,7 @@ import { buildTranscript } from "../transcript";
 import { AttachButton, UploadChips, useAttachments } from "./Attachments";
 import { Avatar } from "./Avatar";
 import { useMentionMenu } from "./MentionMenu";
+import { meetingLine, MeetingRail } from "./MeetingRail";
 import { RenameRoomDialog, RoomSettingsDialog } from "./RoomDialog";
 import { Tooltip } from "./Tooltip";
 import { Transcript } from "./Transcript";
@@ -480,6 +482,7 @@ export function RoomView({
   const notices = [status !== "connected" && connectionLines[status], commandError].filter(
     (line) => typeof line === "string",
   );
+  const meeting = roomMeeting(chat, room.id);
   const defaultBot = members.find(({ id }) => id === room.defaultBotId);
   const here = `${nameList.format(members.map(({ name }) => name))} ${members.length === 1 ? "is" : "are"} here.`;
   const noBots = members.length === 0;
@@ -552,57 +555,80 @@ export function RoomView({
         />
         <RoomOptions room={room} bots={chat.bots} connected={connected} />
       </header>
-      {held && (
-        <div className={columnClass}>
-          <p
-            role="status"
-            className="mt-3 flex items-center gap-2 rounded-row bg-waiting-surface px-3 py-2 text-body-s text-waiting"
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          {meeting && (
+            <details className="border-b border-edge-subtle md:hidden">
+              <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-4 text-body-s [&::-webkit-details-marker]:hidden">
+                <ChevronDown {...iconProps} className="shrink-0 text-ink-secondary" />
+                <span className="truncate">{meetingLine(meeting)}</span>
+              </summary>
+              <div className="px-4 pb-4">
+                <MeetingRail meeting={meeting} chat={chat} connected={connected} />
+              </div>
+            </details>
+          )}
+          {held && (
+            <div className={columnClass}>
+              <p
+                role="status"
+                className="mt-3 flex items-center gap-2 rounded-row bg-waiting-surface px-3 py-2 text-body-s text-waiting"
+              >
+                <CircleAlert {...iconProps} className="shrink-0 text-waiting-status" />
+                {held}
+              </p>
+            </div>
+          )}
+          {items.length === 0 && !systemLine ? (
+            <div className={`${columnClass} flex flex-1 flex-col justify-center`}>
+              {noBots
+                ? noBotsState
+                : emptyState(
+                    room.name ?? "",
+                    `${here} @mention a bot to ask it${defaultBot ? `, or ${defaultBot.name} answers.` : "."}`,
+                  )}
+            </div>
+          ) : (
+            <Transcript
+              bot={{ name: room.name ?? "" }}
+              items={items}
+              connected={connected}
+              draft={undefined}
+              liveTools={[]}
+              workingSince={undefined}
+              endedWork={undefined}
+              thought={undefined}
+              systemLine={systemLine}
+              onContinue={undefined}
+              authorName={authorName}
+            />
+          )}
+          <div className={columnClass}>
+            {noBots && items.length > 0 && noBotsState}
+            <div role="status">
+              {notices.map((notice) => (
+                <p key={notice} className="mb-2 text-label text-ink-secondary">
+                  {notice}
+                </p>
+              ))}
+            </div>
+            <RoomComposer
+              key={room.id}
+              room={room}
+              members={members.filter(({ archivedAt }) => !archivedAt)}
+              canSend={connected && members.length > 0}
+              chat={chat}
+            />
+          </div>
+        </div>
+        {meeting && (
+          <aside
+            aria-label="Meeting"
+            className="scroller w-72 shrink-0 overflow-y-auto border-l border-edge-subtle p-4 max-md:hidden"
           >
-            <CircleAlert {...iconProps} className="shrink-0 text-waiting-status" />
-            {held}
-          </p>
-        </div>
-      )}
-      {items.length === 0 && !systemLine ? (
-        <div className={`${columnClass} flex flex-1 flex-col justify-center`}>
-          {noBots
-            ? noBotsState
-            : emptyState(
-                room.name ?? "",
-                `${here} @mention a bot to ask it${defaultBot ? `, or ${defaultBot.name} answers.` : "."}`,
-              )}
-        </div>
-      ) : (
-        <Transcript
-          bot={{ name: room.name ?? "" }}
-          items={items}
-          connected={connected}
-          draft={undefined}
-          liveTools={[]}
-          workingSince={undefined}
-          endedWork={undefined}
-          thought={undefined}
-          systemLine={systemLine}
-          onContinue={undefined}
-          authorName={authorName}
-        />
-      )}
-      <div className={columnClass}>
-        {noBots && items.length > 0 && noBotsState}
-        <div role="status">
-          {notices.map((notice) => (
-            <p key={notice} className="mb-2 text-label text-ink-secondary">
-              {notice}
-            </p>
-          ))}
-        </div>
-        <RoomComposer
-          key={room.id}
-          room={room}
-          members={members.filter(({ archivedAt }) => !archivedAt)}
-          canSend={connected && members.length > 0}
-          chat={chat}
-        />
+            <MeetingRail meeting={meeting} chat={chat} connected={connected} />
+          </aside>
+        )}
       </div>
     </section>
   );
