@@ -5,10 +5,11 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { migrate, migrations } from "./store.ts";
+import { type EventStore, migrate, migrations, openEventStore } from "./store.ts";
 
 let dataDir: string;
 let db: DatabaseSync;
+let store: EventStore | undefined;
 
 beforeEach(() => {
   dataDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "beebot-team-"));
@@ -16,6 +17,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  store?.close();
+  store = undefined;
   db.close();
   NodeFS.rmSync(dataDir, { recursive: true, force: true });
 });
@@ -79,5 +82,54 @@ describe("the Phase 3 migrations", () => {
       { id: "t4" },
       { id: "t5" },
     ]);
+  });
+});
+
+describe("lineage and versioned edits", () => {
+  const open = () => (store = openEventStore(dataDir));
+  const newBot = (s: EventStore, extra: { parentBotId?: string; spawnKey?: string } = {}) =>
+    s.createBot({ name: "Ada", personality: "Kind", engineAccountId: "fake", ...extra });
+
+  it("bumps a bot's version on every edit and refuses a stale expected version", () => {
+    const s = open();
+    const bot = newBot(s);
+    expect(bot.version).toBe(1);
+    const fields = { ...bot, name: "Ada 2" };
+    expect(s.updateBot(bot.id, fields)).toMatchObject({ name: "Ada 2", version: 2 });
+    expect(s.updateBot(bot.id, { ...fields, name: "Stale" }, 1)).toBe("version_conflict");
+    expect(s.getBot(bot.id)).toMatchObject({ name: "Ada 2", version: 2 });
+    expect(s.updateBot(bot.id, { ...fields, name: "Fresh" }, 2)).toMatchObject({ version: 3 });
+  });
+
+  it("returns the same bot for a repeated spawn key", () => {
+    const s = open();
+    const first = newBot(s, { spawnKey: "k" });
+    const again = newBot(s, { spawnKey: "k" });
+    expect(again.id).toBe(first.id);
+    expect(s.botIds()).toHaveLength(1);
+  });
+
+  it("deleting a lead keeps its children, unparented, and drops its requests", () => {
+    const s = open();
+    const lead = newBot(s);
+    const child = newBot(s, { parentBotId: lead.id });
+    expect(s.childrenOf(lead.id)).toEqual([{ id: child.id, name: "Ada" }]);
+    expect(s.spawnedBotCount()).toBe(1);
+    db.prepare(
+      `INSERT INTO team_requests (id, kind, payload_json, requested_by_bot_id, run_id, status,
+         created_at) VALUES ('t1', 'update_bot', '{}', ?, 'run', 'pending', 'now'),
+         ('t2', 'archive_bot', '{}', ?, 'run', 'applied', 'now')`,
+    ).run(lead.id, lead.id);
+    const changed: unknown[] = [];
+    s.onEvent((event) => {
+      if (event.type === "team-request.changed") {
+        changed.push(event.request);
+      }
+    });
+    expect(s.deleteBot(lead.id)).toBe("deleted");
+    expect(s.getBot(child.id)?.parentBotId).toBeNull();
+    expect(s.spawnedBotCount()).toBe(0);
+    expect(rows("SELECT id FROM team_requests")).toEqual([]);
+    expect(changed).toMatchObject([{ id: "t1", status: "declined" }]);
   });
 });

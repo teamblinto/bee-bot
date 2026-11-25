@@ -26,6 +26,7 @@ import {
   Run,
   type RunReason,
   ServerEvent,
+  TeamRequest,
   WakeSource,
   UsageLimits,
   UsageWindow,
@@ -1338,8 +1339,16 @@ export function openEventStore(dataDir: string) {
   const insertBot = db.prepare(
     `INSERT INTO bots
      (id, name, personality, status, engine_account_id, model, access, avatar_seed, project_path,
-       created_at)
-     VALUES (?, ?, ?, 'ready', ?, ?, 'full', ?, ?, ?)`,
+       created_at, parent_bot_id, spawn_key)
+     VALUES (?, ?, ?, 'ready', ?, ?, 'full', ?, ?, ?, ?, ?)`,
+  );
+  const selectSpawned = db.prepare("SELECT id FROM bots WHERE spawn_key = ?");
+  const selectChildren = db.prepare(
+    "SELECT id, name FROM bots WHERE parent_bot_id = ? AND archived_at IS NULL ORDER BY rowid",
+  );
+  const selectAllChildren = db.prepare("SELECT id FROM bots WHERE parent_bot_id = ?");
+  const countSpawned = db.prepare(
+    "SELECT count(*) AS n FROM bots WHERE parent_bot_id IS NOT NULL AND archived_at IS NULL",
   );
   const insertRoom = db.prepare(
     "INSERT INTO rooms (id, default_bot_id, created_at) VALUES (?, ?, ?)",
@@ -1347,7 +1356,7 @@ export function openEventStore(dataDir: string) {
   const insertScope = db.prepare("INSERT INTO scopes (id, room_id, bot_id) VALUES (?, ?, ?)");
   const updateBotFields = db.prepare(
     `UPDATE bots SET name = ?, personality = ?, summary = ?, model = ?, effort = ?, avatar_seed = ?,
-       project_path = ? WHERE id = ?`,
+       project_path = ?, version = version + 1 WHERE id = ?`,
   );
   // Only for the personality it was written from: an edit while it was being written wins.
   const updateSummary = db.prepare(
@@ -1385,7 +1394,25 @@ export function openEventStore(dataDir: string) {
   const botRuns = "(SELECT id FROM runs WHERE bot_id = $bot)";
   const doomedTasks = `requester_bot_id = $bot OR owner_bot_id = $bot OR room_id = $dm
     OR parent_run_id IN ${botRuns}`;
+  const selectPendingRequestsBy = db.prepare(
+    `SELECT id, kind, payload_json AS payload, requested_by_bot_id AS requestedByBotId,
+       run_id AS runId, created_at AS createdAt
+     FROM team_requests WHERE requested_by_bot_id = ? AND status = 'pending'`,
+  );
+  const PendingRequestRow = TeamRequest.pick({
+    id: true,
+    kind: true,
+    requestedByBotId: true,
+    runId: true,
+    createdAt: true,
+  }).extend({
+    payload: z
+      .string()
+      .transform((json) => z.record(z.string(), z.unknown()).parse(JSON.parse(json))),
+  });
   const deleteBotRows = [
+    "UPDATE bots SET parent_bot_id = NULL WHERE parent_bot_id = $bot",
+    "DELETE FROM team_requests WHERE requested_by_bot_id = $bot",
     `DELETE FROM outbox WHERE run_id IN ${botRuns}`,
     `DELETE FROM external_effects WHERE run_id IN ${botRuns}`,
     `DELETE FROM approvals WHERE bot_id = $bot OR run_id IN ${botRuns}`,
@@ -2973,12 +3000,32 @@ export function openEventStore(dataDir: string) {
       model = defaultBotModel,
       avatarSeed = NodeCrypto.randomInt(maxAvatarSeed + 1),
       projectPath = null,
+      parentBotId = null,
+      spawnKey = null,
     }: Pick<Bot, "name" | "personality" | "engineAccountId"> &
-      Partial<Pick<Bot, "model" | "avatarSeed" | "projectPath">>) =>
+      Partial<Pick<Bot, "model" | "avatarSeed" | "projectPath" | "parentBotId">> & {
+        spawnKey?: string | null;
+      }) =>
       transaction(() => {
+        const spawned =
+          spawnKey === null ? undefined : IdRow.optional().parse(selectSpawned.get(spawnKey));
+        if (spawned) {
+          return BotRow.parse(selectBot.get(spawned.id));
+        }
         const [id, roomId] = [NodeCrypto.randomUUID(), NodeCrypto.randomUUID()];
         const now = new Date().toISOString();
-        insertBot.run(id, name, personality, engineAccountId, model, avatarSeed, projectPath, now);
+        insertBot.run(
+          id,
+          name,
+          personality,
+          engineAccountId,
+          model,
+          avatarSeed,
+          projectPath,
+          now,
+          parentBotId,
+          spawnKey,
+        );
         insertRoom.run(roomId, id, now);
         insertScope.run(NodeCrypto.randomUUID(), roomId, id);
         const bot = BotRow.parse(selectBot.get(id));
@@ -2989,10 +3036,14 @@ export function openEventStore(dataDir: string) {
     updateBot: (
       id: string,
       fields: Pick<Bot, "name" | "personality" | "model" | "effort" | "avatarSeed" | "projectPath">,
+      expectedVersion?: number,
     ) =>
       transaction(() => {
         const { name, personality, model, effort, avatarSeed, projectPath } = fields;
         const current = getBot(id);
+        if (current && expectedVersion !== undefined && current.version !== expectedVersion) {
+          return "version_conflict" as const;
+        }
         const moved = current?.projectPath !== projectPath;
         const summary = current?.personality === personality ? current.summary : null;
         updateBotFields.run(name, personality, summary, model, effort, avatarSeed, projectPath, id);
@@ -3063,10 +3114,23 @@ export function openEventStore(dataDir: string) {
           return "bot_busy";
         }
         const touched = z.array(IdRow).parse(selectBotRooms.all(ids));
+        const dropped = z.array(PendingRequestRow).parse(selectPendingRequestsBy.all(id));
+        const children = z.array(IdRow).parse(selectAllChildren.all(id));
         for (const statement of deleteBotRows) {
           statement.run(ids);
         }
         emit({ type: "bot.deleted", botId: id });
+        const decidedAt = new Date().toISOString();
+        for (const request of dropped) {
+          const declined = { ...request, status: "declined" as const, result: null, decidedAt };
+          emit({ type: "team-request.changed", request: declined });
+        }
+        for (const child of children) {
+          const bot = getBot(child.id);
+          if (bot) {
+            emit({ type: "bot.changed", bot });
+          }
+        }
         for (const { id: roomId } of touched) {
           const room = rooms.getRoom(roomId);
           if (room) {
@@ -3075,6 +3139,9 @@ export function openEventStore(dataDir: string) {
         }
         return "deleted";
       }),
+    childrenOf: (botId: string) =>
+      z.array(z.object({ id: z.string(), name: z.string() })).parse(selectChildren.all(botId)),
+    spawnedBotCount: () => z.object({ n: z.number() }).parse(countSpawned.get()).n,
     botAccess: (id: string) => getBot(id)?.access,
     botBusy: (id: string) => selectActiveRun.get(id) !== undefined,
     botIdle: (id: string) =>

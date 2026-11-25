@@ -1064,8 +1064,130 @@ export async function startServer({
     return { status: 200, body: { ok: true } };
   }
 
+  type CommandResult = { status: number; body: unknown };
+  const notFound = { status: 404, body: { code: "not_found" } };
+  type CreateBotInput = Omit<Extract<Command, { type: "create-bot" }>, "type"> & {
+    parentBotId?: string;
+    spawnKey?: string;
+    forceBox?: boolean;
+  };
+
+  function createBot(input: CreateBotInput): CommandResult {
+    const { name, personality, engineAccountId = "claude", parentBotId, spawnKey } = input;
+    const { model = defaultBotModel, avatarSeed, forceBox = false } = input;
+    if (engineAccountId === "fake" && !fakeEngine) {
+      return { status: 403, body: { code: "engine_not_allowed" } };
+    }
+    if (!modelsOf(engineAccountId).some(({ id }) => id === model)) {
+      return { status: 400, body: { code: "unknown_model" } };
+    }
+    if (forceBox && !boxesReady()) {
+      return { status: 409, body: { code: "boxes_unavailable" } };
+    }
+    const folder = projectChoice(input.projectPath, null);
+    if (folder.refused) {
+      return folder.refused;
+    }
+    const count = store.botIds().length;
+    const created = store.createBot({
+      name,
+      personality,
+      engineAccountId,
+      model,
+      projectPath: folder.projectPath,
+      ...(avatarSeed !== undefined && { avatarSeed }),
+      ...(parentBotId !== undefined && { parentBotId }),
+      ...(spawnKey !== undefined && { spawnKey }),
+    });
+    // A repeated spawn key returns the bot as it is now, owner changes included.
+    if (store.botIds().length === count) {
+      return { status: 200, body: created };
+    }
+    const bot =
+      serverMode || forceBox
+        ? (store.policy.setBotBoundary(created.id, "box") ?? created)
+        : created;
+    if (forceBox) {
+      boxes?.prepare(bot.id).catch((error: unknown) => {
+        console.error(`beebotd: box for ${bot.id} didn't come up: ${(error as Error)?.message}`);
+      });
+    }
+    writeSummary(bot.id);
+    trackUsage(botCreated(bot, count === 0));
+    return { status: 200, body: bot };
+  }
+
+  function updateBot(
+    input: Omit<Extract<Command, { type: "update-bot" }>, "type"> & { expectedVersion?: number },
+  ): CommandResult {
+    const { botId, name, personality, expectedVersion } = input;
+    const current = store.getBot(botId);
+    if (!current) {
+      return notFound;
+    }
+    const choice = engineChoice(current, input);
+    if (choice.refused) {
+      return choice.refused;
+    }
+    const folder = projectChoice(input.projectPath, current.projectPath);
+    if (folder.refused) {
+      return folder.refused;
+    }
+    const { projectPath } = folder;
+    if (projectPath !== current.projectPath && store.botBusy(botId)) {
+      return { status: 409, body: { code: "bot_busy" } };
+    }
+    const { model, effort } = choice;
+    const { avatarSeed = current.avatarSeed } = input;
+    const fields = { name, personality, model, effort, avatarSeed, projectPath };
+    const bot = store.updateBot(botId, fields, expectedVersion);
+    if (bot === "version_conflict") {
+      return { status: 409, body: { code: bot } };
+    }
+    writeSummary(botId);
+    return { status: 200, body: bot };
+  }
+
+  function archiveBot(botId: string): CommandResult {
+    if (!store.getBot(botId)) {
+      return notFound;
+    }
+    supervisor.stopBot(botId);
+    const bot = store.archiveBot(botId);
+    const box = store.boxes.listBoxes().find((row) => row.botId === botId);
+    if (box?.state === "running" || box?.state === "starting") {
+      boxes?.runtime.stop(botId).catch((error: unknown) => {
+        console.error(`beebotd: box for ${botId} didn't stop: ${(error as Error)?.message}`);
+      });
+    }
+    return { status: 200, body: bot };
+  }
+
+  function createRoom(
+    input: Omit<Extract<Command, { type: "create-room" }>, "type">,
+  ): CommandResult {
+    const { name, memberIds, defaultBotId = null } = input;
+    const members = memberIds.map((botId) => store.getBot(botId));
+    if (!members.every(Boolean)) {
+      return notFound;
+    }
+    if (members.some((bot) => bot?.archivedAt)) {
+      return { status: 409, body: { code: "bot_archived" } };
+    }
+    const room = store.rooms.createGroupRoom({ name, memberIds, defaultBotId });
+    return room ? { status: 200, body: room } : { status: 400, body: { code: "not_member" } };
+  }
+
+  function addRoomMember(roomId: string, botId: string): CommandResult {
+    const bot = store.getBot(botId);
+    if (bot?.archivedAt) {
+      return { status: 409, body: { code: "bot_archived" } };
+    }
+    const room = bot ? store.rooms.addMember(roomId, botId) : undefined;
+    return room ? { status: 200, body: room } : notFound;
+  }
+
   function runCommand(command: Command) {
-    const notFound = { status: 404, body: { code: "not_found" } };
     const ok = { status: 200, body: { ok: true } };
     // Server mode: Claude's subscription is the box's own login, so Bee Bot never also holds a key.
     const credentialConflict = { status: 409, body: { code: "credential_conflict" } };
@@ -1076,60 +1198,10 @@ export async function startServer({
     // be held by something other than the owner's own clients.
     const attended = subscribers.size > 0;
     switch (command.type) {
-      case "create-bot": {
-        const { name, personality, engineAccountId = "claude" } = command;
-        const { model = defaultBotModel, avatarSeed } = command;
-        if (engineAccountId === "fake" && !fakeEngine) {
-          return { status: 403, body: { code: "engine_not_allowed" } };
-        }
-        if (!modelsOf(engineAccountId).some(({ id }) => id === model)) {
-          return { status: 400, body: { code: "unknown_model" } };
-        }
-        const folder = projectChoice(command.projectPath, null);
-        if (folder.refused) {
-          return folder.refused;
-        }
-        const first = store.botIds().length === 0;
-        const created = store.createBot({
-          name,
-          personality,
-          engineAccountId,
-          model,
-          projectPath: folder.projectPath,
-          ...(avatarSeed !== undefined && { avatarSeed }),
-        });
-        const bot = serverMode
-          ? (store.policy.setBotBoundary(created.id, "box") ?? created)
-          : created;
-        writeSummary(bot.id);
-        trackUsage(botCreated(bot, first));
-        return { status: 200, body: bot };
-      }
-      case "update-bot": {
-        const { botId, name, personality } = command;
-        const current = store.getBot(botId);
-        if (!current) {
-          return notFound;
-        }
-        const choice = engineChoice(current, command);
-        if (choice.refused) {
-          return choice.refused;
-        }
-        const folder = projectChoice(command.projectPath, current.projectPath);
-        if (folder.refused) {
-          return folder.refused;
-        }
-        const { projectPath } = folder;
-        if (projectPath !== current.projectPath && store.botBusy(botId)) {
-          return { status: 409, body: { code: "bot_busy" } };
-        }
-        const { model, effort } = choice;
-        const { avatarSeed = current.avatarSeed } = command;
-        const fields = { name, personality, model, effort, avatarSeed, projectPath };
-        const bot = store.updateBot(botId, fields);
-        writeSummary(botId);
-        return { status: 200, body: bot };
-      }
+      case "create-bot":
+        return createBot(command);
+      case "update-bot":
+        return updateBot(command);
       case "set-bot-engine": {
         const current = store.getBot(command.botId);
         if (!current) {
@@ -1190,18 +1262,8 @@ export async function startServer({
           body: { code: result === "conflict" ? "message_id_reused" : result },
         };
       }
-      case "create-room": {
-        const { name, memberIds, defaultBotId = null } = command;
-        const members = memberIds.map((botId) => store.getBot(botId));
-        if (!members.every(Boolean)) {
-          return notFound;
-        }
-        if (members.some((bot) => bot?.archivedAt)) {
-          return { status: 409, body: { code: "bot_archived" } };
-        }
-        const room = store.rooms.createGroupRoom({ name, memberIds, defaultBotId });
-        return room ? { status: 200, body: room } : { status: 400, body: { code: "not_member" } };
-      }
+      case "create-room":
+        return createRoom(command);
       case "update-room": {
         const { roomId, name, defaultBotId } = command;
         const room = store.rooms.updateGroupRoom(roomId, {
@@ -1215,14 +1277,8 @@ export async function startServer({
           ? { status: 400, body: { code: room } }
           : { status: 200, body: room };
       }
-      case "add-room-member": {
-        const bot = store.getBot(command.botId);
-        if (bot?.archivedAt) {
-          return { status: 409, body: { code: "bot_archived" } };
-        }
-        const room = bot ? store.rooms.addMember(command.roomId, command.botId) : undefined;
-        return room ? { status: 200, body: room } : notFound;
-      }
+      case "add-room-member":
+        return addRoomMember(command.roomId, command.botId);
       case "remove-room-member": {
         const room = store.rooms.removeMember(command.roomId, command.botId);
         return room ? { status: 200, body: room } : notFound;
@@ -1230,21 +1286,8 @@ export async function startServer({
       case "stop-bot":
         supervisor.stopBot(command.botId);
         return ok;
-      case "archive-bot": {
-        const { botId } = command;
-        if (!store.getBot(botId)) {
-          return notFound;
-        }
-        supervisor.stopBot(botId);
-        const bot = store.archiveBot(botId);
-        const box = store.boxes.listBoxes().find((row) => row.botId === botId);
-        if (box?.state === "running" || box?.state === "starting") {
-          boxes?.runtime.stop(botId).catch((error: unknown) => {
-            console.error(`beebotd: box for ${botId} didn't stop: ${(error as Error)?.message}`);
-          });
-        }
-        return { status: 200, body: bot };
-      }
+      case "archive-bot":
+        return archiveBot(command.botId);
       case "delete-bot": {
         const dmRoomId = store.getBot(command.botId)?.roomId ?? "";
         const result = store.deleteBot(command.botId);
