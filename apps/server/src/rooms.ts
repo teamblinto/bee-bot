@@ -195,26 +195,14 @@ export function openRooms(
         return changed(id);
       }),
 
-    // A missing field keeps its value. The default must be a member.
-    updateGroupRoom: (roomId: string, input: { name?: string; defaultBotId?: string | null }) =>
-      transaction(() => {
-        const room = groupRoom(roomId);
-        if (!room) {
-          return "not_found";
-        }
-        const { name = room.name, defaultBotId = room.defaultBotId } = input;
-        if (defaultBotId !== null && !room.members.includes(defaultBotId)) {
-          return "not_member";
-        }
-        updateRoom.run(name, defaultBotId, roomId);
-        return changed(roomId);
-      }),
-
-    // A mode is checked only when this call sets it, so a room whose lead or default left can
-    // still take other edits. Limits keep only the keys sent.
-    setRoomSettings: (
+    // A missing field keeps its value, and a refused update changes nothing. The default must be
+    // a member. A mode is checked only when this call sets it, so a room whose lead or default
+    // left can still take other edits. Limits keep only the keys sent.
+    updateGroupRoom: (
       roomId: string,
       input: {
+        name?: string | undefined;
+        defaultBotId?: string | null | undefined;
         responderMode?: ResponderMode | undefined;
         leadBotId?: string | null | undefined;
         bulletin?: string | undefined;
@@ -227,12 +215,15 @@ export function openRooms(
           return "not_found";
         }
         const {
+          name = room.name,
+          defaultBotId = room.defaultBotId,
           responderMode = room.responderMode,
           leadBotId = room.leadBotId,
           bulletin = room.bulletin,
         } = input;
         const sent = input.responderMode;
         if (
+          (defaultBotId !== null && !room.members.includes(defaultBotId)) ||
           (leadBotId !== null && !room.members.includes(leadBotId)) ||
           (sent === "lead" && leadBotId === null)
         ) {
@@ -241,7 +232,7 @@ export function openRooms(
         if (sent === "everyone_optional" && room.members.length > everyoneOptionalCap) {
           return "too_many_members";
         }
-        if (sent === "default" && room.defaultBotId === null) {
+        if (sent === "default" && defaultBotId === null) {
           return "default_bot_required";
         }
         const sentLimits = input.limits;
@@ -252,6 +243,7 @@ export function openRooms(
               ),
             )
           : room.limits;
+        updateRoom.run(name, defaultBotId, roomId);
         updateSettings.run(responderMode, leadBotId, bulletin, JSON.stringify(limits), roomId);
         return changed(roomId);
       }),

@@ -486,6 +486,22 @@ describe("room settings", () => {
     });
   });
 
+  it("changes nothing when any part of an update is refused", async () => {
+    const { createBot, createRoom, command, store } = await boot();
+    const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];
+    const room = await createRoom([ada, ben]);
+    const refused = await command({
+      type: "update-room",
+      roomId: room.id,
+      name: "Renamed",
+      defaultBotId: ada.id,
+      responderMode: "lead",
+      leadBotId: null,
+    });
+    expect(refused.status).toBe(400);
+    expect(store.rooms.getRoom(room.id)).toMatchObject({ name: room.name, defaultBotId: null });
+  });
+
   it("clears the lead when it leaves the room", async () => {
     const { createBot, createRoom, command, send, engine, expectTurns } = await boot();
     const [ada, ben] = [await createBot("Ada"), await createBot("Ben")];

@@ -841,7 +841,7 @@ describe("team requests", () => {
           const others = ["B", "C", "D", "E", "F"].map((name) => stranger(s, name).id);
           roomId =
             s.rooms.createGroupRoom({ name: "Six", memberIds: [leadId, ...others] })?.id ?? "";
-          s.rooms.setRoomSettings(roomId, { responderMode: "everyone_optional" });
+          s.rooms.updateGroupRoom(roomId, { responderMode: "everyone_optional" });
         },
       },
     );

@@ -1276,13 +1276,8 @@ export async function startServer({
       case "create-room":
         return createRoom(command);
       case "update-room": {
-        const { roomId, name, defaultBotId, type: _, ...settings } = command;
-        const renamed = store.rooms.updateGroupRoom(roomId, {
-          ...(name !== undefined && { name }),
-          ...(defaultBotId !== undefined && { defaultBotId }),
-        });
-        const room =
-          typeof renamed === "string" ? renamed : store.rooms.setRoomSettings(roomId, settings);
+        const { roomId, type: _, ...changes } = command;
+        const room = store.rooms.updateGroupRoom(roomId, changes);
         if (room === "not_found") {
           return notFound;
         }
