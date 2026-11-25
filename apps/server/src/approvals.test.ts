@@ -1906,6 +1906,34 @@ describe("in Box mode a tool call", () => {
       expect(store.rooms.getRoom(room?.id ?? "")?.held).toBe("ring");
     });
 
+    it("waits for the handing-back turn to end before it resumes the task", async () => {
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const slow: RunTurn = async (input) => {
+        const outcome = await tainting(input);
+        if (outcome.kind === "waiting") {
+          await held;
+        }
+        return outcome;
+      };
+      const { delegate, task, toAda, waiting, answer, lastRun } = await delegated(true, {
+        runTurn: slow,
+      });
+      cleanups.push(release);
+      const id = delegate("/approve Bash echo hi");
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      expect(lastRun()?.status).toBe("Running");
+      expect((await answer(card, "approve")).status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(task(id)?.status).toBe("needs_input");
+      release();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("done"));
+      expect(toAda()).toEqual([line, expect.stringMatching(/^Test engine reply: /)]);
+    });
+
     it("fails the reopened task when the resume itself throws", async () => {
       const { store, delegate, task, waiting, answer } = await delegated();
       const id = delegate("/approve Bash echo hi");

@@ -89,9 +89,14 @@ export function openContinuations(db: DatabaseSync, { transaction, emit }: Store
   const selectWaiting = db.prepare(
     `SELECT ${columns} FROM continuations WHERE status = 'waiting' ORDER BY rowid`,
   );
+  // Not before the asking run's turn has ended, or settling that turn would close what the
+  // outcome reopens.
   const selectUnresumed = db.prepare(
     `SELECT ${columns} FROM continuations WHERE resumed_at IS NULL
-     AND status IN ('denied', 'expired', 'succeeded', 'failed', 'unknown') ORDER BY rowid`,
+     AND status IN ('denied', 'expired', 'succeeded', 'failed', 'unknown')
+     AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = continuations.run_id
+       AND r.status IN ('Queued', 'Running'))
+     ORDER BY rowid`,
   );
   const selectTarget = db.prepare(
     `SELECT s.id AS scopeId, s.room_id AS roomId, w.attended,
