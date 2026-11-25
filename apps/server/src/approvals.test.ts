@@ -1867,6 +1867,19 @@ describe("in Box mode a tool call", () => {
       expect(ran).toHaveLength(1);
     });
 
+    it("fails the reopened task when the resume itself throws", async () => {
+      const { store, delegate, task, waiting, answer } = await delegated();
+      const id = delegate("/approve Bash echo hi");
+      const card = await waiting();
+      await vi.waitFor(() => expect(task(id)?.status).toBe("needs_input"));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(store, "sendMessage").mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      await answer(card, "approve");
+      await vi.waitFor(() => expect(task(id)?.status).toBe("failed"));
+    });
+
     it("opens nothing else for the bot while it waits on the owner", async () => {
       const { delegate, task, waiting, answer } = await delegated();
       const first = delegate("/approve Bash echo hi");

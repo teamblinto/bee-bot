@@ -194,9 +194,10 @@ export function createSupervisor({
   // saved session with it. The fixed message ID makes a repeat after a crash a no-op.
   function deliverOutcomes() {
     for (const row of store.continuations.unresumedContinuations()) {
+      let reopened: ReturnType<typeof store.tasks.reopenHandedBack> | undefined;
       try {
         const target = store.continuations.deliveryTarget(row.id);
-        const reopened = store.tasks.reopenHandedBack(row.id);
+        reopened = store.tasks.reopenHandedBack(row.id);
         const sent =
           target &&
           store.sendMessage(
@@ -218,6 +219,9 @@ export function createSupervisor({
         store.continuations.markResumed(row.id);
       } catch (error) {
         console.error(`beebotd: outcome of ${row.id} failed`, error);
+        if (reopened) {
+          store.tasks.failReopened(reopened.id);
+        }
       }
     }
   }
